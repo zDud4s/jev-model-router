@@ -229,6 +229,15 @@ def create_app(
         # rather than inferred from a gap in the table.
         stream_skip = _skip(active_verifier, config, tier_name, SkipReason.STREAMING)
 
+        # Known before the call, so both paths send them. The streaming path
+        # used to send only X-Request-Id: found on the first remote stream, where
+        # a client had no way to learn which tier had answered it.
+        headers = {"X-Request-Id": request_id, "X-Router-Tier": tier_name}
+        if decision.score is not None:
+            headers["X-Router-Score"] = f"{decision.score:.4f}"
+            if decision.model:
+                headers["X-Router-Model"] = decision.model
+
         if request.stream:
             events = backend.stream(request)
             try:
@@ -279,7 +288,11 @@ def create_app(
             return StreamingResponse(
                 body(),
                 media_type="text/event-stream",
-                headers={"Cache-Control": "no-cache", "X-Request-Id": request_id},
+                headers={
+                    **headers,
+                    "Cache-Control": "no-cache",
+                    **({"X-Router-Verdict": stream_skip.verdict.value} if stream_skip else {}),
+                },
             )
 
         try:
@@ -308,11 +321,6 @@ def create_app(
         # --- verify -----------------------------------------------------------
         body = result.body
         verification: VerificationOutcome | None = None
-        headers = {"X-Request-Id": request_id, "X-Router-Tier": tier_name}
-        if decision.score is not None:
-            headers["X-Router-Score"] = f"{decision.score:.4f}"
-            if decision.model:
-                headers["X-Router-Model"] = decision.model
         if active_verifier is not None:
             verification = await active_verifier.check(
                 request,

@@ -45,10 +45,17 @@ class Prices:
         unknown = set(raw) - {"input", "output", "cache_read", "cache_write"}
         if unknown:
             raise ConfigError(f"unknown price fields: {sorted(unknown)}")
+        input_price = float(raw.get("input", 0.0))
         return cls(
-            input=float(raw.get("input", 0.0)),
+            input=input_price,
             output=float(raw.get("output", 0.0)),
-            cache_read=float(raw.get("cache_read", 0.0)),
+            # Omitted means "I did not say", not "free". It used to default to
+            # 0, and the first remote provider (OpenRouter) reported every
+            # prompt token of a repeated question as cached -- so a tier priced
+            # on input cost nothing for its input, and every counterfactual
+            # against it shrank. The input rate never flatters a saving; a
+            # cache discount has to be written down to be claimed.
+            cache_read=float(raw.get("cache_read", input_price)),
             cache_write=float(raw.get("cache_write", 0.0)),
             configured=True,
         )
@@ -145,17 +152,21 @@ class VerificationConfig:
     # expensive call in the system.
     max_transcript_chars: int = 12000
     max_answer_chars: int = 8000
-    # The verdict is one line plus a reason, and for a model that answers
-    # directly 200 is ample: measured at 6 tokens. A THINKING model spends this
-    # budget reasoning before it writes a word, and at 200 it returned no
-    # verdict at all, every time. Two ways out, and both were measured on
-    # qwen3.5:4b: `extra_body: {think: false}` on the verifier tier (6 tokens,
-    # ~2s, but it waved through 17 * 23 = 401 -- without reasoning it cannot
-    # check a computation), or thinking on with ~3000 here (caught it, at
-    # 490-1054 tokens and 21-56s a verdict). The second multiplies the review's
-    # output cost by two orders of magnitude, which is the price of a judge that
-    # can do arithmetic.
-    max_verdict_tokens: int = 200
+    # A ceiling, not a spend: a judge that answers directly stops by itself at
+    # 6-26 tokens whatever this says. It only binds on a THINKING judge, which
+    # spends it reasoning before it writes a word -- and a judge cut off there
+    # gives no verdict, which `on_unparseable: accept` turns into a pass the
+    # judge never made. So the ceiling is set for the thinking judge.
+    #
+    # Measured 2026-09-19. qwen3.5:4b (local): at 200, no verdict at all, every
+    # time; with thinking on it needed 490-1054. deepseek-v4-flash (remote, via
+    # OpenRouter): at 200, 10/10 planted cases right but one real answer cut
+    # off unjudged; at 1024 every verdict finished, in 54-183. With reasoning
+    # switched off both models answer in ~6 tokens and both waved a wrong
+    # answer through (17 * 23 = 401 on one, "strawberry has two r's" on the
+    # other) -- a judge that cannot think cannot check. 1024 at the remote
+    # model's list price ($0.08/M out) is under a hundredth of a cent a review.
+    max_verdict_tokens: int = 1024
     # Override the reviewer instructions. None uses the built-in prompt.
     system_prompt: str | None = None
 
@@ -376,7 +387,7 @@ def _parse_verification(
         on_verifier_error=str(raw.get("on_verifier_error", "accept")),
         max_transcript_chars=int(raw.get("max_transcript_chars", 12000)),
         max_answer_chars=int(raw.get("max_answer_chars", 8000)),
-        max_verdict_tokens=int(raw.get("max_verdict_tokens", 200)),
+        max_verdict_tokens=int(raw.get("max_verdict_tokens", 1024)),
         system_prompt=raw.get("system_prompt"),
     )
 

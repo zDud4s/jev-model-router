@@ -69,7 +69,11 @@ tiers:
     api_key_env: LLM_ROUTER_MID_KEY
     context_window: 200000
     supports_tools: true
-    prices:            # USD per 1M tokens; every field optional
+    # USD per 1M tokens; every field optional. An omitted cache_read is billed
+    # at the input rate, not at zero: providers report cached tokens whether or
+    # not you priced them (OpenRouter marked a whole repeated prompt cached),
+    # and a discount you did not write down is not one the report may claim.
+    prices:
       input: 3.00
       output: 15.00
       cache_read: 0.30
@@ -122,13 +126,16 @@ verification:
   max_transcript_chars: 12000
   max_answer_chars: 8000
 
-  # Enough for a verdict from a model that answers directly (measured: 6
-  # tokens). NOT enough for a thinking model, which spends the whole budget
-  # reasoning and returns no verdict -- every one then lands on on_unparseable.
-  # For a thinking verifier either add `extra_body: {think: false}` to its tier
-  # (fast, but it stops checking computations: a 4B judge passed 17*23 = 401)
-  # or raise this to ~3000 (it caught that, at 500-1000 output tokens a review).
-  max_verdict_tokens: 200
+  # A ceiling, not a spend: a judge that answers directly stops by itself at
+  # 6-26 tokens. It binds only on a THINKING judge, which reasons before it
+  # writes the verdict; cut off, it gives none, and on_unparseable: accept
+  # turns that into a pass nobody made. Measured: deepseek-v4-flash via
+  # OpenRouter finished every verdict in 54-183 at 1024, and lost one at 200;
+  # a local qwen3.5:4b needed 490-1054. Turning reasoning off instead
+  # (Ollama: extra_body {think: false}; OpenRouter: {reasoning: {enabled:
+  # false}}) is ~6 tokens a verdict and both judges then passed a wrong answer
+  # they caught with reasoning on.
+  max_verdict_tokens: 1024
 
   # Optional. Replaces the built-in reviewer instructions wholesale. Whatever
   # you write must still ask for a line of the form `VERDICT: PASS` or

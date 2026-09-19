@@ -62,8 +62,8 @@ tiers:
     api_key_env: LLM_ROUTER_TOP_KEY       # read at call time; no credential in this file
     context_window: 200000
     supports_tools: true
-    prices:                               # USD per 1M tokens, every field optional
-      input: 15.00
+    prices:                               # USD per 1M tokens, every field optional;
+      input: 15.00                        # an omitted cache_read bills at `input`
       output: 75.00
       cache_read: 1.50
       cache_write: 18.75
@@ -451,14 +451,64 @@ So the load-bearing assumption held, with conditions attached: a real model does
 parseable verdict, *if* the verdict budget fits the way the model answers, and a cheap judge's
 verdicts are only as good as the checking it can afford to do.
 
+## The first remote strong tier
+
+Then a real remote judge: `deepseek/deepseek-v4-flash-0731` through OpenRouter, on the
+`openai_compatible` backend, answering as `strong` and reviewing the local `qwen3.5:4b`. It
+was the `:free` route, so nothing was billed; the tier carried the paid route's list price
+($0.04 in / $0.08 out per 1M) so the counterfactual columns had something real to say.
+
+The protocol held — a plain completion, a stream, a verified request and an escalation all
+went through first time, and streamed usage arrived and was logged. It broke in three smaller
+places:
+
+1. **An unpriced cache read was free.** OpenRouter reported every prompt token of a repeated
+   question as cached. `cache_read` defaulted to 0, so a tier priced on input charged nothing
+   for its input and every counterfactual against it shrank — a saving invented by an omitted
+   field. An omitted `cache_read` now bills at the input rate; a discount has to be written
+   down to be claimed.
+2. **The truncation hint named the wrong backend's knob.** A thinking judge that ran out of
+   `max_verdict_tokens` was told to set `think: false` — Ollama's option, which OpenRouter
+   never reads. The hint now names the knob of the verifier tier's own backend.
+3. **A stream did not say which tier answered it.** `X-Router-Tier` and the score headers
+   went out on plain responses only; a streaming client could not learn where its answer came
+   from. Both paths send them now, and a stream also says `X-Router-Verdict: skipped`.
+
+And the judge, on the same ten planted answers plus one real answer from `qwen3.5:4b`:
+
+| remote judge setup | planted verdicts right | tokens per verdict | the real answer |
+|---|---|---|---|
+| reasoning on, `max_verdict_tokens: 200` | 10 of 10 | 33–200 | cut off unjudged, **accepted** |
+| reasoning off, `max_verdict_tokens: 200` | 9 of 10 | 6–26 | judged |
+| reasoning on, `max_verdict_tokens: 1024` (hardest cases) | 2 of 2 | 54–183 | judged, correctly `fail` |
+
+The first row is the dangerous one. Ten out of ten looks like a finished judge, but the one
+real answer — longer, with markdown in it — ran the judge out of budget before it wrote a
+verdict, and `on_unparseable: accept` passed it. That run happened to be correct; the next run
+of the same question, the cheap model claimed Australia has no single official capital, and
+at 200 tokens nothing would have caught it. Reasoning off repeats the local lesson with a
+different victim: it caught `401` this time and passed *"strawberry has two r's"*. A judge
+that cannot think cannot count.
+
+So `max_verdict_tokens` now defaults to **1024**. For a judge that answers directly it changes
+nothing — it stops at 6–26 tokens by itself — and for a thinking one it is the difference
+between a verdict and a silent pass. At this model's list price it is under a hundredth of a
+cent a review.
+
 ### Still not tested
 
-- **A paid strong tier.** The judge above was the cheap model reviewing under a different tier
-  name, with invented prices. No `openai_compatible` backend has been called; the economics
-  in this README are all from fake backends.
+- **Billing against a real invoice.** The remote tier was the free route, so its cost column
+  is the list price times reported tokens, never checked against what a provider actually
+  charged. OpenRouter returns its own `usage.cost` on paid routes; comparing the two over a
+  day of traffic is the check.
 - **The classifier on real traffic.** Its report above comes from a planted, perfectly
   separable signal. It has never been trained on verdicts from real requests, and the number
-  that comes back from real prompts will be lower — that is the number worth having.
+  that comes back from real prompts will be lower — that is the number worth having. What
+  stopped it here was volume, not code: `train` refuses under 40 labelled rows, and a
+  free-tier OpenRouter key gives 50 requests a day across every free model, most of which
+  went on the measurements above. The remote judge is now known to work, so the remaining
+  step is traffic: `verification.sample_rate: 1.0`, `log.store_prompts: true`, a few hundred
+  real requests, then `llm-router train`.
 - **Somebody else's transcripts.** The labels here come from this router's own log, so every
   row is a genuine request. Training on other transcripts is a different job with its own trap:
   they are full of tool results, system notices and attachment placeholders that are not

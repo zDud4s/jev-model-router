@@ -39,7 +39,7 @@ from enum import Enum
 from typing import Any, Callable, Mapping
 
 from .backends.base import Backend
-from .config import Config, VerificationConfig
+from .config import Config, TierConfig, VerificationConfig
 from .eligibility import check_tier
 from .pricing import cost_usd
 from .schemas import ChatCompletionRequest, Usage
@@ -328,8 +328,10 @@ class Verifier:
                 cause = (
                     f"; the verifier stopped at max_verdict_tokens "
                     f"({settings.max_verdict_tokens}) before giving one -- a thinking "
-                    "model spends that budget reasoning: set extra_body think: false "
-                    "on the verifier tier, or raise max_verdict_tokens"
+                    "model spends that budget reasoning: raise max_verdict_tokens, "
+                    f"or {_reasoning_off_hint(self._config.tier(verifier_name))} "
+                    "(cheaper, but a judge that cannot reason misses what it would "
+                    "have to compute)"
                 )
             outcome.reason = (
                 f"unparseable verdict{cause}; on_unparseable={settings.on_unparseable}"
@@ -401,6 +403,23 @@ class Verifier:
         outcome.escalation_usage = result.usage
         outcome.escalation_cost_usd = cost_usd(self._config.tier(target).prices, result.usage)
         outcome.body = result.body
+
+
+def _reasoning_off_hint(tier: TierConfig) -> str:
+    """The knob that turns reasoning off, in the verifier's own backend's terms.
+
+    This used to name Ollama's `think: false` whatever the backend was, and the
+    first remote judge -- an openai_compatible tier on OpenRouter -- ran out of
+    budget and was told to set an option its provider does not read.
+    """
+    if tier.backend == "ollama":
+        return f"set extra_body {{think: false}} on tier {tier.name!r}"
+    # No standard: OpenRouter reads `reasoning`, OpenAI `reasoning_effort`.
+    return (
+        f"turn reasoning off in tier {tier.name!r}'s extra_body with your provider's "
+        "knob (OpenRouter: {reasoning: {enabled: false}}; OpenAI: "
+        "{reasoning_effort: minimal})"
+    )
 
 
 def _note(existing: str | None, addition: str) -> str:

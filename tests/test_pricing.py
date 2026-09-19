@@ -31,6 +31,21 @@ def test_cached_tokens_replace_input_tokens_rather_than_adding_to_them() -> None
     assert cost_usd(prices, usage) == round(1.0 + 0.9, 10)
 
 
+def test_an_unpriced_cache_read_costs_the_input_rate_not_nothing() -> None:
+    # Measured on OpenRouter: a repeated question came back with every prompt
+    # token reported as cached. With cache_read defaulting to 0, a tier priced
+    # only on input and output charged nothing for its input at all.
+    prices = Prices.parse({"input": 10.0, "output": 0.0})
+    usage = Usage(prompt_tokens=1_000_000, cached_tokens=1_000_000)
+
+    assert cost_usd(prices, usage) == 10.0
+
+
+def test_a_cache_discount_is_claimed_only_when_written_down() -> None:
+    assert Prices.parse({"input": 10.0, "cache_read": 0.0}).cache_read == 0.0
+    assert Prices.parse({"input": 10.0, "cache_read": 1.0}).cache_read == 1.0
+
+
 def test_cache_writes_are_billed_on_top() -> None:
     prices = Prices(input=0.0, output=0.0, cache_write=10.0, configured=True)
 

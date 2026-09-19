@@ -82,6 +82,20 @@ def test_a_streamed_completion_is_a_well_formed_sse_sequence(client) -> None:
     assert chunks[-1]["choices"][0]["finish_reason"] == "stop"
 
 
+def test_a_stream_says_which_tier_answered_it(client) -> None:
+    # Found on the first stream from a real remote provider: the non-streaming
+    # path sent X-Router-Tier and the streaming path did not, so a streaming
+    # client could not learn which tier had answered. The tier is decided before
+    # the first byte, so nothing stops a stream from saying it.
+    response = client.post(
+        "/v1/chat/completions",
+        json={"model": "top", "messages": [{"role": "user", "content": "hi"}], "stream": True},
+    )
+
+    assert response.headers["X-Router-Tier"] == "top"
+    assert "X-Request-Id" in response.headers
+
+
 def test_the_request_goes_to_the_default_tier(client, fake_backends) -> None:
     client.post("/v1/chat/completions", json={"model": "auto", "messages": [{"role": "user", "content": "hi"}]})
 

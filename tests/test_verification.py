@@ -453,6 +453,9 @@ def test_a_stream_is_never_verified_and_the_skip_is_recorded() -> None:
     assert check["verdict"] == "skipped"
     assert check["reason"] == "streaming"
     assert backends["top"].calls == []
+    # And the client is told as much, rather than left to read a missing
+    # header as "nothing to report".
+    assert response.headers["X-Router-Verdict"] == "skipped"
 
 
 def test_the_verifier_is_never_asked_to_review_its_own_answer() -> None:
@@ -763,4 +766,34 @@ def test_a_verifier_that_ran_out_of_tokens_is_named_as_such() -> None:
 
     assert check["unparseable"] == 1
     assert "max_verdict_tokens" in check["reason"]
-    assert "200" in check["reason"]
+    assert str(verifying().verification.max_verdict_tokens) in check["reason"]
+
+
+def test_the_reasoning_hint_names_the_verifier_backends_own_knob() -> None:
+    # Measured 2026-09-19: the first remote judge (openai_compatible, on
+    # OpenRouter) ran out of budget and the reason told the operator to set
+    # `think: false` -- an Ollama option its provider never reads.
+    def reason_with(verifier: str) -> str:
+        log = RequestLog(":memory:")
+        config = parse_config(
+            {**BASE_CONFIG, "verification": {"enabled": True, "verifier_tier": verifier,
+                                             "verify_tiers": ["mid"]}}
+        )
+
+        def factory(tier):
+            if tier.name == verifier:
+                return TruncatedBackend(tier, replies=["Let me think about whether"])
+            return ScriptedBackend(tier, replies=["4"])
+
+        with TestClient(create_app(config, backend_factory=factory, log=log)) as client:
+            post(client, model="mid")
+            return verification_row(log)["reason"]
+
+    remote = reason_with("top")
+    assert "think: false" not in remote
+    assert "reasoning" in remote
+    assert "'top'" in remote
+
+    local = reason_with("cheap")
+    assert "think: false" in local
+    assert "'cheap'" in local
