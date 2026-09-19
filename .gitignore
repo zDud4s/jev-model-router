@@ -11,3 +11,4 @@ dist/
 *.db-shm
 config.yaml
 .env
+classifier.json

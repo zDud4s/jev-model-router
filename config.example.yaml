@@ -14,12 +14,40 @@ log:
   store_prompts: false
 
 router:
-  kind: static          # the only implementation today; the classifier lands here later
+  kind: static          # static | classifier
   default_tier: cheap
   # Optional: let a client that hardcodes a vendor model string pick a tier.
   model_map:
     gpt-4o: top
     gpt-4o-mini: cheap
+
+  # --- kind: classifier -----------------------------------------------------
+  # A learned router. It reads the prompt and predicts whether `default_tier`'s
+  # answer would survive review; above `threshold` the request goes straight to
+  # `strong_tier` and no cheap answer is produced at all.
+  #
+  # The model is not bundled and cannot be. Its labels come from the
+  # verification loop below, so the order is: verification on at sample_rate
+  # 1.0, real traffic, then `llm-router train`. With `kind: classifier` and no
+  # readable model file the proxy refuses to start, rather than quietly serving
+  # every request from default_tier and looking identical to a working router
+  # in every report it produces.
+  #
+  # strong_tier: top
+  # model_path: ./classifier.json
+  # threshold: 0.5        # omit to use the threshold the model was trained with
+  #
+  # Fraction of would-be escalations sent to default_tier anyway, so they get
+  # answered and reviewed. Without it the model destroys the evidence that
+  # would test it: every prompt it scores high skips the cheap tier, is never
+  # verified, and never becomes a label, so the NEXT model is fitted only on
+  # prompts this one already believed were easy. Those explored rows are the
+  # only ones that can ever contradict it.
+  #
+  # Note that this knob and verification.sample_rate MULTIPLY: explore_rate 0.10
+  # with sample_rate 0.25 labels 2.5% of would-be escalations, not 10%.
+  #
+  # explore_rate: 0.05
 
 tiers:
   # A local model. No prices, so it costs zero -- that is the correct answer,

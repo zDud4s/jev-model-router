@@ -103,3 +103,43 @@ def test_yaml_round_trip(tmp_path) -> None:
     path.write_text(yaml.safe_dump(BASE_CONFIG), encoding="utf-8")
 
     assert set(load_config(path).tiers) == {"cheap", "mid", "top"}
+
+
+def test_a_classifier_router_must_say_where_escalations_go() -> None:
+    raw = {**BASE_CONFIG, "router": {"kind": "classifier", "default_tier": "cheap"}}
+    with pytest.raises(ConfigError, match="strong_tier"):
+        parse_config(raw)
+
+
+def test_a_classifier_router_must_name_a_model_file() -> None:
+    raw = {
+        **BASE_CONFIG,
+        "router": {"kind": "classifier", "default_tier": "cheap", "strong_tier": "top"},
+    }
+    with pytest.raises(ConfigError, match="model_path"):
+        parse_config(raw)
+
+
+def test_escalating_to_the_tier_you_came_from_is_refused() -> None:
+    raw = {
+        **BASE_CONFIG,
+        "router": {
+            "kind": "classifier",
+            "default_tier": "cheap",
+            "strong_tier": "cheap",
+            "model_path": "m.json",
+        },
+    }
+    with pytest.raises(ConfigError, match="nothing to escalate to"):
+        parse_config(raw)
+
+
+def test_an_unknown_router_kind_is_caught_at_load_time() -> None:
+    with pytest.raises(ConfigError, match="router.kind"):
+        parse_config({**BASE_CONFIG, "router": {"kind": "magic"}})
+
+
+def test_the_sampling_knobs_must_be_fractions() -> None:
+    for field, value in (("threshold", 1.5), ("explore_rate", -0.1)):
+        with pytest.raises(ConfigError, match=field):
+            parse_config({**BASE_CONFIG, "router": {"kind": "static", field: value}})

@@ -6,8 +6,9 @@ that decision cost.
 One API in, any model out. Point a client at this endpoint instead of a vendor's, and the
 backend it reaches is a line of configuration rather than a code change.
 
-It routes, it verifies, and it measures. It does not yet classify — see
-[What this does not do yet](#what-this-does-not-do-yet).
+It routes, it verifies, it learns which prompts the cheap model gets wrong, and it
+measures all three. What it has never done is talk to a real model — see
+[What has not been tested](#what-has-not-been-tested).
 
 ## Why the log is the point
 
@@ -139,6 +140,185 @@ The report does not hide this. It is the one below, from four requests with one 
 not quietly double your bill. Set them to `escalate` if you would rather pay than ship an
 unchecked answer.
 
+## The classifier: route on a prediction instead of a guess
+
+Verification answers "was the cheap answer good?" — afterwards, having already bought two
+calls. The classifier answers "will it be?" — beforehand, from the prompt alone, for free.
+Above a threshold the request skips the cheap tier entirely and goes straight to the strong
+one; below it, nothing changes.
+
+```yaml
+router:
+  kind: classifier
+  default_tier: cheap       # the tier whose failures the model predicts
+  strong_tier: top          # where a predicted failure goes instead
+  model_path: ./classifier.json
+  threshold: 0.5
+  explore_rate: 0.05        # see "the model poisons its own evidence", below
+```
+
+The model is a logistic regression over the words of the last user turn plus a handful of
+size features. No new dependency, a readable JSON file, and weights you can print and argue
+with. It predicts one thing: **P(this prompt's cheap answer fails review)**.
+
+### Training it
+
+```bash
+python -m llm_router -c config.yaml train --out classifier.json
+```
+
+There is no bundled model and no shortcut to one. The labels come from the verification loop
+and nowhere else, so the sequence is: turn verification on at `sample_rate: 1.0`, serve real
+traffic, then train. Two defaults stand in the way on purpose, and both refuse loudly rather
+than producing a model out of nothing:
+
+- **`log.store_prompts` is false.** Prompts are user data and the log holds a SHA-256 by
+  default. A hash cannot be read for difficulty. Turning it on is a decision about storing
+  conversations, and rows already written cannot be recovered.
+- **Verdicts the verifier did not actually give are not labels.** A row with
+  `unparseable = 1` had its outcome chosen by the `on_unparseable` fallback — with the
+  default `accept`, that manufactures `pass` labels, and training on them teaches the model
+  that a broken verifier is a well-answered prompt. Those rows are dropped.
+
+Below 40 labels, or fewer than 5 of the rare class, it refuses: a model fitted on less has
+memorised the log, and "always cheap" is the correct router anyway.
+
+### What the report says
+
+From the test suite's fake backends, with a deliberately learnable signal planted — the cheap
+tier fails every prompt about integrals and passes every one about meeting notes:
+
+```
+corpus          72 labelled request(s) in 12 conversation(s)
+                30 failure(s) in the training split of 60
+held out        12 request(s), whole conversations only
+model           a0c20a6d6457  predicts cheap, judged by top
+                17 weight(s); an unseen prompt scores 0.482, the base rate
+
+held out by conversation -- the number to believe
+  accuracy        1.000   majority-class baseline 0.500
+  precision       1.000   of the requests it sent to the strong tier
+  recall          1.000   of the failures it caught
+  escalates       50.0% of requests
+
+what the held-out traffic would have cost, per policy
+  policy                                     cost  bad answers  escalations
+  classifier @ 0.50, no verifier     $   0.037800            0            6
+  always cheap, no verifier          $   0.000000            6            0
+  always cheap + verify all          $   0.134100            0            6
+  always strong                      $   0.075600            0            0
+
+strongest weights (+ pushes toward the strong tier)
+    -1.386  w:meeting
+    -1.386  w:summarise
+    +1.313  w:prove
+    +1.313  w:integral
+```
+
+A perfect score on planted data proves the pipeline runs, not that the idea works. Real
+prompts do not separate on four words, and the number that comes back will be lower — that is
+the number worth having.
+
+The policy table is the argument for the classifier over the loop, stated in money: the same
+held-out traffic, zero bad answers either way, at **a third of the cost** of reviewing every
+request. And it is printed next to `always cheap`, which costs nothing and ships every
+failure. Money and bad answers are separate columns. They are never summed, because this code
+does not know what a wrong answer costs you and will not invent a price to make its own table
+come out well.
+
+### Two ways to lie to yourself, both measured here
+
+**The split.** Prompts from one conversation share vocabulary, so a split that scatters them
+across train and test lets the model recognise the *conversation* and report that as
+difficulty. The report fits the same data twice — grouped by conversation, and split by row —
+and prints both, so the gap between the honest number and the flattering one is a line of
+output rather than a warning nobody heeds. On a corpus where only the conversation is
+learnable, the wrong split reads perfect and the right one reads like a coin toss;
+`tests/test_classifier.py` asserts exactly that.
+
+**The class balance.** If 10% of requests fail, answering "never fails" scores 90%. Every
+accuracy in the report is printed beside the majority-class baseline that needs no model at
+all, and a model that fails to beat it is told so, in the report, in those words.
+
+### The model poisons its own evidence
+
+This one has no fix, only a price. A classifier that is always obeyed sends every prompt it
+scores high to the strong tier — where no verifier looks at it, so it never becomes a label.
+The next model is fitted only on prompts the current one already believed were easy, and its
+measured failure rate looks wonderful for exactly as long as nobody checks.
+
+`router.explore_rate` is the price: a few percent of would-be escalations go to the cheap tier
+anyway, are answered, and are reviewed. Those rows are the only ones that can ever contradict
+the model. Here is the same fake traffic again, this time served by the trained model with
+`explore_rate: 0.10`:
+
+```
+classifier
+  scored             72   by a0c20a6d6457 (72)
+  reviewed           44   scored requests a verifier also judged
+  unreviewed         28   scored and never checked -- these rows cannot contradict the model
+  explored            8   would-be escalations kept cheap on purpose, so they could be judged
+  mean score     0.991 on answers that failed, 0.009 on answers that passed
+  score band      rows   failed   actual fail rate
+    0.0-0.2         36        0      0.0%
+    0.8-1.0          8        8    100.0%
+```
+
+Read the last line and then the one above it. **Those eight rows are the explored ones** — the
+only requests the model wanted to escalate and did not. Without exploration that band is
+empty, the table shows nothing but the easy half of the traffic, and it agrees with the model
+forever.
+
+`mean score` on failures minus `mean score` on passes is the whole model in one number. At or
+below zero the scores are noise, whatever the training report said, and `stats` prints that
+verdict in capitals rather than leaving it to be noticed.
+
+**The two sampling knobs multiply.** `explore_rate` decides which requests stay cheap;
+`sample_rate` then decides, independently, which of those get reviewed. At 0.10 and 0.25 the
+labelled share of would-be escalations is 2.5%, not 10% — in the sampled run below, eight
+explored requests produced four labels rather than eight. If exploration is there to collect the labels the model
+cannot otherwise get, the sampling has to leave enough of them alive to matter.
+
+### Does it actually save anything?
+
+The same 72 fake requests, three ways, read off the counterfactual table. Savings are against
+`always top`, the flattering baseline:
+
+| | actual spend | vs always top | loop overhead |
+|---|---|---|---|
+| static router, verify everything | $0.804600 | **−$0.351000** | 100.0% |
+| classifier, verify everything | $0.611400 | **−$0.094800** | 60.8% |
+| classifier, `sample_rate: 0.25` | $0.356400 | **+$0.160200** | 32.8% |
+
+That last row is the first positive number this project has ever printed, and it arrives only
+once the classifier is doing the deciding and the verifier has been sampled down to spot
+checks. It is also, still, a loss against `always mid` (−$0.253080) and `always cheap`
+(−$0.356400) — the baselines that need no router at all. Which is the point of printing every
+baseline: the router beat the comparison that flatters it and lost to the two that do not, and
+you can read both in the same table.
+
+(Fake backends throughout. The shapes are real; the numbers are not a measurement of any
+model.)
+
+### What it will not do
+
+- **Overrule an explicit request.** `model: "top"` gets `top`, unscored. Guessing over a
+  stated preference is not routing.
+- **Start without a model.** `kind: classifier` with a missing or unreadable model file
+  refuses to boot. Falling back to the static router would produce a system that looks like it
+  is classifying and is not — indistinguishable from a working one in every report.
+- **Run on a model trained for another tier.** The file records which tier's failures it
+  describes; a mismatch is a config error, because the scores would be confident and
+  meaningless.
+- **Reload on its own.** The model is read once at startup, so a running server keeps its
+  weights until restarted. `train` says so after it writes.
+
+One interface changed to make this possible, and an earlier draft of this README promised it
+would not: `Router.choose` returned a tier name, and `Router.decide` now returns a decision
+carrying the score, the model fingerprint and the reason. A router that computes a number and
+does not report it cannot be checked afterwards, which is the one thing this project is not
+willing to ship.
+
 ## Run
 
 ```bash
@@ -229,24 +409,29 @@ log must not take the proxy down with it.
 
 No network: backends are faked.
 
-## What this does not do yet
+## What has not been tested
 
-One piece of the design is still absent, behind a seam that already exists:
+Every part of the design is built. None of it has met a real model.
 
-- **The difficulty classifier.** `router.kind` is `static` today. A learned router implements
-  the same `Router` interface in `llm_router/routing.py` and nothing else changes. Two
-  warnings for whoever builds it, both learned the expensive way: split the training data by
-  **session or user**, never randomly by prompt — prompts from one conversation share
-  vocabulary, and a random split lets the model recognise the conversation instead of the
-  difficulty. And filter the corpus: transcripts are full of tool results, system notices and
-  attachment placeholders that are not prompts at all, and a classifier will happily learn to
-  tell those apart and report a score that means nothing.
+**No backend in this repository has ever been contacted.** The suite fakes the network at
+`create_app(backend_factory=...)`, deliberately, so that the tests are about this code. That
+leaves one assumption entirely unverified, and it is load-bearing: that a real cheap model,
+asked for `VERDICT: PASS` or `VERDICT: FAIL`, reliably emits one. If it does not, verdicts
+become unparseable, the fallback decides them, and the classifier's training corpus is
+whatever the fallback manufactured. `stats` counts unparseable verdicts precisely because that
+failure is silent otherwise — but counting it is not the same as having run it. Point this at
+an Ollama and a real proxy before believing any number it prints.
 
-  The labels it needs are already being written: `verifications.verdict` is a `pass`/`fail`
-  per prompt, produced by real traffic. Turn the loop on at `sample_rate: 1.0`, let it run,
-  and the training set builds itself.
+**Every figure in this README comes from fake backends.** The shapes are real — this code
+produced them — and the numbers are not a measurement of any model. That matters most in the
+classifier report: a planted, perfectly separable signal gives a perfect score, and real
+prompts will not.
 
-It is not stubbed with a fake. Where it is missing, the code says so.
+**The corpus filter is narrower than the warning it replaces.** The labels here come from this
+router's own log, so every row is a genuine request. Training a classifier on somebody else's
+transcripts is a different job with a trap of its own: transcripts are full of tool results,
+system notices and attachment placeholders that are not prompts at all, and a classifier will
+happily learn to tell those apart and report a score that means nothing.
 
 ## A baseline worth beating
 

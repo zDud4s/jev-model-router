@@ -90,6 +90,25 @@ class RouterConfig:
     # Optional map of client-requested model name -> tier, so an existing client
     # that hardcodes a model string can still steer the router.
     model_map: dict[str, str] = field(default_factory=dict)
+    # --- kind: classifier -------------------------------------------------
+    # Where a request goes when the model predicts the cheap tier would fail.
+    strong_tier: str | None = None
+    # Path to the trained model. There is no bundled default and no fallback:
+    # a classifier router with no model refuses to start, because one that
+    # quietly served every request from the default tier would be
+    # indistinguishable from a working one in every report it produced.
+    model_path: str | None = None
+    # None means "use the threshold the model was trained with". An explicit
+    # value overrides it, which is how a tuned threshold is deployed without
+    # retraining.
+    threshold: float | None = None
+    # Fraction of would-be escalations sent to the cheap tier anyway, so they
+    # get verified and produce labels. Without it the model destroys its own
+    # evidence: every prompt it scores high goes to the strong tier, is never
+    # reviewed, and never appears in the next training set -- so the next model
+    # is fitted only on prompts the current one already believed were easy. A
+    # few percent is the cost of still being able to tell whether it is right.
+    explore_rate: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -222,10 +241,43 @@ def parse_config(raw: dict[str, Any]) -> Config:
             raise ConfigError(
                 f"router.model_map[{requested!r}] points at unknown tier {target!r}"
             )
+    kind = str(raw_router.get("kind", "static"))
+    if kind not in ("static", "classifier"):
+        raise ConfigError(f"router.kind must be 'static' or 'classifier', got {kind!r}")
+
+    strong_tier = raw_router.get("strong_tier")
+    if strong_tier and strong_tier not in tiers:
+        raise ConfigError(f"router.strong_tier {strong_tier!r} is not a configured tier")
+    threshold = raw_router.get("threshold")
+    if threshold is not None:
+        threshold = float(threshold)
+        if not 0.0 <= threshold <= 1.0:
+            raise ConfigError(f"router.threshold must be in [0, 1], got {threshold}")
+    explore_rate = float(raw_router.get("explore_rate", 0.0))
+    if not 0.0 <= explore_rate <= 1.0:
+        raise ConfigError(f"router.explore_rate must be in [0, 1], got {explore_rate}")
+    if kind == "classifier":
+        # Caught here rather than at the first request: a proxy that accepts a
+        # config it cannot route with has already started answering by the time
+        # anyone finds out.
+        if not strong_tier:
+            raise ConfigError("router.kind 'classifier' requires router.strong_tier")
+        if strong_tier == default_tier:
+            raise ConfigError(
+                f"router.strong_tier and router.default_tier are both "
+                f"{strong_tier!r}; there is nothing to escalate to"
+            )
+        if not raw_router.get("model_path"):
+            raise ConfigError("router.kind 'classifier' requires router.model_path")
+
     router = RouterConfig(
-        kind=str(raw_router.get("kind", "static")),
+        kind=kind,
         default_tier=default_tier,
         model_map=model_map,
+        strong_tier=strong_tier,
+        model_path=(str(raw_router["model_path"]) if raw_router.get("model_path") else None),
+        threshold=threshold,
+        explore_rate=explore_rate,
     )
 
     raw_log = raw.get("log") or {}

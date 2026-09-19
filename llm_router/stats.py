@@ -76,6 +76,49 @@ class VerificationStats:
 
 
 @dataclass
+class ClassifierStats:
+    """What the deployed model scored, and whether those scores meant anything.
+
+    The training report is a claim about held-out history. This is the check on
+    live traffic, and it is the one that can go stale underneath you: the corpus
+    a model was fitted on ages, and nothing in the request path notices.
+
+    Read `unreviewed` first. A classifier that is always obeyed sends every
+    prompt it scores high to the strong tier, where no verifier looks at it, so
+    those rows can never contradict it. The table below is therefore drawn from
+    the requests the model believed were easy, plus whatever `router.explore_rate`
+    deliberately kept cheap. With exploration off, the two columns converge on
+    saying what the model already believed and nothing else.
+    """
+
+    scored: int
+    reviewed: int
+    explored: int
+    # fingerprint -> rows. More than one means the column spans a retraining and
+    # the bands below are two models' numbers in one table.
+    models: dict[str, int] = field(default_factory=dict)
+    # (label, rows, failures) per score band.
+    bands: list[tuple[str, int, int]] = field(default_factory=list)
+    mean_score_failed: float | None = None
+    mean_score_passed: float | None = None
+
+    @property
+    def unreviewed(self) -> int:
+        return self.scored - self.reviewed
+
+    @property
+    def separation(self) -> float | None:
+        """Mean score on failures minus mean score on passes.
+
+        The whole model in one number. At or below zero it is scoring noise,
+        however well it read at training time.
+        """
+        if self.mean_score_failed is None or self.mean_score_passed is None:
+            return None
+        return self.mean_score_failed - self.mean_score_passed
+
+
+@dataclass
 class Baseline:
     """What everything would have cost at this one tier."""
 
@@ -101,6 +144,7 @@ class Stats:
     by_tier: list[TierSpend] = field(default_factory=list)
     baselines: list[Baseline] = field(default_factory=list)
     verification: VerificationStats | None = None
+    classifier: ClassifierStats | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -171,6 +215,7 @@ def collect(log: RequestLog) -> Stats:
 
     return Stats(
         verification=_verification(log),
+        classifier=_classifier(log),
         requests=totals["requests"],
         errors=totals["errors"],
         total_cost_usd=totals["cost"],
@@ -225,6 +270,112 @@ def _verification(log: RequestLog) -> VerificationStats | None:
     )
 
 
+_BANDS: list[tuple[float, float, str]] = [
+    (0.0, 0.2, "0.0-0.2"),
+    (0.2, 0.4, "0.2-0.4"),
+    (0.4, 0.6, "0.4-0.6"),
+    (0.6, 0.8, "0.6-0.8"),
+    (0.8, 1.01, "0.8-1.0"),
+]
+
+
+def _classifier(log: RequestLog) -> ClassifierStats | None:
+    """None when no request was ever scored, so the report stays silent about it."""
+    scored = log.query(
+        """
+        SELECT COALESCE(route_model, '(unknown)') AS model,
+               COUNT(*)                           AS rows_,
+               COALESCE(SUM(route_reason LIKE 'explore%'), 0) AS explored
+        FROM requests
+        WHERE route_score IS NOT NULL
+        GROUP BY route_model
+        """
+    )
+    if not scored:
+        return None
+
+    # Only rows a verifier actually judged can say whether a score was right,
+    # and the join is what restricts them. `unparseable` rows are excluded for
+    # the same reason training excludes them: the verdict came from a fallback
+    # policy rather than from a reviewer, so it is evidence about the config.
+    judged = log.query(
+        """
+        SELECT r.route_score AS score, v.verdict AS verdict
+        FROM requests r
+        JOIN verifications v ON v.request_row_id = r.id
+        WHERE r.route_score IS NOT NULL
+          AND v.verdict IN ('pass', 'fail')
+          AND v.unparseable = 0
+        """
+    )
+
+    bands: list[tuple[str, int, int]] = []
+    for low, high, label in _BANDS:
+        rows = [j for j in judged if low <= j["score"] < high]
+        if rows:
+            bands.append((label, len(rows), sum(1 for j in rows if j["verdict"] == "fail")))
+
+    failed = [j["score"] for j in judged if j["verdict"] == "fail"]
+    passed = [j["score"] for j in judged if j["verdict"] == "pass"]
+    return ClassifierStats(
+        scored=sum(row["rows_"] for row in scored),
+        reviewed=len(judged),
+        explored=sum(row["explored"] for row in scored),
+        models={row["model"]: row["rows_"] for row in scored},
+        bands=bands,
+        mean_score_failed=(sum(failed) / len(failed)) if failed else None,
+        mean_score_passed=(sum(passed) / len(passed)) if passed else None,
+    )
+
+
+def _format_classifier(c: ClassifierStats) -> list[str]:
+    lines = ["", "classifier"]
+    fingerprints = ", ".join(f"{name} ({count})" for name, count in c.models.items())
+    lines.append(f"  scored         {c.scored:>6}   by {fingerprints}")
+    if len(c.models) > 1:
+        lines.append(
+            "  MORE THAN ONE MODEL scored these rows. The bands below mix them, "
+            "and the mixture is not a model of anything -- filter by route_model."
+        )
+    lines.append(
+        f"  reviewed       {c.reviewed:>6}   scored requests a verifier also judged"
+    )
+    if c.unreviewed:
+        lines.append(
+            f"  unreviewed     {c.unreviewed:>6}   scored and never checked -- these "
+            "rows cannot contradict the model"
+        )
+    if c.explored:
+        lines.append(
+            f"  explored       {c.explored:>6}   would-be escalations kept cheap on "
+            "purpose, so they could be judged"
+        )
+    elif c.unreviewed:
+        lines.append(
+            "  router.explore_rate is 0, so every request the model escalated left "
+            "no evidence behind. The table below describes the easy half of the "
+            "traffic and will keep agreeing with the model whatever it does."
+        )
+
+    if c.separation is not None:
+        lines.append(
+            f"  mean score     {c.mean_score_failed:.3f} on answers that failed, "
+            f"{c.mean_score_passed:.3f} on answers that passed"
+        )
+        if c.separation <= 0:
+            lines.append(
+                "  THE SCORES ARE BACKWARDS OR NOISE: failures do not score higher "
+                "than passes on this traffic. Retrain, or go back to kind: static."
+            )
+    if c.bands:
+        lines.append("  score band      rows   failed   actual fail rate")
+        for label, rows, failures in c.bands:
+            lines.append(
+                f"    {label:<10} {rows:>7} {failures:>8}   {failures / rows * 100:>6.1f}%"
+            )
+    return lines
+
+
 def format_text(stats: Stats) -> str:
     """Plain-text report. No dashboard in this step, by design."""
     lines: list[str] = []
@@ -245,6 +396,9 @@ def format_text(stats: Stats) -> str:
             f"  {row.tier:<14} {row.requests:>6} req  ${row.cost_usd:>12.6f}  "
             f"in {row.input_tokens:>9}  out {row.output_tokens:>9}  cached {row.cached_tokens:>9}"
         )
+
+    if stats.classifier is not None:
+        lines.extend(_format_classifier(stats.classifier))
 
     if stats.verification is not None:
         lines.extend(_format_verification(stats.verification, stats.total_cost_usd))

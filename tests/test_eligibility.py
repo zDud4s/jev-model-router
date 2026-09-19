@@ -70,7 +70,7 @@ def test_the_router_never_returns_a_filtered_out_tier(config) -> None:
     )
     result = evaluate(config, request)
 
-    chosen = StaticRouter(config).choose(request, list(result.eligible))
+    chosen = StaticRouter(config).decide(request, list(result.eligible)).tier
 
     assert chosen in result.eligible
     assert chosen != "cheap"
@@ -80,7 +80,7 @@ def test_an_explicit_tier_request_is_honoured_when_eligible(config) -> None:
     request = make_request(model="top")
     result = evaluate(config, request)
 
-    assert StaticRouter(config).choose(request, list(result.eligible)) == "top"
+    assert StaticRouter(config).decide(request, list(result.eligible)).tier == "top"
 
 
 def test_the_model_map_steers_a_client_that_hardcodes_a_model_name() -> None:
@@ -92,4 +92,4 @@ def test_the_model_map_steers_a_client_that_hardcodes_a_model_name() -> None:
     cfg = parse_config(raw)
     request = make_request(model="gpt-4o")
 
-    assert StaticRouter(cfg).choose(request, ["cheap", "mid", "top"]) == "top"
+    assert StaticRouter(cfg).decide(request, ["cheap", "mid", "top"]).tier == "top"

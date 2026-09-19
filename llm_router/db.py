@@ -31,7 +31,7 @@ from .pricing import Counterfactual
 from .schemas import Usage
 from .verification import VerificationOutcome
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 # Each entry is one forward migration, applied in order. Never edit a migration
 # that has shipped; append a new one. The list index + 1 is its version.
@@ -117,6 +117,22 @@ _MIGRATIONS: list[str] = [
 
     CREATE INDEX IF NOT EXISTS idx_verifications_verdict ON verifications(verdict);
     """,
+    # --- v3: what the router decided, and on what evidence --------------------
+    #
+    # Note the backfill, or rather its absence. v2 backfilled because v1 rows
+    # really did have a route cost and a final tier; the old columns were the
+    # answer under a different name. Here they were not: no classifier scored
+    # those requests, so NULL is the fact and any number written into it would
+    # be an invention. `route_model` carries the fingerprint of the weights that
+    # produced the score, because a score column spanning a retraining is two
+    # models' numbers in one histogram and no way to separate them afterwards.
+    """
+    ALTER TABLE requests ADD COLUMN route_score  REAL;
+    ALTER TABLE requests ADD COLUMN route_model  TEXT;
+    ALTER TABLE requests ADD COLUMN route_reason TEXT;
+
+    CREATE INDEX IF NOT EXISTS idx_requests_route_model ON requests(route_model);
+    """,
 ]
 
 
@@ -147,6 +163,13 @@ class LogEntry:
     # a failed verdict escalated the request.
     final_tier: str | None = None
     verification: VerificationOutcome | None = None
+    # What the router decided and why. `route_score` stays None unless a model
+    # actually scored this request -- an explicit `model:` from the client, or a
+    # cheap tier the gate had already removed, leaves nothing to record and
+    # records nothing.
+    route_score: float | None = None
+    route_model: str | None = None
+    route_reason: str | None = None
     ts: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
@@ -223,8 +246,9 @@ class RequestLog:
                     request_id, ts, requested_model, tier, backend, model, router,
                     stream, prompt_sha256, prompt_text, input_tokens, output_tokens,
                     cached_tokens, cache_write_tokens, cost_usd, latency_ms,
-                    http_status, error, eligibility_rejections, route_cost_usd, final_tier
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    http_status, error, eligibility_rejections, route_cost_usd, final_tier,
+                    route_score, route_model, route_reason
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     entry.request_id,
@@ -250,6 +274,9 @@ class RequestLog:
                     rejections,
                     entry.route_cost_usd,
                     entry.final_tier or entry.tier,
+                    entry.route_score,
+                    entry.route_model,
+                    entry.route_reason,
                 ),
             )
             row_id = int(cur.lastrowid)

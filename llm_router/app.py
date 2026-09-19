@@ -99,7 +99,7 @@ def create_app(
 
     @app.get("/healthz")
     async def healthz() -> dict[str, Any]:
-        return {
+        body: dict[str, Any] = {
             "status": "ok",
             "tiers": sorted(config.tiers),
             "router": active_router.name,
@@ -109,6 +109,21 @@ def create_app(
             # reading the database.
             "log_failures": request_log.failed_writes,
         }
+        model = getattr(active_router, "model", None)
+        if model is not None:
+            # The deployed model's own held-out numbers, served next to its
+            # fingerprint. A model whose evidence is only in the terminal where
+            # it was trained gets deployed on memory of a good result.
+            body["classifier"] = {
+                "fingerprint": model.fingerprint,
+                "predicts_tier": model.predicts_tier,
+                "trained_at": model.trained_at,
+                "examples": model.examples,
+                "threshold": getattr(active_router, "threshold", model.threshold),
+                "base_rate": model.base_rate,
+                "metrics": model.metrics,
+            }
+        return body
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
@@ -165,12 +180,19 @@ def create_app(
             )
 
         # --- route ------------------------------------------------------------
-        tier_name = active_router.choose(request, list(eligibility.eligible))
+        decision = active_router.decide(request, list(eligibility.eligible))
+        tier_name = decision.tier
         tier = config.tier(tier_name)
         backend = backends[tier_name]
         base_entry.tier = tier_name
         base_entry.backend = tier.backend
         base_entry.model = tier.model
+        # The score goes in the row whether or not it changed anything. Next to
+        # the verdict the verifier will write, it is the only way to ask later
+        # whether the deployed model's numbers meant anything on real traffic.
+        base_entry.route_score = decision.score
+        base_entry.route_model = decision.model
+        base_entry.route_reason = decision.reason or None
         eligible_set = set(eligibility.eligible)
 
         async def finish(
@@ -287,6 +309,10 @@ def create_app(
         body = result.body
         verification: VerificationOutcome | None = None
         headers = {"X-Request-Id": request_id, "X-Router-Tier": tier_name}
+        if decision.score is not None:
+            headers["X-Router-Score"] = f"{decision.score:.4f}"
+            if decision.model:
+                headers["X-Router-Model"] = decision.model
         if active_verifier is not None:
             verification = await active_verifier.check(
                 request,

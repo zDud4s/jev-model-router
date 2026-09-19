@@ -1,0 +1,537 @@
+"""Turning the request log into a difficulty model, and judging what came out.
+
+The labels are already being written. Every verified request carries a verdict:
+`pass` means the cheap tier answered and the answer held, `fail` means it did
+not. Those are the two classes, produced by ordinary traffic rather than by
+hand, which is why the verification loop was built first.
+
+Four filters run before anything is fitted, and each one is the difference
+between a number and a fiction:
+
+* **Only rows whose verdict came from the verifier.** `unparseable = 1` means
+  the reply carried no verdict and the configured fallback decided. With
+  `on_unparseable: accept` that fallback manufactures `pass` labels; training on
+  them teaches the model that a broken verifier is a well-answered prompt.
+* **Only rows served by the tier being modelled.** A verdict is about one
+  model's answer. Mixing tiers produces a model of nothing in particular.
+* **Only rows whose prompt was stored.** `log.store_prompts` is false by
+  default -- prompts are user data -- so by default the log holds SHA-256 and
+  nothing to learn from. That is a deliberate default and an absolute barrier,
+  and training says so plainly instead of fitting on an empty corpus.
+* **Only successful requests.** A 500 has no answer to have judged.
+
+Then the split, which is where this kind of work usually goes wrong. Grouping is
+by conversation, never by row; `split_by_row` is kept and reported alongside so
+the gap between the honest number and the flattering one is printed rather than
+described.
+
+Finally the part that decides whether any of it was worth doing: the held-out
+set is priced under each policy, with money and bad answers in SEPARATE columns.
+They are not summed. This module does not know what a wrong answer costs the
+operator, will not pretend to, and a single "score" that blends the two would be
+exactly that pretence.
+"""
+
+from __future__ import annotations
+
+from dataclasses import asdict, dataclass, field
+from typing import Any, Sequence
+
+from .classifier import (
+    DifficultyModel,
+    Example,
+    build_model,
+    conversation_key,
+    features_from_prompt_text,
+    group_fraction,
+    split_by_row,
+)
+from .db import RequestLog
+
+
+class TrainingError(Exception):
+    """Raised when the log cannot support a model, with the reason."""
+
+
+@dataclass(frozen=True)
+class Row:
+    """One usable log row: the label, and what the alternatives cost on it."""
+
+    example: Example
+    route_cost_usd: float
+    loop_cost_usd: float
+    strong_cost_usd: float
+    strong_priced: bool
+    strong_eligible: bool
+
+
+@dataclass
+class Metrics:
+    """Quality of the scores, always next to the baseline that needs no model."""
+
+    examples: int
+    positives: int
+    accuracy: float
+    # Accuracy of answering the majority class every time. A classifier that
+    # does not beat this has learned the class balance and nothing else, and on
+    # imbalanced data it can look excellent while doing so.
+    majority_accuracy: float
+    precision: float | None
+    recall: float | None
+    escalation_rate: float
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class Policy:
+    """What one routing policy would have cost on the held-out set."""
+
+    name: str
+    cost_usd: float
+    # Answers the client would have received that the verifier had rejected.
+    # Priced at nothing here because this module does not know their price.
+    bad_answers: int
+    escalations: int
+    note: str = ""
+
+
+@dataclass
+class TrainingReport:
+    model: DifficultyModel
+    rows: int
+    groups: int
+    train_size: int
+    test_size: int
+    grouped: Metrics
+    # The same fit and evaluation under a random by-row split. Reported to be
+    # compared with `grouped`, never to be believed on its own.
+    ungrouped: Metrics
+    policies: list[Policy] = field(default_factory=list)
+    sweep: list[tuple[float, float, int]] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "model": self.model.to_dict(),
+            "rows": self.rows,
+            "groups": self.groups,
+            "train_size": self.train_size,
+            "test_size": self.test_size,
+            "grouped": self.grouped.to_dict(),
+            "ungrouped": self.ungrouped.to_dict(),
+            "policies": [asdict(p) for p in self.policies],
+            "sweep": [
+                {"threshold": t, "cost_usd": c, "bad_answers": b} for t, c, b in self.sweep
+            ],
+            "warnings": list(self.warnings),
+        }
+
+
+# --------------------------------------------------------------------------
+# reading the log
+# --------------------------------------------------------------------------
+
+
+def load_rows(log: RequestLog, *, predicts_tier: str, strong_tier: str) -> list[Row]:
+    """Every row of the log that can honestly be trained on."""
+    raw = log.query(
+        """
+        SELECT r.prompt_text                                   AS prompt_text,
+               r.route_cost_usd                                AS route_cost,
+               v.verdict                                       AS verdict,
+               v.verifier_cost_usd + v.escalation_cost_usd     AS loop_cost,
+               c.cost_usd                                      AS strong_cost,
+               c.priced                                        AS strong_priced,
+               c.eligible                                      AS strong_eligible
+        FROM requests r
+        JOIN verifications v ON v.request_row_id = r.id
+        LEFT JOIN counterfactuals c
+               ON c.request_row_id = r.id AND c.tier = ?
+        WHERE v.verdict IN ('pass', 'fail')
+          AND v.unparseable = 0
+          AND r.http_status = 200
+          AND r.tier = ?
+        ORDER BY r.id
+        """,
+        (strong_tier, predicts_tier),
+    )
+    if not raw:
+        raise TrainingError(
+            f"no verified requests served by tier {predicts_tier!r} in the log. "
+            "Turn the verification loop on (verification.enabled: true, "
+            "sample_rate: 1.0) and let it run -- the labels are a by-product of "
+            "traffic, so there is no shortcut that does not involve traffic."
+        )
+
+    with_prompts = [row for row in raw if row["prompt_text"]]
+    if not with_prompts:
+        raise TrainingError(
+            f"{len(raw)} verified request(s) found, and not one stored its prompt. "
+            "log.store_prompts is false by default because prompts are user data, "
+            "and a SHA-256 cannot be read for difficulty. Set log.store_prompts: "
+            "true, accept that the database then holds the conversations, and "
+            "collect again -- rows already written cannot be recovered."
+        )
+
+    rows: list[Row] = []
+    for entry in with_prompts:
+        vector = features_from_prompt_text(entry["prompt_text"])
+        if vector is None:
+            continue
+        rows.append(
+            Row(
+                example=Example(
+                    vector=vector,
+                    label=1 if entry["verdict"] == "fail" else 0,
+                    group=conversation_key(entry["prompt_text"]),
+                ),
+                route_cost_usd=float(entry["route_cost"] or 0.0),
+                loop_cost_usd=float(entry["loop_cost"] or 0.0),
+                strong_cost_usd=float(entry["strong_cost"] or 0.0),
+                strong_priced=bool(entry["strong_priced"]),
+                strong_eligible=bool(entry["strong_eligible"]),
+            )
+        )
+    if not rows:
+        raise TrainingError("no row's stored prompt could be read back as a message list")
+    return rows
+
+
+# --------------------------------------------------------------------------
+# evaluation
+# --------------------------------------------------------------------------
+
+
+def evaluate(model: DifficultyModel, examples: Sequence[Example], threshold: float) -> Metrics:
+    positives = sum(e.label for e in examples)
+    if not examples:
+        return Metrics(0, 0, 0.0, 0.0, None, None, 0.0)
+
+    tp = fp = tn = fn = 0
+    for example in examples:
+        predicted = 1 if model.score(example.vector) >= threshold else 0
+        if predicted and example.label:
+            tp += 1
+        elif predicted and not example.label:
+            fp += 1
+        elif not predicted and example.label:
+            fn += 1
+        else:
+            tn += 1
+
+    total = len(examples)
+    majority = max(positives, total - positives) / total
+    return Metrics(
+        examples=total,
+        positives=positives,
+        accuracy=(tp + tn) / total,
+        majority_accuracy=majority,
+        # None rather than 0.0 when the denominator is empty: "never predicted a
+        # failure" and "predicted failures and got them all wrong" are different
+        # facts and must not print the same way.
+        precision=(tp / (tp + fp)) if (tp + fp) else None,
+        recall=(tp / (tp + fn)) if (tp + fn) else None,
+        escalation_rate=(tp + fp) / total,
+    )
+
+
+def price_policies(
+    model: DifficultyModel, rows: Sequence[Row], threshold: float
+) -> list[Policy]:
+    """What the held-out traffic would have cost under each way of running.
+
+    Every figure uses the token counts actually recorded, so the comparison is
+    arithmetic over one set of requests rather than a simulation. What it cannot
+    do is know how the strong tier would have answered a prompt it never saw --
+    so `always strong` is credited with zero bad answers by assumption, and the
+    assumption is printed rather than buried.
+    """
+    if not rows:
+        return []
+
+    cheap_only = sum(r.route_cost_usd for r in rows)
+    failures = sum(r.example.label for r in rows)
+    as_logged = sum(r.route_cost_usd + r.loop_cost_usd for r in rows)
+    always_strong = sum(r.strong_cost_usd for r in rows)
+
+    routed_cost = 0.0
+    escalations = 0
+    missed = 0
+    for row in rows:
+        escalate = model.score(row.example.vector) >= threshold
+        if escalate and row.strong_eligible:
+            routed_cost += row.strong_cost_usd
+            escalations += 1
+        else:
+            routed_cost += row.route_cost_usd
+            missed += row.example.label
+
+    unpriced = sum(1 for r in rows if not r.strong_priced)
+    strong_note = (
+        f"{unpriced} row(s) had no price for the strong tier, so this understates it"
+        if unpriced
+        else "assumes the strong tier's own answers would all have held; untested"
+    )
+
+    return [
+        Policy(
+            name=f"classifier @ {threshold:.2f}, no verifier",
+            cost_usd=routed_cost,
+            bad_answers=missed,
+            escalations=escalations,
+            note="the failures it did not catch are shipped to the client",
+        ),
+        Policy(
+            name="always cheap, no verifier",
+            cost_usd=cheap_only,
+            bad_answers=failures,
+            escalations=0,
+            note="the floor: cheapest possible, and every failure reaches the client",
+        ),
+        Policy(
+            name="always cheap + verify all",
+            cost_usd=as_logged,
+            bad_answers=0,
+            escalations=sum(1 for r in rows if r.example.label),
+            note="what the log actually did; catches failures by paying on every request",
+        ),
+        Policy(
+            name="always strong",
+            cost_usd=always_strong,
+            bad_answers=0,
+            escalations=0,
+            note=strong_note,
+        ),
+    ]
+
+
+def sweep_thresholds(
+    model: DifficultyModel, rows: Sequence[Row], thresholds: Sequence[float]
+) -> list[tuple[float, float, int]]:
+    """Cost and bad answers at each threshold.
+
+    The threshold is an economic knob, not a statistical one. 0.5 is the default
+    only because something has to be, and this table is how an operator picks the
+    one that matches what a wrong answer actually costs them.
+    """
+    out: list[tuple[float, float, int]] = []
+    for threshold in thresholds:
+        cost = 0.0
+        bad = 0
+        for row in rows:
+            if model.score(row.example.vector) >= threshold and row.strong_eligible:
+                cost += row.strong_cost_usd
+            else:
+                cost += row.route_cost_usd
+                bad += row.example.label
+        out.append((threshold, cost, bad))
+    return out
+
+
+# --------------------------------------------------------------------------
+# the whole job
+# --------------------------------------------------------------------------
+
+
+def train_from_log(
+    log: RequestLog,
+    *,
+    predicts_tier: str,
+    strong_tier: str,
+    judged_by: str | None = None,
+    threshold: float = 0.5,
+    holdout: float = 0.25,
+    min_examples: int = 40,
+    min_positives: int = 5,
+    seed: int = 0,
+    **fit_kwargs: Any,
+) -> TrainingReport:
+    rows = load_rows(log, predicts_tier=predicts_tier, strong_tier=strong_tier)
+    examples = [row.example for row in rows]
+    positives = sum(e.label for e in examples)
+    groups = {e.group for e in examples}
+    warnings: list[str] = []
+
+    if len(examples) < min_examples:
+        raise TrainingError(
+            f"only {len(examples)} usable label(s); at least {min_examples} are needed. "
+            "A model fitted on fewer memorises them. Keep the loop running, or lower "
+            "--min-examples if you know you are producing a toy."
+        )
+    if positives < min_positives or positives == len(examples):
+        raise TrainingError(
+            f"{positives} failure(s) in {len(examples)} label(s). A classifier needs "
+            f"both classes and at least {min_positives} of the rare one; with fewer, "
+            "'always cheap' is the correct router and the log already says so."
+        )
+    if len(groups) < 8:
+        warnings.append(
+            f"only {len(groups)} distinct conversation(s) in the corpus -- the grouped "
+            "split has little to hold out, so the honest number below is itself noisy"
+        )
+
+    # The rows are split, and the examples follow them. Splitting the examples
+    # and looking the rows up afterwards would collapse every request in a
+    # conversation onto one row's costs, which is a pricing error that reads as
+    # a suspiciously tidy report.
+    train_rows = [r for r in rows if group_fraction(r.example.group, seed) >= holdout]
+    test_rows = [r for r in rows if group_fraction(r.example.group, seed) < holdout]
+    train = [r.example for r in train_rows]
+    test = [r.example for r in test_rows]
+    if not train or not test:
+        raise TrainingError(
+            "the grouped split put every conversation on one side. Collect traffic "
+            "from more conversations, or lower --holdout."
+        )
+    if not any(e.label for e in test):
+        warnings.append(
+            "the held-out set contains no failures, so recall and the bad-answer "
+            "columns below are vacuous"
+        )
+
+    # The shipped model is the one fitted on the training split, so the numbers
+    # reported describe the exact weights in the file. Refitting on everything
+    # afterwards would produce a slightly better model whose evaluation belongs
+    # to a different one, and that substitution is how a report stops being
+    # about the thing it is attached to.
+    model = build_model(
+        train,
+        predicts_tier=predicts_tier,
+        judged_by=judged_by,
+        threshold=threshold,
+        seed=seed,
+        **fit_kwargs,
+    )
+    grouped = evaluate(model, test, threshold)
+
+    # The same procedure with the wrong split, for contrast only.
+    row_train, row_test = split_by_row(examples, holdout=holdout, seed=seed)
+    leaky = build_model(
+        row_train,
+        predicts_tier=predicts_tier,
+        judged_by=judged_by,
+        threshold=threshold,
+        seed=seed,
+        **fit_kwargs,
+    )
+    ungrouped = evaluate(leaky, row_test, threshold)
+
+    report = TrainingReport(
+        model=model,
+        rows=len(rows),
+        groups=len(groups),
+        train_size=len(train),
+        test_size=len(test),
+        grouped=grouped,
+        ungrouped=ungrouped,
+        policies=price_policies(model, test_rows, threshold),
+        sweep=sweep_thresholds(model, test_rows, [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]),
+        warnings=warnings,
+    )
+    model.metrics = {
+        "grouped": grouped.to_dict(),
+        "ungrouped": ungrouped.to_dict(),
+        "train_size": len(train),
+        "test_size": len(test),
+        "groups": len(groups),
+    }
+    return report
+
+
+def format_report(report: TrainingReport) -> str:
+    model = report.model
+    lines: list[str] = []
+    lines.append(f"corpus          {report.rows} labelled request(s) in {report.groups} conversation(s)")
+    lines.append(f"                {model.positives} failure(s) in the training split of {report.train_size}")
+    lines.append(f"held out        {report.test_size} request(s), whole conversations only")
+    lines.append(f"model           {model.fingerprint}  predicts {model.predicts_tier}"
+                 + (f", judged by {model.judged_by}" if model.judged_by else ""))
+    lines.append(f"                {len(model.weights)} weight(s); an unseen prompt scores "
+                 f"{model.base_rate:.3f}, the base rate")
+
+    lines.append("")
+    lines.append("held out by conversation -- the number to believe")
+    lines.extend(_format_metrics(report.grouped))
+    lines.append("")
+    lines.append("held out by row -- the same fit with the WRONG split, for contrast")
+    lines.extend(_format_metrics(report.ungrouped))
+    gap = report.ungrouped.accuracy - report.grouped.accuracy
+    if gap > 0.01:
+        lines.append(
+            f"  the row split reads {gap * 100:.1f} points better on the same data. "
+            "That gap is the model recognising conversations, not difficulty."
+        )
+
+    if report.policies:
+        lines.append("")
+        lines.append("what the held-out traffic would have cost, per policy")
+        lines.append(f"  {'policy':<34} {'cost':>12}  {'bad answers':>11}  escalations")
+        for policy in report.policies:
+            lines.append(
+                f"  {policy.name:<34} ${policy.cost_usd:>11.6f}  "
+                f"{policy.bad_answers:>11}  {policy.escalations:>11}"
+            )
+            if policy.note:
+                lines.append(f"      {policy.note}")
+        lines.append(
+            "  Money and bad answers are separate columns because they are separate "
+            "things. What a wrong answer costs you is yours to supply; this report "
+            "will not invent a price for it."
+        )
+
+    if report.sweep:
+        lines.append("")
+        lines.append("threshold sweep on the held-out set")
+        for threshold, cost, bad in report.sweep:
+            marker = "  <- configured" if abs(threshold - model.threshold) < 1e-9 else ""
+            lines.append(f"  {threshold:>4.2f}   ${cost:>11.6f}   {bad:>4} bad answer(s){marker}")
+
+    top = model.top_features()
+    if top:
+        lines.append("")
+        lines.append("strongest weights (+ pushes toward the strong tier)")
+        for name, weight in top:
+            lines.append(f"  {weight:>+8.3f}  {name}")
+
+    for warning in report.warnings:
+        lines.append("")
+        lines.append(f"WARNING: {warning}")
+
+    return "\n".join(lines)
+
+
+def _format_metrics(metrics: Metrics) -> list[str]:
+    if not metrics.examples:
+        return ["  (nothing held out)"]
+    precision = f"{metrics.precision:.3f}" if metrics.precision is not None else "n/a"
+    recall = f"{metrics.recall:.3f}" if metrics.recall is not None else "n/a"
+    lines = [
+        f"  accuracy        {metrics.accuracy:.3f}   "
+        f"majority-class baseline {metrics.majority_accuracy:.3f}",
+        f"  precision       {precision}   of the requests it sent to the strong tier",
+        f"  recall          {recall}   of the failures it caught",
+        f"  escalates       {metrics.escalation_rate * 100:.1f}% of requests",
+    ]
+    if metrics.accuracy <= metrics.majority_accuracy:
+        lines.append(
+            "  this model does not beat answering the majority class every time; "
+            "it has learned the class balance and nothing else"
+        )
+    return lines
+
+
+__all__ = [
+    "Metrics",
+    "Policy",
+    "Row",
+    "TrainingError",
+    "TrainingReport",
+    "evaluate",
+    "format_report",
+    "load_rows",
+    "price_policies",
+    "sweep_thresholds",
+    "train_from_log",
+]
