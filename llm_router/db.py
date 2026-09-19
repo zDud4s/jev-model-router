@@ -365,6 +365,26 @@ class RequestLog:
                 file=sys.stderr,
             )
 
+    def record_label(self, request_id: str, *, verdict: str, reason: str, source: str) -> None:
+        """Attach a verdict that came from an answer key, not from a verifier.
+
+        `source` goes in `verifier_tier` and must not name a tier: it is how a
+        reader tells these labels from a judge's. No tokens and no cost -- no
+        call was made to produce them.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT id FROM requests WHERE request_id = ?", (request_id,)
+            ).fetchone()
+            if row is None:
+                raise KeyError(f"no request row for {request_id}")
+            self._conn.execute(
+                "INSERT INTO verifications (request_row_id, verdict, reason, verifier_tier) "
+                "VALUES (?,?,?,?)",
+                (row["id"], verdict, reason, source),
+            )
+            self._conn.commit()
+
     def apply_billing(
         self,
         row_id: int,

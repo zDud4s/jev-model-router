@@ -1,4 +1,4 @@
-"""Command line: `llm-router serve`, `stats`, `train` and `check`."""
+"""Command line: `llm-router serve`, `stats`, `train`, `label`, `reconcile` and `check`."""
 
 from __future__ import annotations
 
@@ -42,12 +42,28 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="the escalation target to price against (default: router.strong_tier)",
     )
+    train.add_argument(
+        "--db",
+        default=None,
+        help="train from this database instead of the serving log (e.g. one `label` wrote)",
+    )
     train.add_argument("--threshold", type=float, default=0.5)
     train.add_argument("--holdout", type=float, default=0.25)
     train.add_argument("--min-examples", type=int, default=40)
     train.add_argument("--seed", type=int, default=0)
     train.add_argument("--dry-run", action="store_true", help="report only; write nothing")
     train.add_argument("--json", action="store_true", help="emit JSON instead of text")
+
+    label = sub.add_parser(
+        "label", help="label a tier's answers from a question set with an answer key"
+    )
+    label.add_argument("--gsm8k", required=True, help="path to a GSM8K-format JSONL file")
+    label.add_argument("--db", required=True, help="database to write; never the serving log")
+    label.add_argument(
+        "--tier", default=None, help="the tier to label (default: router.default_tier)"
+    )
+    label.add_argument("--limit", type=int, default=None, help="ask at most this many")
+    label.add_argument("--json", action="store_true", help="emit JSON instead of text")
 
     reconcile = sub.add_parser(
         "reconcile", help="ask the provider what it charged for rows that carry no bill"
@@ -80,13 +96,19 @@ def _train(config, args) -> int:
         print(f"--tier and --strong-tier are both {strong!r}", file=sys.stderr)
         return 2
 
-    log = RequestLog(config.log.path, store_prompts=config.log.store_prompts)
+    log = RequestLog(args.db or config.log.path, store_prompts=config.log.store_prompts)
+    judged_by = config.verification.verifier_tier
+    if args.db:
+        # A labelled database names its own source; the config's verifier
+        # judged none of it.
+        sources = [r[0] for r in log.query("SELECT DISTINCT verifier_tier FROM verifications")]
+        judged_by = ",".join(sorted(s for s in sources if s)) or None
     try:
         report = train_from_log(
             log,
             predicts_tier=predicts,
             strong_tier=strong,
-            judged_by=config.verification.verifier_tier,
+            judged_by=judged_by,
             threshold=args.threshold,
             holdout=args.holdout,
             min_examples=args.min_examples,
@@ -156,6 +178,37 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "train":
         return _train(config, args)
+
+    if args.command == "label":
+        from .benchmark import format_label_report, label, load_gsm8k
+
+        tier = args.tier or config.router.default_tier
+        if not tier:
+            print("no tier: pass --tier, or set router.default_tier", file=sys.stderr)
+            return 2
+
+        def progress(n: int, ok: bool, reason: str) -> None:
+            print(f"  {n:>5}  {'pass' if ok else 'FAIL'}  {reason}", file=sys.stderr, flush=True)
+
+        try:
+            result = label(
+                config,
+                load_gsm8k(args.gsm8k),
+                db=args.db,
+                tier=tier,
+                source="gsm8k",
+                limit=args.limit,
+                progress=progress,
+            )
+        except ValueError as exc:
+            print(f"cannot label: {exc}", file=sys.stderr)
+            return 2
+        print(
+            json.dumps(result.to_dict(), indent=2)
+            if args.json
+            else format_label_report(result, db=args.db)
+        )
+        return 1 if result.errors else 0
 
     if args.command == "reconcile":
         from .reconcile import format_report, reconcile
