@@ -497,10 +497,9 @@ cent a review.
 
 ### Still not tested
 
-- **Billing against a real invoice.** The remote tier was the free route, so its cost column
-  is the list price times reported tokens, never checked against what a provider actually
-  charged. OpenRouter returns its own `usage.cost` on paid routes; comparing the two over a
-  day of traffic is the check.
+- **A paid route's invoice.** Every figure the provider returned here was $0, because every
+  call was the free route. The machinery below is exercised end to end; whether the drift
+  line stays inside 5% on a paid route is still a measurement nobody has made.
 - **The classifier on real traffic.** Its report above comes from a planted, perfectly
   separable signal. It has never been trained on verdicts from real requests, and the number
   that comes back from real prompts will be lower — that is the number worth having. What
@@ -514,6 +513,45 @@ cent a review.
   they are full of tool results, system notices and attachment placeholders that are not
   prompts at all, and a classifier will happily learn to tell those apart and report a score
   that means nothing.
+
+## The estimate and the invoice
+
+`cost_usd` is an estimate: the price table times the tokens the backend reported. It can be
+wrong three ways — a stale price, a token class nobody priced (cache reads were free here
+until a provider reported them), or tokens that never arrived. So the provider's own figure
+is kept beside it, never merged into it:
+
+| provider | what it says per request | how the router uses it |
+|---|---|---|
+| OpenRouter | `usage.cost`, on every response and on the last frame of a stream | `billed_cost_usd`, `billed_source: inline` |
+| OpenRouter, after the fact | `GET /generation?id=` — cost and native tokens | `llm-router reconcile` |
+| OpenAI, Anthropic direct | nothing; daily totals from admin-key cost endpoints | not reconcilable per row — counted as such |
+| Ollama | there is no invoice | billed `0` |
+
+A request's bill is all or nothing: a routed call, its review and its escalation are three
+bills, and if any one is missing the row's bill is NULL rather than a two-thirds figure
+beside a three-call estimate. `stats` compares the two only on rows that have both and
+prints the drift; past 5% it says the price table is wrong before it prints a savings line.
+
+**An abandoned stream used to leave no row at all.** Usage arrives in a stream's last frame,
+so a client that hangs up first leaves nothing to cost — but it did worse than that: on
+disconnect Starlette cancels the response's task group, anyio's cancellation is
+level-triggered, and the await that writes the row was cancelled with everything else.
+Reproduced against a real uvicorn and Ollama; the row was not written even after a clean
+shutdown. The write is now shielded, the row says `499` and *client disconnected*, and keeps
+the provider's id from the first frame. Then:
+
+```bash
+python -m llm_router -c config.yaml reconcile      # --dry-run to look first
+```
+
+asks the provider what that call cost and how many tokens it really used, and recomputes the
+row's estimate and every counterfactual from them. Run against OpenRouter on 2026-09-19: an
+abandoned stream went from zero tokens and no bill to 11 in / 1 out (the provider stopped
+generating when the client left) and its reconciled bill.
+
+What this cannot do is make a counterfactual exact. The column for a tier that never answered
+is that tier's price times *this* tier's tokens; no invoice will ever exist for it.
 
 ## A baseline worth beating
 

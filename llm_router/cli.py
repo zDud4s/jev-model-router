@@ -49,6 +49,13 @@ def _build_parser() -> argparse.ArgumentParser:
     train.add_argument("--dry-run", action="store_true", help="report only; write nothing")
     train.add_argument("--json", action="store_true", help="emit JSON instead of text")
 
+    reconcile = sub.add_parser(
+        "reconcile", help="ask the provider what it charged for rows that carry no bill"
+    )
+    reconcile.add_argument("--limit", type=int, default=500)
+    reconcile.add_argument("--dry-run", action="store_true", help="report only; write nothing")
+    reconcile.add_argument("--json", action="store_true", help="emit JSON instead of text")
+
     sub.add_parser("check", help="validate the config and exit")
     return parser
 
@@ -136,6 +143,21 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "train":
         return _train(config, args)
+
+    if args.command == "reconcile":
+        from .reconcile import format_report, reconcile
+
+        log = RequestLog(config.log.path, store_prompts=config.log.store_prompts)
+        try:
+            result = reconcile(config, log, limit=args.limit, dry_run=args.dry_run)
+        finally:
+            log.close()
+        print(
+            json.dumps(result.to_dict(), indent=2)
+            if args.json
+            else format_report(result, dry_run=args.dry_run)
+        )
+        return 1 if result.errors else 0
 
     if args.command == "serve":
         import uvicorn

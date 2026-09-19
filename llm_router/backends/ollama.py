@@ -88,6 +88,11 @@ class OllamaBackend:
             prompt_tokens=prompt,
             completion_tokens=completion,
             total_tokens=prompt + completion,
+            # Nobody sends an invoice for a local model, so the bill is known
+            # and it is zero. Leaving it None instead would make every request a
+            # local tier touched "unbilled", which in the headline setup -- a
+            # local cheap tier under a remote judge -- is every request there is.
+            billed_usd=0.0,
         )
 
     async def complete(self, request: ChatCompletionRequest) -> BackendResponse:

@@ -134,6 +134,36 @@ class Baseline:
 
 
 @dataclass
+class BillingStats:
+    """The provider's own figures beside the price-table estimate.
+
+    Compared only on rows that have both. The estimate over every row next to
+    the bill over some of them would be a gap made of missing rows.
+    """
+
+    billed_rows: int
+    reconciled_rows: int
+    unbilled_rows: int
+    # Unbilled rows with zero tokens and a provider id: almost always a stream
+    # the client left before the usage frame. `reconcile` can cost them.
+    recoverable_rows: int
+    estimate_usd: float
+    billed_usd: float
+
+    @property
+    def drift(self) -> float | None:
+        """(billed - estimate) / estimate, or None when there is nothing to divide."""
+        if self.estimate_usd <= 0:
+            return None
+        return (self.billed_usd - self.estimate_usd) / self.estimate_usd
+
+
+# Beyond this the price table is wrong, not rounding: a savings line built on it
+# is built on a number the invoice contradicts.
+DRIFT_TOLERANCE = 0.05
+
+
+@dataclass
 class Stats:
     requests: int
     errors: int
@@ -145,6 +175,7 @@ class Stats:
     baselines: list[Baseline] = field(default_factory=list)
     verification: VerificationStats | None = None
     classifier: ClassifierStats | None = None
+    billing: BillingStats | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -216,6 +247,7 @@ def collect(log: RequestLog) -> Stats:
     return Stats(
         verification=_verification(log),
         classifier=_classifier(log),
+        billing=_billing(log),
         requests=totals["requests"],
         errors=totals["errors"],
         total_cost_usd=totals["cost"],
@@ -225,6 +257,72 @@ def collect(log: RequestLog) -> Stats:
         by_tier=by_tier,
         baselines=baselines,
     )
+
+
+def _billing(log: RequestLog) -> BillingStats | None:
+    row = log.query(
+        """
+        SELECT
+          SUM(billed_cost_usd IS NOT NULL)                              AS billed,
+          SUM(billed_source = 'reconciled')                             AS reconciled,
+          SUM(billed_cost_usd IS NULL)                                  AS unbilled,
+          SUM(billed_cost_usd IS NULL AND upstream_id IS NOT NULL
+              AND input_tokens = 0 AND output_tokens = 0)               AS recoverable,
+          COALESCE(SUM(CASE WHEN billed_cost_usd IS NOT NULL
+                            THEN cost_usd END), 0)                      AS estimate,
+          COALESCE(SUM(billed_cost_usd), 0)                             AS billed_usd,
+          SUM(upstream_id IS NOT NULL)                                  AS with_id
+        FROM requests
+        """
+    )[0]
+    # A log with no provider figures at all -- fake backends, or a database
+    # from before v4 -- has nothing to compare, and an all-zero block would read
+    # as "estimate and invoice agree".
+    if not (row["billed"] or row["with_id"]):
+        return None
+    return BillingStats(
+        billed_rows=row["billed"] or 0,
+        reconciled_rows=row["reconciled"] or 0,
+        unbilled_rows=row["unbilled"] or 0,
+        recoverable_rows=row["recoverable"] or 0,
+        estimate_usd=row["estimate"],
+        billed_usd=row["billed_usd"],
+    )
+
+
+def _format_billing(b: BillingStats) -> list[str]:
+    lines = ["", "billing: the provider's own figure beside the price-table estimate"]
+    lines.append(
+        f"  rows the provider billed  {b.billed_rows}"
+        + (f"  ({b.reconciled_rows} reconciled after the fact)" if b.reconciled_rows else "")
+    )
+    lines.append(f"  estimate on those rows    ${b.estimate_usd:.6f}")
+    drift = b.drift
+    lines.append(
+        f"  billed on those rows      ${b.billed_usd:.6f}"
+        + (f"  drift {drift:+.1%}" if drift is not None else "")
+    )
+    if b.billed_rows and b.billed_usd == 0 and b.estimate_usd > 0:
+        lines.append(
+            "  note: billed $0 against a priced estimate -- a free route priced at list "
+            "price, or the prices belong to another model"
+        )
+    elif drift is not None and abs(drift) > DRIFT_TOLERANCE:
+        lines.append(
+            f"  DRIFT {drift:+.1%}: the price table does not match the invoice. Fix `prices` "
+            "before believing any savings line below -- they are all built on it."
+        )
+    if b.unbilled_rows:
+        lines.append(
+            f"  NOT BILLED {b.unbilled_rows} row(s): estimate only (a provider that reports "
+            "no cost, an error, or a review whose bill was missing)"
+        )
+    if b.recoverable_rows:
+        lines.append(
+            f"  RECOVERABLE {b.recoverable_rows} row(s) with zero tokens and a provider id -- "
+            "abandoned streams, costed at nothing: run `llm-router reconcile`"
+        )
+    return lines
 
 
 def _verification(log: RequestLog) -> VerificationStats | None:
@@ -396,6 +494,9 @@ def format_text(stats: Stats) -> str:
             f"  {row.tier:<14} {row.requests:>6} req  ${row.cost_usd:>12.6f}  "
             f"in {row.input_tokens:>9}  out {row.output_tokens:>9}  cached {row.cached_tokens:>9}"
         )
+
+    if stats.billing is not None:
+        lines.extend(_format_billing(stats.billing))
 
     if stats.classifier is not None:
         lines.extend(_format_classifier(stats.classifier))

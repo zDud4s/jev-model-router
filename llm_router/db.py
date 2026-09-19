@@ -31,7 +31,7 @@ from .pricing import Counterfactual
 from .schemas import Usage
 from .verification import VerificationOutcome
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 # Each entry is one forward migration, applied in order. Never edit a migration
 # that has shipped; append a new one. The list index + 1 is its version.
@@ -133,6 +133,19 @@ _MIGRATIONS: list[str] = [
 
     CREATE INDEX IF NOT EXISTS idx_requests_route_model ON requests(route_model);
     """,
+    # --- v4: what the provider says it charged ------------------------------
+    #
+    # `cost_usd` is an ESTIMATE: price table times reported tokens. These are
+    # the provider's own figure, kept beside it and never merged into it, so the
+    # gap is visible. No backfill: nobody asked the provider about old rows,
+    # and NULL is the fact. `upstream_id` is the provider's id for the routed
+    # call, which is what `reconcile` needs to ask after the fact -- the only
+    # way to cost a stream the client abandoned before its usage frame arrived.
+    """
+    ALTER TABLE requests ADD COLUMN upstream_id     TEXT;
+    ALTER TABLE requests ADD COLUMN billed_cost_usd REAL;
+    ALTER TABLE requests ADD COLUMN billed_source   TEXT;
+    """,
 ]
 
 
@@ -170,6 +183,13 @@ class LogEntry:
     route_score: float | None = None
     route_model: str | None = None
     route_reason: str | None = None
+    # The provider's id for the routed call, and the provider's own total for
+    # every call this request made (route, review, escalation). None when any
+    # one of those calls went unreported: a partial bill next to a full
+    # estimate would show a saving that is only a missing row.
+    upstream_id: str | None = None
+    billed_cost_usd: float | None = None
+    billed_source: str | None = None
     ts: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
     @property
@@ -247,8 +267,9 @@ class RequestLog:
                     stream, prompt_sha256, prompt_text, input_tokens, output_tokens,
                     cached_tokens, cache_write_tokens, cost_usd, latency_ms,
                     http_status, error, eligibility_rejections, route_cost_usd, final_tier,
-                    route_score, route_model, route_reason
-                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    route_score, route_model, route_reason,
+                    upstream_id, billed_cost_usd, billed_source
+                ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 """,
                 (
                     entry.request_id,
@@ -277,6 +298,9 @@ class RequestLog:
                     entry.route_score,
                     entry.route_model,
                     entry.route_reason,
+                    entry.upstream_id,
+                    entry.billed_cost_usd,
+                    entry.billed_source,
                 ),
             )
             row_id = int(cur.lastrowid)
@@ -340,6 +364,49 @@ class RequestLog:
                 f"llm-router: log write failed and could not be recorded: {message}",
                 file=sys.stderr,
             )
+
+    def apply_billing(
+        self,
+        row_id: int,
+        *,
+        billed_usd: float,
+        served_tier: str,
+        usage: Usage | None = None,
+        costs: dict[str, float] | None = None,
+    ) -> None:
+        """Write a provider's after-the-fact bill onto an existing row.
+
+        `usage` and `costs` are given only when the row's own usage never
+        arrived; the estimate and every counterfactual are then recomputed from
+        the provider's tokens, because a row costed from zero tokens is zero at
+        every tier and flatters none of them honestly.
+        """
+        with self._lock:
+            self._conn.execute(
+                "UPDATE requests SET billed_cost_usd = ?, billed_source = 'reconciled' "
+                "WHERE id = ?",
+                (billed_usd, row_id),
+            )
+            if usage is not None and costs is not None:
+                served = costs.get(served_tier, 0.0)
+                self._conn.execute(
+                    "UPDATE requests SET input_tokens = ?, output_tokens = ?, "
+                    "cached_tokens = ?, cost_usd = ?, route_cost_usd = ? WHERE id = ?",
+                    (
+                        usage.prompt_tokens,
+                        usage.completion_tokens,
+                        usage.cached_tokens,
+                        served,
+                        served,
+                        row_id,
+                    ),
+                )
+                self._conn.executemany(
+                    "UPDATE counterfactuals SET cost_usd = ? "
+                    "WHERE request_row_id = ? AND tier = ?",
+                    [(cost, row_id, tier) for tier, cost in costs.items()],
+                )
+            self._conn.commit()
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         with self._lock:

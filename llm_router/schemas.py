@@ -64,6 +64,13 @@ class Usage(BaseModel):
     total_tokens: int = 0
     cached_tokens: int = 0
     cache_write_tokens: int = 0
+    # What the provider says it CHARGED for this call, in USD, when it says.
+    # None means "not reported", never "free": the estimate from the price table
+    # is a different number, kept beside this one rather than replaced by it, so
+    # the gap between them is something `stats` can show. OpenRouter reports it
+    # on every response as `usage.cost` (its credits are dollars); OpenAI and
+    # Anthropic report nothing per request.
+    billed_usd: float | None = None
 
     @classmethod
     def from_openai(cls, raw: dict[str, Any] | None) -> "Usage":
@@ -76,10 +83,17 @@ class Usage(BaseModel):
             completion_tokens=completion,
             total_tokens=int(raw.get("total_tokens", prompt + completion) or 0),
             cached_tokens=int(details.get("cached_tokens", 0) or 0),
-            # Anthropic-style proxies report cache writes; OpenAI does not.
+            # Three spellings of one number. Anthropic-style proxies use the
+            # `cache_creation` pair; OpenRouter uses `cache_write_tokens`, and
+            # until it was read here every cache write through OpenRouter was
+            # billed at nothing.
             cache_write_tokens=int(
-                details.get("cache_creation_tokens", raw.get("cache_creation_input_tokens", 0)) or 0
+                details.get("cache_write_tokens")
+                or details.get("cache_creation_tokens")
+                or raw.get("cache_creation_input_tokens")
+                or 0
             ),
+            billed_usd=_optional_float(raw.get("cost")),
         )
 
     def to_openai(self) -> dict[str, Any]:
@@ -89,6 +103,15 @@ class Usage(BaseModel):
             "total_tokens": self.total_tokens or (self.prompt_tokens + self.completion_tokens),
             "prompt_tokens_details": {"cached_tokens": self.cached_tokens},
         }
+
+
+def _optional_float(value: Any) -> float | None:
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def new_completion_id() -> str:

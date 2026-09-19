@@ -19,6 +19,7 @@ import uuid
 from contextlib import asynccontextmanager
 from typing import Any, AsyncIterator, Callable
 
+import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import ValidationError
@@ -39,6 +40,7 @@ from .routing import Router, build_router
 from .schemas import ChatCompletionRequest, ModelList, Usage, error_body, model_card
 from .verification import (
     SkipReason,
+    Verdict,
     VerificationOutcome,
     Verifier,
     build_verifier,
@@ -218,6 +220,8 @@ def create_app(
                 base_entry.cost_usd += verification.extra_cost_usd
                 if verification.escalated and verification.escalated_to:
                     base_entry.final_tier = verification.escalated_to
+            base_entry.billed_cost_usd = billed_total(usage, verification)
+            base_entry.billed_source = "inline" if base_entry.billed_cost_usd is not None else None
             base_entry.latency_ms = _elapsed_ms(started)
             base_entry.http_status = status
             base_entry.error = error
@@ -264,6 +268,8 @@ def create_app(
                             usage = pending.usage
                             break
                         if isinstance(pending, StreamChunk):
+                            if base_entry.upstream_id is None:
+                                base_entry.upstream_id = _upstream_id(pending.data)
                             yield _sse(pending.data)
                         try:
                             pending = await events.__anext__()
@@ -280,10 +286,25 @@ def create_app(
                     status, error = 500, f"{type(exc).__name__}: {exc}"
                     yield _sse(error_body(error, kind="internal_error"))
                     yield _DONE_FRAME
+                except BaseException:
+                    # Cancellation: the client hung up. 499 is nginx's "client
+                    # closed request" -- the 200 already on the wire is not what
+                    # happened, and a row that says 200 with no tokens reads as
+                    # a free success.
+                    status = 499
+                    error = "client disconnected before the stream finished"
+                    raise
                 finally:
-                    # Runs on client disconnect too, so an abandoned stream is
-                    # still costed with the tokens it actually consumed.
-                    await finish(usage, status, error, stream_skip)
+                    # Shielded, or the row is lost. On disconnect Starlette
+                    # cancels this task group, and anyio's cancellation is
+                    # level-triggered: every await here is cancelled again,
+                    # including the one that writes the row. Measured against a
+                    # real uvicorn + Ollama: an abandoned stream left no row at
+                    # all, not even after a clean shutdown. Its tokens were
+                    # still generated and, on a paid tier, still billed --
+                    # `reconcile` recovers them through `upstream_id`.
+                    with anyio.CancelScope(shield=True):
+                        await finish(usage, status, error, stream_skip)
 
             return StreamingResponse(
                 body(),
@@ -320,6 +341,7 @@ def create_app(
 
         # --- verify -----------------------------------------------------------
         body = result.body
+        base_entry.upstream_id = _upstream_id(body)
         verification: VerificationOutcome | None = None
         if active_verifier is not None:
             verification = await active_verifier.check(
@@ -354,6 +376,34 @@ def _skip(
     if verifier is None or not config.verification.verifies(tier_name):
         return None
     return verifier.skip(reason)
+
+
+def _upstream_id(payload: Any) -> str | None:
+    value = payload.get("id") if isinstance(payload, dict) else None
+    return value if isinstance(value, str) and value else None
+
+
+def billed_total(usage: Usage, verification: VerificationOutcome | None) -> float | None:
+    """The provider's own total for every call this request made, or None.
+
+    All or nothing. A request that bought a review and an escalation has three
+    bills; summing the two that were reported and dropping the third would sit
+    beside a three-call estimate and read as a saving.
+    """
+    parts = [usage.billed_usd]
+    if verification is not None:
+        reviewed = verification.verifier_tier is not None and verification.verdict in (
+            Verdict.PASS,
+            Verdict.FAIL,
+            Verdict.ERROR,
+        )
+        if reviewed:
+            parts.append(verification.verifier_usage.billed_usd)
+        if verification.escalated:
+            parts.append(verification.escalation_usage.billed_usd)
+    if any(part is None for part in parts):
+        return None
+    return sum(parts)  # type: ignore[arg-type]
 
 
 def _elapsed_ms(started: float) -> int:
