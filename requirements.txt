@@ -1,0 +1,6 @@
+# Runtime dependencies. Development extras live in pyproject.toml ([project.optional-dependencies].dev).
+fastapi>=0.110
+uvicorn>=0.27
+httpx>=0.27
+pydantic>=2.6
+PyYAML>=6.0

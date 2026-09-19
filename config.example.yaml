@@ -1,0 +1,102 @@
+# llm-router configuration.
+#
+# This file IS the model catalog. Nothing in the source names a model, so adding
+# a backend is one entry here and no code change.
+
+server:
+  host: 127.0.0.1
+  port: 8080
+
+log:
+  path: ./llm-router.db
+  # Prompts are user data, so only their SHA-256 is stored by default.
+  # Set to true to keep the full text as well.
+  store_prompts: false
+
+router:
+  kind: static          # the only implementation today; the classifier lands here later
+  default_tier: cheap
+  # Optional: let a client that hardcodes a vendor model string pick a tier.
+  model_map:
+    gpt-4o: top
+    gpt-4o-mini: cheap
+
+tiers:
+  # A local model. No prices, so it costs zero -- that is the correct answer,
+  # not a missing value, and it needs no configuration to say so.
+  cheap:
+    backend: ollama
+    model: llama3.1:8b
+    base_url: http://localhost:11434
+    context_window: 131072
+    supports_tools: false
+
+  # `backend: openai_compatible` covers OpenAI, OpenRouter, vLLM, and Anthropic
+  # behind an OpenAI-shaped proxy. The api key is read from the named env var at
+  # call time, so this file carries no credential.
+  mid:
+    backend: openai_compatible
+    model: claude-sonnet-5
+    base_url: https://api.example-proxy.com/v1
+    api_key_env: LLM_ROUTER_MID_KEY
+    context_window: 200000
+    supports_tools: true
+    prices:            # USD per 1M tokens; every field optional
+      input: 3.00
+      output: 15.00
+      cache_read: 0.30
+      cache_write: 3.75
+
+  top:
+    backend: openai_compatible
+    model: claude-opus-5
+    base_url: https://api.example-proxy.com/v1
+    api_key_env: LLM_ROUTER_TOP_KEY
+    context_window: 200000
+    supports_tools: true
+    prices:
+      input: 15.00
+      output: 75.00
+      cache_read: 1.50
+      cache_write: 18.75
+
+# The verification loop: a stronger tier reads the cheap tier's answer and says
+# whether it stands. A failed verdict re-runs the request at `escalate_to`, and
+# the client receives that second answer instead.
+#
+# OFF by default, and the default is not shyness. Every checked request buys a
+# second call, and every failed verdict buys a third; with the tiers above, a
+# request that is routed cheap and then fails review costs MORE than sending it
+# to `top` in the first place. `llm-router stats` prints the loop's spend as a
+# share of the bill for exactly this reason -- read it before believing a
+# savings number.
+verification:
+  enabled: false
+  verifier_tier: top        # who judges
+  verify_tiers: [cheap]     # which served tiers get judged; empty = all but the verifier
+  escalate_to: top          # who re-answers a failed verdict; defaults to verifier_tier
+
+  # Fraction of eligible answers actually reviewed. Keep it at 1.0 while the
+  # loop is producing labelled data; drop it once the failure rate is known and
+  # you are paying for confirmation rather than discovery.
+  sample_rate: 1.0
+
+  # What happens when the verifier cannot be understood, or cannot be reached.
+  # `accept` keeps the cheap answer; `escalate` buys a second one. The default
+  # refuses to spend money because a verifier is misconfigured -- `stats` counts
+  # both cases so the choice stays visible rather than convenient.
+  on_unparseable: accept    # accept | escalate
+  on_verifier_error: accept # accept | escalate
+
+  # Bounds on what the verifier is shown. A review prompt that grows without
+  # limit is how a verification loop quietly becomes the most expensive call in
+  # the system.
+  max_transcript_chars: 12000
+  max_answer_chars: 8000
+  max_verdict_tokens: 200
+
+  # Optional. Replaces the built-in reviewer instructions wholesale. Whatever
+  # you write must still ask for a line of the form `VERDICT: PASS` or
+  # `VERDICT: FAIL`, or every verdict is unparseable.
+  # system_prompt: |
+  #   ...
