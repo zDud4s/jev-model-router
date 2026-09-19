@@ -56,7 +56,13 @@ def _build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--dry-run", action="store_true", help="report only; write nothing")
     reconcile.add_argument("--json", action="store_true", help="emit JSON instead of text")
 
-    sub.add_parser("check", help="validate the config and exit")
+    check = sub.add_parser("check", help="validate the config and exit")
+    check.add_argument(
+        "--prices",
+        action="store_true",
+        help="also compare each tier's prices with the provider's published list",
+    )
+    check.add_argument("--json", action="store_true", help="emit JSON (with --prices)")
     return parser
 
 
@@ -127,8 +133,15 @@ def main(argv: list[str] | None = None) -> int:
         return 2
 
     if args.command == "check":
-        print(f"config OK: {len(config.tiers)} tier(s): {', '.join(config.tiers)}")
-        return 0
+        if not (args.prices and args.json):
+            print(f"config OK: {len(config.tiers)} tier(s): {', '.join(config.tiers)}")
+        if not args.prices:
+            return 0
+        from .price_check import check_prices, format_report
+
+        prices = check_prices(config)
+        print(json.dumps(prices.to_dict(), indent=2) if args.json else format_report(prices))
+        return 0 if prices.ok else 1
 
     if args.command == "stats":
         # Opened read-write on purpose: the migration must run so `stats` works

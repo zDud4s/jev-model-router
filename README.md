@@ -72,7 +72,7 @@ tiers:
 Validate it without starting anything:
 
 ```bash
-python -m llm_router -c config.yaml check
+python -m llm_router -c config.yaml check            # add --prices to compare with OpenRouter's list
 ```
 
 ### Eligibility comes before routing
@@ -552,6 +552,23 @@ generating when the client left) and its reconciled bill.
 
 What this cannot do is make a counterfactual exact. The column for a tier that never answered
 is that tier's price times *this* tier's tokens; no invoice will ever exist for it.
+
+### Checking the price table before the money is spent
+
+Drift in `stats` shows up only after the traffic has run. The price table itself can be
+checked first, against OpenRouter's public model list (no key, no quota):
+
+```bash
+python -m llm_router -c config.yaml check --prices     # --json for a script; exit 1 on any finding
+```
+
+Every OpenRouter tier is compared field by field, in USD per 1M tokens. The command reports
+a price that differs (with both numbers), a charged model with no prices (costed at zero), a
+model id the provider does not list, and, as a note, rates the config cannot express, such as
+a higher price above 200k prompt tokens. Run on 2026-09-19 against a config written from
+memory, it found a `cache_read` billed at the full input rate where the provider charges half,
+a `cache_write` left out (so costed at zero), and a misspelt model id. Other providers
+publish no machine-readable list and are reported as `unchecked`, not as passing.
 
 ## A baseline worth beating
 
