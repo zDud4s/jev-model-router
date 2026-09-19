@@ -669,3 +669,98 @@ def test_the_escalation_target_defaults_to_the_verifier() -> None:
     # It has already read the question; asking a third tier would pay for the
     # context twice for no stated reason.
     assert config.verification.escalate_to == "top"
+
+
+# --- found on the first run against a real model -----------------------------
+#
+# qwen3.5:4b through Ollama, 2026-09-19. Three requests, three defects, none of
+# them reachable with a backend that always answers politely.
+
+
+class TruncatedBackend(ScriptedBackend):
+    """Answers from a script, but reports every answer as cut off by length."""
+
+    async def complete(self, request: ChatCompletionRequest) -> BackendResponse:
+        self.calls.append(request)
+        content = self.replies.pop(0) if self.replies else self.content
+        return BackendResponse(
+            body=build_completion(
+                model=self.tier.name, content=content, usage=self.usage, finish_reason="length"
+            ),
+            usage=self.usage,
+        )
+
+
+def test_an_empty_answer_is_a_failure_and_needs_no_reviewer_to_say_so() -> None:
+    # Measured: a thinking model spent its whole context reasoning, returned an
+    # empty `content`, and the client received a 200 with nothing in it. The
+    # loop recorded `no_answer_text` -- a skip designed for tool-call answers --
+    # and let it through. An answer that is not there is not a thing to review.
+    log = RequestLog(":memory:")
+    backends: dict[str, Any] = {}
+
+    def factory(tier):
+        if tier.name == "cheap":
+            backend = TruncatedBackend(tier, replies=[""])
+        else:
+            backend = ScriptedBackend(tier, replies=["the proper answer"])
+        backends[tier.name] = backend
+        return backend
+
+    app = create_app(verifying(), backend_factory=factory, log=log)
+    with TestClient(app) as client:
+        response = post(client)
+        check = verification_row(log)
+
+    assert check["verdict"] == "fail"
+    assert "empty answer" in check["reason"]
+    assert "length" in check["reason"]
+    # One call to `top`: the escalation. No review was bought to discover that
+    # nothing had been said.
+    assert len(backends["top"].calls) == 1
+    assert check["verifier_cost_usd"] == 0.0
+    assert check["escalated"] == 1
+    assert response.json()["choices"][0]["message"]["content"] == "the proper answer"
+
+
+def test_an_empty_answer_is_failed_even_when_it_was_sampled_out() -> None:
+    # Detecting it is free, so sampling -- which exists to ration a paid review
+    # -- has nothing to ration here.
+    log = RequestLog(":memory:")
+    config = verifying(sample_rate=0.0)
+    backends: dict[str, Any] = {}
+
+    def factory(tier):
+        backend = (
+            TruncatedBackend(tier, replies=[""])
+            if tier.name == "cheap"
+            else ScriptedBackend(tier, replies=["the proper answer"])
+        )
+        backends[tier.name] = backend
+        return backend
+
+    with TestClient(create_app(config, backend_factory=factory, log=log)) as client:
+        post(client)
+        check = verification_row(log)
+    assert check["verdict"] == "fail"
+
+
+def test_a_verifier_that_ran_out_of_tokens_is_named_as_such() -> None:
+    # Measured: both reviews came back with exactly max_verdict_tokens (200)
+    # generated and no verdict, because the model spent them thinking. Recorded
+    # as a bare "unparseable verdict", which sends whoever reads it to the
+    # regex. The finish reason says what actually happened.
+    log = RequestLog(":memory:")
+
+    def factory(tier):
+        if tier.name == "top":
+            return TruncatedBackend(tier, replies=["Let me think about whether"])
+        return ScriptedBackend(tier, replies=["4"])
+
+    with TestClient(create_app(verifying(), backend_factory=factory, log=log)) as client:
+        post(client)
+        check = verification_row(log)
+
+    assert check["unparseable"] == 1
+    assert "max_verdict_tokens" in check["reason"]
+    assert "200" in check["reason"]

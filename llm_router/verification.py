@@ -144,6 +144,19 @@ def answer_text(body: Mapping[str, Any] | None) -> str:
     return ""
 
 
+def finish_reason(body: Mapping[str, Any] | None) -> str | None:
+    """Why the backend stopped generating, as it reported it."""
+    choices = (body or {}).get("choices") or []
+    return choices[0].get("finish_reason") if choices else None
+
+
+def has_tool_calls(body: Mapping[str, Any] | None) -> bool:
+    choices = (body or {}).get("choices") or []
+    if not choices:
+        return False
+    return bool((choices[0].get("message") or {}).get("tool_calls"))
+
+
 def parse_verdict(text: str) -> tuple[bool | None, str | None]:
     """(passed, reason). `passed` is None when the reply carries no verdict."""
     if not text:
@@ -256,7 +269,16 @@ class Verifier:
 
         answer = answer_text(body)
         if not answer:
-            return self.skip(SkipReason.NO_ANSWER_TEXT)
+            if has_tool_calls(body):
+                # A tool call is a complete answer with no prose in it.
+                return self.skip(SkipReason.NO_ANSWER_TEXT)
+            # No text and no tool calls is not an answer at all. This used to be
+            # the same skip as the tool-call case, and on the first run against
+            # a real model it let an empty 200 through to the client: a thinking
+            # model spent its whole window reasoning and said nothing. Failing it
+            # needs no reviewer, costs nothing, and so ignores sampling --
+            # sampling rations a paid review, and there is nothing here to pay.
+            return await self._fail_empty(request, served_tier, body, eligible)
 
         if self._rng() >= settings.sample_rate:
             return self.skip(SkipReason.SAMPLED_OUT)
@@ -296,7 +318,22 @@ class Verifier:
             # The fallback decides, and says so: a pass rate that includes
             # unparseable replies must be readable as such in the log.
             passed = settings.on_unparseable == "accept"
-            outcome.reason = f"unparseable verdict; on_unparseable={settings.on_unparseable}"
+            cause = ""
+            if finish_reason(result.body) == "length":
+                # Measured on qwen3.5:4b: every review came back with exactly
+                # max_verdict_tokens generated and no verdict, because a
+                # thinking model spends that budget reasoning before it writes a
+                # word. A bare "unparseable" sends the reader to the regex; the
+                # cause is the budget, and the reason says so.
+                cause = (
+                    f"; the verifier stopped at max_verdict_tokens "
+                    f"({settings.max_verdict_tokens}) before giving one -- a thinking "
+                    "model spends that budget reasoning: set extra_body think: false "
+                    "on the verifier tier, or raise max_verdict_tokens"
+                )
+            outcome.reason = (
+                f"unparseable verdict{cause}; on_unparseable={settings.on_unparseable}"
+            )
         else:
             outcome.reason = reason
 
@@ -304,6 +341,28 @@ class Verifier:
         if not passed:
             await self._escalate(request, served_tier, eligible, outcome)
 
+        outcome.latency_ms = _elapsed_ms(started)
+        return outcome
+
+    async def _fail_empty(
+        self,
+        request: ChatCompletionRequest,
+        served_tier: str,
+        body: Mapping[str, Any] | None,
+        eligible: list[str],
+    ) -> VerificationOutcome:
+        started = time.perf_counter()
+        outcome = VerificationOutcome(
+            verdict=Verdict.FAIL,
+            # Nobody judged it, and the column says so rather than crediting a
+            # verifier that was never called.
+            verifier_tier=None,
+            reason=(
+                f"empty answer (finish_reason={finish_reason(body)}); "
+                "failed without a review"
+            ),
+        )
+        await self._escalate(request, served_tier, eligible, outcome)
         outcome.latency_ms = _elapsed_ms(started)
         return outcome
 
@@ -367,5 +426,7 @@ __all__ = [
     "answer_text",
     "build_review_request",
     "build_verifier",
+    "finish_reason",
+    "has_tool_calls",
     "parse_verdict",
 ]

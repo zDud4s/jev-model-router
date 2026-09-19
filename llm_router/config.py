@@ -145,7 +145,16 @@ class VerificationConfig:
     # expensive call in the system.
     max_transcript_chars: int = 12000
     max_answer_chars: int = 8000
-    # The verdict is one line plus a reason; it does not need a large budget.
+    # The verdict is one line plus a reason, and for a model that answers
+    # directly 200 is ample: measured at 6 tokens. A THINKING model spends this
+    # budget reasoning before it writes a word, and at 200 it returned no
+    # verdict at all, every time. Two ways out, and both were measured on
+    # qwen3.5:4b: `extra_body: {think: false}` on the verifier tier (6 tokens,
+    # ~2s, but it waved through 17 * 23 = 401 -- without reasoning it cannot
+    # check a computation), or thinking on with ~3000 here (caught it, at
+    # 490-1054 tokens and 21-56s a verdict). The second multiplies the review's
+    # output cost by two orders of magnitude, which is the price of a judge that
+    # can do arithmetic.
     max_verdict_tokens: int = 200
     # Override the reviewer instructions. None uses the built-in prompt.
     system_prompt: str | None = None

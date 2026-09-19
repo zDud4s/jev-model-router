@@ -121,6 +121,13 @@ verification:
   # the system.
   max_transcript_chars: 12000
   max_answer_chars: 8000
+
+  # Enough for a verdict from a model that answers directly (measured: 6
+  # tokens). NOT enough for a thinking model, which spends the whole budget
+  # reasoning and returns no verdict -- every one then lands on on_unparseable.
+  # For a thinking verifier either add `extra_body: {think: false}` to its tier
+  # (fast, but it stops checking computations: a 4B judge passed 17*23 = 401)
+  # or raise this to ~3000 (it caught that, at 500-1000 output tokens a review).
   max_verdict_tokens: 200
 
   # Optional. Replaces the built-in reviewer instructions wholesale. Whatever

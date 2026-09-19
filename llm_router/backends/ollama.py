@@ -49,20 +49,34 @@ class OllamaBackend:
             options["num_predict"] = request.output_budget
         if request.stop is not None:
             options["stop"] = request.stop if isinstance(request.stop, list) else [request.stop]
+        # The window the eligibility gate reasoned about, sent to the backend
+        # that has to honour it. Ollama does not read a model's trained context
+        # length; left unset it picks a default from free VRAM (4096 on the
+        # machine where this was found) and silently truncates past it. Measured
+        # 2026-09-19: config said 32768, the gate believed 32768, Ollama ran at
+        # 4096, and a thinking model spent all of it reasoning and returned an
+        # empty answer. Without this line `context_window` is a fiction the gate
+        # is enforcing on nobody's behalf.
+        options["num_ctx"] = self.tier.context_window
+
+        extra = dict(self.tier.extra_body)
+        # `extra_body` is applied as a top-level update, so an `options` key in
+        # it would replace this dict wholesale and take num_ctx with it. Merged
+        # instead, with the operator's values winning on a clash.
+        options.update(extra.pop("options", None) or {})
 
         body: dict[str, Any] = {
             "model": self.tier.model,
             "messages": [m.model_dump(exclude_none=True) for m in request.messages],
             "stream": stream,
+            "options": options,
         }
-        if options:
-            body["options"] = options
         if request.tools:
             # Ollama accepts OpenAI-shaped tool definitions. Whether the model
             # honours them is a property of the model, which is what the tier's
             # `supports_tools` flag declares to the eligibility gate.
             body["tools"] = request.tools
-        body.update(self.tier.extra_body)
+        body.update(extra)
         return body
 
     def _usage(self, payload: dict[str, Any]) -> Usage:

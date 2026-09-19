@@ -7,8 +7,8 @@ One API in, any model out. Point a client at this endpoint instead of a vendor's
 backend it reaches is a line of configuration rather than a code change.
 
 It routes, it verifies, it learns which prompts the cheap model gets wrong, and it
-measures all three. What it has never done is talk to a real model — see
-[What has not been tested](#what-has-not-been-tested).
+measures all three. It has met one real model so far, and that broke it in three places — see
+[What happened the first time it met a real model](#what-happened-the-first-time-it-met-a-real-model).
 
 ## Why the log is the point
 
@@ -409,29 +409,61 @@ log must not take the proxy down with it.
 
 No network: backends are faked.
 
-## What has not been tested
+## What happened the first time it met a real model
 
-Every part of the design is built. None of it has met a real model.
+Everything above was built against fake backends. The first run against a real one —
+`qwen3.5:4b` through a local Ollama, a thinking model, three questions — broke in three
+places, none of them reachable with a backend that always answers politely:
 
-**No backend in this repository has ever been contacted.** The suite fakes the network at
-`create_app(backend_factory=...)`, deliberately, so that the tests are about this code. That
-leaves one assumption entirely unverified, and it is load-bearing: that a real cheap model,
-asked for `VERDICT: PASS` or `VERDICT: FAIL`, reliably emits one. If it does not, verdicts
-become unparseable, the fallback decides them, and the classifier's training corpus is
-whatever the fallback manufactured. `stats` counts unparseable verdicts precisely because that
-failure is silent otherwise — but counting it is not the same as having run it. Point this at
-an Ollama and a real proxy before believing any number it prints.
+1. **The context window was fiction.** The config said `context_window: 32768` and the
+   eligibility gate reasoned about 32768. Nothing ever told Ollama, which picks its own default
+   from free VRAM — 4096 on that machine — and truncates silently past it. The Ollama backend
+   now sends `num_ctx` from the tier's `context_window`, so the number the gate enforces is the
+   number the backend runs with.
+2. **An empty answer went to the client as a 200.** The model spent its whole window reasoning
+   and wrote nothing. The loop recorded `no_answer_text` — a skip meant for answers that are
+   only tool calls — and let it through. An answer with no text and no tool calls is now a
+   `fail`, decided without paying a reviewer, regardless of sampling, and escalated.
+3. **Every verdict was unparseable, and the fallback called them passes.** The verifier spent
+   its 200-token budget thinking and never wrote a verdict. `stats` flagged it
+   (`UNPARSEABLE 2`), which is what that line exists for, but the recorded reason just said
+   "unparseable", sending the reader to the regex. It now names the cause: the verifier hit
+   `max_verdict_tokens`.
 
-**Every figure in this README comes from fake backends.** The shapes are real — this code
-produced them — and the numbers are not a measurement of any model. That matters most in the
-classifier report: a planted, perfectly separable signal gives a perfect score, and real
-prompts will not.
+After those fixes, the same three questions: three correct answers, three parseable verdicts.
 
-**The corpus filter is narrower than the warning it replaces.** The labels here come from this
-router's own log, so every row is a genuine request. Training a classifier on somebody else's
-transcripts is a different job with a trap of its own: transcripts are full of tool results,
-system notices and attachment placeholders that are not prompts at all, and a classifier will
-happily learn to tell those apart and report a score that means nothing.
+Then the question the fixes could not answer — **can a real small judge say FAIL?** Ten planted
+answers, known truth, the same model judging:
+
+| verifier setup | correct verdicts | tokens per verdict | seconds per verdict |
+|---|---|---|---|
+| `think: false`, `max_verdict_tokens: 200` | 9 of 10 | 6 | ~2 |
+| thinking on, `max_verdict_tokens: 3000` (4 hardest cases) | 4 of 4 | 490–1054 | 21–56 |
+
+The one miss is the instructive part. With thinking off, the judge passed `17 × 23 = 401`:
+without reasoning it cannot re-check a computation, and the reviewer prompt tells it to pass
+what it cannot check rather than turn every request into two. It caught Sydney, Saturn,
+"Gracias" and "91 is prime", which need recall rather than work. Thinking on caught 401 too —
+at a hundred times the output tokens per review, which on a paid verifier is a hundred times
+the review's output cost.
+
+So the load-bearing assumption held, with conditions attached: a real model does emit a
+parseable verdict, *if* the verdict budget fits the way the model answers, and a cheap judge's
+verdicts are only as good as the checking it can afford to do.
+
+### Still not tested
+
+- **A paid strong tier.** The judge above was the cheap model reviewing under a different tier
+  name, with invented prices. No `openai_compatible` backend has been called; the economics
+  in this README are all from fake backends.
+- **The classifier on real traffic.** Its report above comes from a planted, perfectly
+  separable signal. It has never been trained on verdicts from real requests, and the number
+  that comes back from real prompts will be lower — that is the number worth having.
+- **Somebody else's transcripts.** The labels here come from this router's own log, so every
+  row is a genuine request. Training on other transcripts is a different job with its own trap:
+  they are full of tool results, system notices and attachment placeholders that are not
+  prompts at all, and a classifier will happily learn to tell those apart and report a score
+  that means nothing.
 
 ## A baseline worth beating
 
