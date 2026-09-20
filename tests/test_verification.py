@@ -988,3 +988,22 @@ def test_nothing_is_retried_unless_the_operator_asked_for_it() -> None:
 
     assert len(backends["cheap"].calls) == 1
     assert len(backends["top"].calls) == 1
+
+
+def test_stats_separates_the_failures_nobody_paid_to_find(tmp_path) -> None:
+    # An operator whose failures are mostly runaway generations is looking at a
+    # knob, not at a model. Until this line existed, both kinds arrived in the
+    # same "fail" count and the difference was invisible.
+    path = str(tmp_path / "s.db")
+    config = verifying(retry_unfinished=True)
+    # A fresh handle per request: leaving the client's lifespan closes the log.
+    _run(config, lambda tier: TruncatedBackend(tier, replies=["one", "two"]), RequestLog(path))
+    _run(config, lambda tier: FlakyBackend(tier, replies=["I begin", "42"]), RequestLog(path))
+
+    log = RequestLog(path)
+    text = format_text(collect(log))
+    log.close()
+
+    assert "free failures" in text
+    assert "those are most of your failures" in text
+    assert "of which retry" in text

@@ -57,8 +57,15 @@ class VerificationStats:
     unparseable: int
     skipped: int
     escalated: int
-    verifier_cost_usd: float
-    escalation_cost_usd: float
+    # Failures no judge ever read: an empty answer, or one cut off at the tier's
+    # own output budget. Reported apart because they point at a knob rather than
+    # at the model -- and because they are free, so a loop full of them is
+    # paying for reviews it does not need.
+    unreviewed_failures: int = 0
+    # Failures repaired by asking the SAME tier again, with no escalation.
+    retried: int = 0
+    verifier_cost_usd: float = 0.0
+    escalation_cost_usd: float = 0.0
     skips_by_reason: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -336,6 +343,7 @@ def _verification(log: RequestLog) -> VerificationStats | None:
                COALESCE(SUM(verdict = 'skipped'), 0)                          AS skipped,
                COALESCE(SUM(unparseable), 0)                                  AS unparseable,
                COALESCE(SUM(escalated), 0)                                    AS escalated,
+               COALESCE(SUM(verdict = 'fail' AND verifier_tier IS NULL), 0)   AS unreviewed,
                COALESCE(SUM(verifier_cost_usd), 0)                            AS verifier_cost,
                COALESCE(SUM(escalation_cost_usd), 0)                          AS escalation_cost
         FROM verifications
@@ -354,6 +362,12 @@ def _verification(log: RequestLog) -> VerificationStats | None:
         for entry in log.query("SELECT reason FROM verifications WHERE verdict = 'skipped'")
     )
     skips = dict(tally.most_common())
+    # A retry names the tier that served the request, so it is the join that
+    # tells it apart from an escalation -- `verifications` alone cannot.
+    retried = log.query(
+        "SELECT COUNT(*) AS n FROM verifications v JOIN requests r ON v.request_row_id = r.id "
+        "WHERE v.escalated = 1 AND v.escalated_to = r.tier"
+    )[0]["n"]
     return VerificationStats(
         verified=row["rows_"] - row["skipped"],
         passed=row["passed"],
@@ -362,6 +376,8 @@ def _verification(log: RequestLog) -> VerificationStats | None:
         unparseable=row["unparseable"],
         skipped=row["skipped"],
         escalated=row["escalated"],
+        unreviewed_failures=row["unreviewed"],
+        retried=retried,
         verifier_cost_usd=row["verifier_cost"],
         escalation_cost_usd=row["escalation_cost"],
         skips_by_reason=skips,
@@ -538,6 +554,22 @@ def _format_verification(v: VerificationStats, total_spend: float) -> list[str]:
     lines.append(
         f"  escalated      {v.escalated:>6}   a second, dearer answer the client actually received"
     )
+    if v.retried:
+        lines.append(
+            f"  of which retry {v.retried:>6}   answered by asking the SAME tier again, "
+            "at no dearer tier's price"
+        )
+    if v.unreviewed_failures:
+        lines.append(
+            f"  free failures  {v.unreviewed_failures:>6}   empty or cut off at the output "
+            "budget: failed by a rule, with no verifier paid"
+        )
+        if v.failed and v.unreviewed_failures / v.failed >= 0.5:
+            lines.append(
+                "     those are most of your failures, and none of them is a difficulty "
+                "signal. Look at the tier's output budget and its temperature before "
+                "looking at a bigger model or a classifier"
+            )
     lines.append(f"  verifier spend        ${v.verifier_cost_usd:>12.6f}")
     lines.append(f"  escalation spend      ${v.escalation_cost_usd:>12.6f}")
     if total_spend > 0:

@@ -408,7 +408,39 @@ better explanation for the 0.590 AUC than "the features are weak".
 
 It points somewhere, though. If the answer varies, the variance is visible in the answers —
 ask twice and see whether they agree. That reads the generation instead of the prompt, costs
-two cheap calls instead of one strong one, and is the next thing to measure.
+two cheap calls instead of one strong one, and was the next thing to measure.
+
+### Asking three times, and what was left to catch
+
+40 questions — 20 the first run passed, 20 it failed — asked three more times each at the
+original budget. 100 minutes, still $0.
+
+**The label is not a property of the question.** 9 of the 40 questions (22%) produced *both*
+outcomes across three samples of the same text. Of the 20 the first run failed, 47% of the
+resamples passed; of the 20 it passed, 12% of the resamples failed. Nearly half of what that
+corpus called a failure was the dice.
+
+Then "the two samples state different answers" as a failure predictor, over all 240 ordered
+pairs: **recall 0.974, precision 0.809, lift 2.49x, accuracy 0.917 against a 0.675 baseline**.
+The first mechanism in this project to beat "always cheap" — and it is not what it looks like.
+
+Decomposed, 74 of the 78 wrong answers were ones where the served sample **never finished**.
+That is the free rule from two sections up: `finish_reason: length`, no second call, no
+comparison. Among the 166 pairs whose served sample actually stated an answer, only **4 were
+wrong — 2.4%** — and comparing two samples caught 2 of those 4 while escalating 12% of the
+traffic, at a precision of 0.100.
+
+So self-consistency is not what is working here. What is working is a rule that was already
+free, and once it runs there is almost nothing left: a 4-billion-parameter model that
+finishes a GSM8K question is right about 97.6% of the time (roughly 1%–6% wrong, on 4 errors
+out of 166, and the questions are clustered so even that is optimistic). No classifier and no
+second sample can beat a ceiling of 2.4%, so on this workload the answer is **do not ship
+one**. Fix the generation, catch the runaways for nothing, retry them at the same tier, and
+keep the money.
+
+That is a negative result about two mechanisms and a positive one about a third. It cost
+about four hours of a laptop GPU and nothing else, which is the argument for having the
+labelling path at all.
 
 #### `retry_unfinished`: ask again before paying more
 
