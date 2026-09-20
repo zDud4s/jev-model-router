@@ -88,6 +88,13 @@ def _build_parser() -> argparse.ArgumentParser:
         "--tier", default=None, help="the tier to label (default: router.default_tier)"
     )
     label.add_argument("--limit", type=int, default=None, help="ask at most this many")
+    label.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="temperature to label at (default 0.0). A label drawn hot records what the "
+        "sample did, not what the question is worth",
+    )
     label.add_argument("--json", action="store_true", help="emit JSON instead of text")
 
     reconcile = sub.add_parser(
@@ -227,6 +234,7 @@ def main(argv: list[str] | None = None) -> int:
                 tier=tier,
                 source="gsm8k",
                 limit=args.limit,
+                temperature=args.temperature,
                 progress=progress,
             )
         except ValueError as exc:

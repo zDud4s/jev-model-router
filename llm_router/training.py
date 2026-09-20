@@ -678,7 +678,8 @@ def train_from_log(
             "-- an empty or cut-off answer, which the verification loop already catches for "
             "nothing. A classifier fitted on this corpus is mostly learning to predict how "
             "long an answer will be, and nothing needs that predicted. Raise the tier's "
-            "output budget and collect again"
+            "output budget, and check its temperature: a hot tier produces this failure on "
+            "questions it answers fine on the next sample"
         )
     if grouped.auc_ci is not None and grouped.auc_ci[0] <= 0.5 <= grouped.auc_ci[1]:
         warnings.append(

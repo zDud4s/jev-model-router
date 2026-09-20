@@ -175,5 +175,36 @@ def test_a_corpus_that_is_mostly_budget_says_so_before_it_is_trained_on(tmp_path
     assert (report.failed, report.unfinished) == (2, 2)
     text = format_label_report(report, db="bench.db")
     assert "UNFINISHED rather than wrong" in text
-    # The advice is the point: relabel with a bigger budget, do not train here.
-    assert "output budget and label again" in text
+    # The advice is the point: fix the run, do not train on it.
+    assert "raise the tier's output budget, and check the temperature" in text
+
+
+def test_a_label_is_drawn_at_temperature_zero_unless_asked_otherwise(tmp_path) -> None:
+    # Measured: at the provider's default of 0.8, asking the same 60 questions
+    # again recovered 27 of them inside the original budget. A label drawn hot
+    # records what the sample did, which is not what the classifier is for.
+    config = parse_config(
+        {**BASE_CONFIG, "router": {"kind": "static", "default_tier": "cheap",
+                                   "strong_tier": "top"}}
+    )
+    def asked_at(name: str, **kwargs) -> list[float | None]:
+        seen: list[FakeBackend] = []
+
+        def factory(tier):
+            seen.append(AnswerKeyBackend(tier))
+            return seen[-1]
+
+        label(
+            config,
+            [Item("easy one", "1")],
+            db=str(tmp_path / name),
+            tier="cheap",
+            source="gsm8k",
+            backend_factory=factory,
+            **kwargs,
+        )
+        return [call.temperature for backend in seen for call in backend.calls]
+
+    assert asked_at("zero.db") == [0.0]
+    # None leaves it to the provider, for whoever wants the production spread.
+    assert asked_at("hot.db", temperature=None) == [None]

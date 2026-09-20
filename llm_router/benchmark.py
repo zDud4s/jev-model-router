@@ -18,6 +18,19 @@ is a different claim, and only real verdicts can support it.
 
 Rows go to their own database, never the serving log. Mixed in, they would be
 counted by `stats` as traffic and as savings.
+
+Labelling asks at temperature 0 unless told otherwise, and that default was
+bought the expensive way. The first 400-question run used the provider's
+default -- 0.8 on Ollama -- and 60 answers ran past the output budget without
+finishing. Asked again, 27 of those same questions were answered in under 2048
+tokens, several in under 300: nothing about the question had changed, only the
+sample. A label drawn at temperature 0.8 records what the dice did, and a
+classifier fitted on those labels is being asked to predict a coin from the
+text of the question.
+
+If your production traffic runs hot, that variance does not disappear -- it
+becomes a ceiling on what any router reading only the prompt can achieve, and
+the honest way to see it is to label at 0 and measure the spread separately.
 """
 
 from __future__ import annotations
@@ -128,6 +141,7 @@ def label(
     tier: str,
     source: str,
     limit: int | None = None,
+    temperature: float | None = 0.0,
     backend_factory: Callable | None = None,
     progress: Callable[[int, bool, str], None] | None = None,
 ) -> LabelReport:
@@ -162,13 +176,13 @@ def label(
                     report.skipped_done += 1
                     continue
                 report.asked += 1
-                response = client.post(
-                    "/v1/chat/completions",
-                    json={
-                        "model": tier,
-                        "messages": [{"role": "user", "content": item.question + INSTRUCTION}],
-                    },
-                )
+                payload: dict[str, Any] = {
+                    "model": tier,
+                    "messages": [{"role": "user", "content": item.question + INSTRUCTION}],
+                }
+                if temperature is not None:
+                    payload["temperature"] = temperature
+                response = client.post("/v1/chat/completions", json=payload)
                 request_id = response.headers.get("X-Request-Id")
                 if response.status_code != 200 or not request_id:
                     report.errors.append(f"{response.status_code}: {response.text[:200]}")
@@ -207,10 +221,12 @@ def format_label_report(report: LabelReport, *, db: str) -> str:
         )
         if share >= 0.5:
             lines.append(
-                "  most of this corpus's failures are a budget, not a difficulty. Raise the "
-                "tier's output budget and label again before training on it -- a classifier "
-                "fitted here learns to predict how long an answer will be, and the router "
-                "already fails an unfinished answer without a model."
+                "  most of this corpus's failures are unfinished answers, which is not a "
+                "difficulty signal -- the router already fails one without a model. Before "
+                "training here: raise the tier's output budget, and check the temperature. "
+                "Measured on this benchmark, asking the same questions again recovered 27 "
+                "of 60 within the OLD budget, so most of what looked like difficulty was "
+                "the sample rather than the question."
             )
     lines.append(f"  already labelled, skipped {report.skipped_done}")
     lines += [f"  ERROR {e}" for e in report.errors]

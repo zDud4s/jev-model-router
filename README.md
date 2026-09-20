@@ -219,6 +219,11 @@ python -m llm_router -c config.yaml label --gsm8k test.jsonl --db gsm8k.db --lim
 python -m llm_router -c config.yaml train --db gsm8k.db --out classifier.json
 ```
 
+Labelling asks at **temperature 0** by default (`--temperature` to change it, `None` in the
+API to leave it to the provider). That default was bought the expensive way — see below —
+and it is the difference between a label that records the question and one that records the
+sample.
+
 Each question goes through the router in process, so the row is the row real traffic would
 write; the reply's final `ANSWER:` line is compared with the key (no such line is a fail, not
 a guess at the last number in the text), and the verdict is stored with `verifier_tier`
