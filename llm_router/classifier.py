@@ -320,8 +320,16 @@ def fit(
     min_df: int = 3,
     seed: int = 0,
     balance: bool = True,
+    use_words: bool = True,
 ) -> tuple[dict[str, float], float]:
     """Plain SGD logistic regression. Returns (weights, bias).
+
+    `use_words` drops the bag of words and fits on the structural features
+    alone. It is offered because words are not always an asset: on a 400-question
+    benchmark they cross-validated at 0.40 AUC, BELOW chance, while the same fit
+    without them reached 0.618. A vocabulary learned from a few hundred prompts
+    can describe the corpus rather than the difficulty, and then it is worse than
+    having no vocabulary at all.
 
     `balance` is not optional in spirit. Failures are the minority class by a
     wide margin in any router worth running, and an unweighted fit answers
@@ -341,7 +349,7 @@ def fit(
     kept = {
         name
         for name, count in df.items()
-        if name.startswith("n:") or count >= min_df
+        if name.startswith("n:") or (use_words and count >= min_df)
     }
 
     positives = sum(e.label for e in examples)

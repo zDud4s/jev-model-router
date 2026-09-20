@@ -79,6 +79,11 @@ class Metrics:
     precision: float | None
     recall: float | None
     escalation_rate: float
+    # Ranking quality, independent of where the threshold sits: the chance that
+    # a failed request scored above a passing one. 0.5 is a coin toss. Reported
+    # because accuracy against a 17% base rate rewards "never fails", and
+    # because a model can rank well and still be cut in the wrong place.
+    auc: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -108,6 +113,8 @@ class TrainingReport:
     # The same fit and evaluation under a random by-row split. Reported to be
     # compared with `grouped`, never to be believed on its own.
     ungrouped: Metrics
+    # Set when --tune ran: the settings it chose and what it compared.
+    tuning: "Tuning | None" = None
     policies: list[Policy] = field(default_factory=list)
     sweep: list[tuple[float, float, int]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -121,6 +128,7 @@ class TrainingReport:
             "test_size": self.test_size,
             "grouped": self.grouped.to_dict(),
             "ungrouped": self.ungrouped.to_dict(),
+            "tuning": self.tuning.to_dict() if self.tuning else None,
             "policies": [asdict(p) for p in self.policies],
             "sweep": [
                 {"threshold": t, "cost_usd": c, "bad_answers": b} for t, c, b in self.sweep
@@ -204,6 +212,16 @@ def load_rows(log: RequestLog, *, predicts_tier: str, strong_tier: str) -> list[
 # --------------------------------------------------------------------------
 
 
+def roc_auc(scored: Sequence[tuple[float, int]]) -> float | None:
+    """Mann-Whitney U over (score, label) pairs. None when a class is absent."""
+    positives = [s for s, label in scored if label]
+    negatives = [s for s, label in scored if not label]
+    if not positives or not negatives:
+        return None
+    wins = sum((p > n) + 0.5 * (p == n) for p in positives for n in negatives)
+    return wins / (len(positives) * len(negatives))
+
+
 def evaluate(model: DifficultyModel, examples: Sequence[Example], threshold: float) -> Metrics:
     positives = sum(e.label for e in examples)
     if not examples:
@@ -234,6 +252,7 @@ def evaluate(model: DifficultyModel, examples: Sequence[Example], threshold: flo
         precision=(tp / (tp + fp)) if (tp + fp) else None,
         recall=(tp / (tp + fn)) if (tp + fn) else None,
         escalation_rate=(tp + fp) / total,
+        auc=roc_auc([(model.score(e.vector), e.label) for e in examples]),
     )
 
 
@@ -307,6 +326,27 @@ def price_policies(
     ]
 
 
+def calibrate_threshold(
+    model: DifficultyModel, examples: Sequence[Example], escalation_rate: float
+) -> float:
+    """The threshold that escalates this fraction of the TRAINING split.
+
+    A fixed 0.5 assumes the scores spread across the unit interval, and a
+    regularised fit on a weak signal does not: measured on a 400-question
+    corpus, every score fell between 0.36 and 0.45, so 0.5 escalated nothing and
+    0.4 escalated everything. The threshold is then not an economic knob at all
+    -- it is a cliff nobody can see. Reading it off the training scores makes
+    "escalate the hardest 15%" mean what it says, whatever the fit did.
+    """
+    scores = sorted((model.score(e.vector) for e in examples), reverse=True)
+    if not scores:
+        return 0.5
+    if escalation_rate <= 0:
+        return scores[0] + 1e-9
+    index = min(int(round(escalation_rate * len(scores))), len(scores)) - 1
+    return scores[max(index, 0)]
+
+
 def sweep_thresholds(
     model: DifficultyModel, rows: Sequence[Row], thresholds: Sequence[float]
 ) -> list[tuple[float, float, int]]:
@@ -331,6 +371,97 @@ def sweep_thresholds(
 
 
 # --------------------------------------------------------------------------
+# choosing the knobs, on the training split only
+# --------------------------------------------------------------------------
+
+# Small on purpose. A grid large enough to find something in noise is a way of
+# overfitting the cross-validation itself, and each point costs a full fit.
+TUNING_GRID: tuple[dict[str, Any], ...] = tuple(
+    {"use_words": use_words, "min_df": min_df, "l2": l2}
+    for use_words, min_df in ((True, 3), (True, 10), (False, 3))
+    for l2 in (1e-4, 1e-2, 1e-1)
+)
+
+
+@dataclass
+class Tuning:
+    """What the search chose, and what it was choosing between."""
+
+    settings: dict[str, Any]
+    cv_auc: float | None
+    folds: int
+    considered: int
+    # Every point, best first, so a flat grid is visible as a flat grid.
+    ranking: list[tuple[float, dict[str, Any]]] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "settings": dict(self.settings),
+            "cv_auc": self.cv_auc,
+            "folds": self.folds,
+            "considered": self.considered,
+            "ranking": [{"cv_auc": a, "settings": s} for a, s in self.ranking],
+        }
+
+
+def cross_validate(
+    examples: Sequence[Example],
+    *,
+    predicts_tier: str,
+    folds: int = 5,
+    seed: int = 7,
+    **fit_kwargs: Any,
+) -> float | None:
+    """Mean AUC over grouped folds. A conversation is wholly inside one fold."""
+    buckets: list[list[Example]] = [[] for _ in range(folds)]
+    for example in examples:
+        buckets[min(int(group_fraction(example.group, seed) * folds), folds - 1)].append(example)
+
+    scores: list[float] = []
+    for index, held in enumerate(buckets):
+        rest = [e for other, bucket in enumerate(buckets) if other != index for e in bucket]
+        if not held or not rest or not any(e.label for e in rest):
+            continue
+        model = build_model(rest, predicts_tier=predicts_tier, **fit_kwargs)
+        fold_auc = roc_auc([(model.score(e.vector), e.label) for e in held])
+        if fold_auc is not None:
+            scores.append(fold_auc)
+    return sum(scores) / len(scores) if scores else None
+
+
+def tune(
+    examples: Sequence[Example],
+    *,
+    predicts_tier: str,
+    grid: Sequence[dict[str, Any]] = TUNING_GRID,
+    folds: int = 5,
+    seed: int = 7,
+    **fixed: Any,
+) -> Tuning:
+    """Pick fit settings by cross-validated AUC, seeing only the training split.
+
+    The held-out set is not consulted here and must not be: choosing the knobs
+    on the same rows that report the result is how a model comes to describe its
+    own evaluation.
+    """
+    ranked: list[tuple[float, dict[str, Any]]] = []
+    for point in grid:
+        score = cross_validate(
+            examples, predicts_tier=predicts_tier, folds=folds, seed=seed, **point, **fixed
+        )
+        if score is not None:
+            ranked.append((score, dict(point)))
+    # Ties broken by the simpler model: fewer features beats more.
+    ranked.sort(key=lambda item: (-item[0], item[1].get("use_words", True), -item[1]["min_df"]))
+    if not ranked:
+        return Tuning(settings={}, cv_auc=None, folds=folds, considered=len(grid))
+    best_auc, best = ranked[0]
+    return Tuning(
+        settings=best, cv_auc=best_auc, folds=folds, considered=len(grid), ranking=ranked
+    )
+
+
+# --------------------------------------------------------------------------
 # the whole job
 # --------------------------------------------------------------------------
 
@@ -346,6 +477,8 @@ def train_from_log(
     min_examples: int = 40,
     min_positives: int = 5,
     seed: int = 0,
+    tune_settings: bool = False,
+    target_escalation: float | None = None,
     **fit_kwargs: Any,
 ) -> TrainingReport:
     rows = load_rows(log, predicts_tier=predicts_tier, strong_tier=strong_tier)
@@ -391,6 +524,13 @@ def train_from_log(
             "columns below are vacuous"
         )
 
+    # The search sees the training split and nothing else, so the held-out
+    # numbers below still describe rows that took no part in any decision.
+    tuning: Tuning | None = None
+    if tune_settings:
+        tuning = tune(train, predicts_tier=predicts_tier, **fit_kwargs)
+        fit_kwargs = {**fit_kwargs, **tuning.settings}
+
     # The shipped model is the one fitted on the training split, so the numbers
     # reported describe the exact weights in the file. Refitting on everything
     # afterwards would produce a slightly better model whose evaluation belongs
@@ -404,6 +544,15 @@ def train_from_log(
         seed=seed,
         **fit_kwargs,
     )
+    if target_escalation is not None:
+        threshold = calibrate_threshold(model, train, target_escalation)
+        model.threshold = threshold
+    # Every point is a share of the TRAINING split's scores, so the table spans
+    # the model's actual range instead of a grid it may never touch.
+    sweep_points = sorted(
+        {calibrate_threshold(model, train, rate) for rate in (0.05, 0.1, 0.2, 0.3, 0.5)}
+        | {threshold}
+    )
     grouped = evaluate(model, test, threshold)
 
     # The same procedure with the wrong split, for contrast only.
@@ -416,7 +565,30 @@ def train_from_log(
         seed=seed,
         **fit_kwargs,
     )
-    ungrouped = evaluate(leaky, row_test, threshold)
+    # Its own threshold, calibrated on its own training rows: a threshold read
+    # off another fit's scores would make the contrast a comparison of
+    # thresholds rather than of splits.
+    leaky_threshold = (
+        calibrate_threshold(leaky, row_train, target_escalation)
+        if target_escalation is not None
+        else threshold
+    )
+    ungrouped = evaluate(leaky, row_test, leaky_threshold)
+
+    if grouped.auc is not None and grouped.auc <= 0.55:
+        warnings.append(
+            f"held-out AUC is {grouped.auc:.3f}: this model ranks a failed request above a "
+            "passing one barely more often than a coin would"
+            + (", and below chance means the features are actively misleading on unseen "
+               "conversations" if grouped.auc < 0.5 else "")
+        )
+    if grouped.examples and grouped.escalation_rate in (0.0, 1.0):
+        sent = "every request" if grouped.escalation_rate else "no request"
+        warnings.append(
+            f"at threshold {threshold} the model sends {sent} to the strong tier on the "
+            "held-out set: the threshold sits outside the scores this model produces, so "
+            "the policy table below is that one policy under another name"
+        )
 
     report = TrainingReport(
         model=model,
@@ -426,8 +598,9 @@ def train_from_log(
         test_size=len(test),
         grouped=grouped,
         ungrouped=ungrouped,
+        tuning=tuning,
         policies=price_policies(model, test_rows, threshold),
-        sweep=sweep_thresholds(model, test_rows, [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8]),
+        sweep=sweep_thresholds(model, test_rows, sweep_points),
         warnings=warnings,
     )
     model.metrics = {
@@ -450,6 +623,24 @@ def format_report(report: TrainingReport) -> str:
                  + (f", judged by {model.judged_by}" if model.judged_by else ""))
     lines.append(f"                {len(model.weights)} weight(s); an unseen prompt scores "
                  f"{model.base_rate:.3f}, the base rate")
+
+    if report.tuning is not None:
+        lines.append("")
+        if report.tuning.cv_auc is None:
+            lines.append("tuning          no fold could be scored; the shipped defaults were used")
+        else:
+            chosen = ", ".join(f"{k}={v}" for k, v in sorted(report.tuning.settings.items()))
+            lines.append(
+                f"tuning          {report.tuning.considered} setting(s) by "
+                f"{report.tuning.folds}-fold cross-validation, on the training split only"
+            )
+            lines.append(f"                chose {chosen}  (cv auc {report.tuning.cv_auc:.3f})")
+            spread = report.tuning.ranking[0][0] - report.tuning.ranking[-1][0]
+            if spread < 0.02:
+                lines.append(
+                    f"                every setting scored within {spread:.3f} AUC of every "
+                    "other: the grid found nothing to choose between, and the winner is noise"
+                )
 
     lines.append("")
     lines.append("held out by conversation -- the number to believe")
@@ -483,10 +674,15 @@ def format_report(report: TrainingReport) -> str:
 
     if report.sweep:
         lines.append("")
-        lines.append("threshold sweep on the held-out set")
+        lines.append(
+            "threshold sweep on the held-out set -- each point is a share of the "
+            "training split's own scores"
+        )
         for threshold, cost, bad in report.sweep:
             marker = "  <- configured" if abs(threshold - model.threshold) < 1e-9 else ""
-            lines.append(f"  {threshold:>4.2f}   ${cost:>11.6f}   {bad:>4} bad answer(s){marker}")
+            lines.append(
+                f"  {threshold:>6.4f}   ${cost:>11.6f}   {bad:>4} bad answer(s){marker}"
+            )
 
     top = model.top_features()
     if top:
@@ -507,14 +703,34 @@ def _format_metrics(metrics: Metrics) -> list[str]:
         return ["  (nothing held out)"]
     precision = f"{metrics.precision:.3f}" if metrics.precision is not None else "n/a"
     recall = f"{metrics.recall:.3f}" if metrics.recall is not None else "n/a"
+    auc = f"{metrics.auc:.3f}" if metrics.auc is not None else "n/a"
     lines = [
         f"  accuracy        {metrics.accuracy:.3f}   "
         f"majority-class baseline {metrics.majority_accuracy:.3f}",
+        f"  auc             {auc}   0.500 is a coin toss; this one needs no threshold",
         f"  precision       {precision}   of the requests it sent to the strong tier",
         f"  recall          {recall}   of the failures it caught",
         f"  escalates       {metrics.escalation_rate * 100:.1f}% of requests",
     ]
-    if metrics.accuracy <= metrics.majority_accuracy:
+    base_rate = metrics.positives / metrics.examples
+    if metrics.precision is not None and base_rate:
+        # Accuracy punishes any escalation at all when failures are rare, so it
+        # cannot answer "was escalating these ones better than escalating at
+        # random?". This can: 1.0 means the model picked no better than a dice.
+        lines.append(
+            f"  lift            {metrics.precision / base_rate:.2f}x   its escalations "
+            f"were failures {metrics.precision * 100:.1f}% of the time, against a "
+            f"{base_rate * 100:.1f}% base rate"
+        )
+
+    ranks = (metrics.auc or 0.0) > 0.55 and (metrics.precision or 0.0) > base_rate * 1.1
+    if metrics.accuracy <= metrics.majority_accuracy and ranks:
+        lines.append(
+            "  accuracy is below the majority baseline, which is what any escalating model "
+            "scores when failures are rare -- read the lift and the AUC instead, and the "
+            "cost table below"
+        )
+    elif metrics.accuracy <= metrics.majority_accuracy:
         lines.append(
             "  this model does not beat answering the majority class every time; "
             "it has learned the class balance and nothing else"

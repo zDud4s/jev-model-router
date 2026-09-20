@@ -47,7 +47,18 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="train from this database instead of the serving log (e.g. one `label` wrote)",
     )
+    train.add_argument(
+        "--tune",
+        action="store_true",
+        help="choose the fit's settings by cross-validation on the training split",
+    )
     train.add_argument("--threshold", type=float, default=0.5)
+    train.add_argument(
+        "--target-escalation",
+        type=float,
+        default=None,
+        help="set the threshold to escalate this share of the training split (e.g. 0.15)",
+    )
     train.add_argument("--holdout", type=float, default=0.25)
     train.add_argument("--min-examples", type=int, default=40)
     train.add_argument("--seed", type=int, default=0)
@@ -113,6 +124,8 @@ def _train(config, args) -> int:
             holdout=args.holdout,
             min_examples=args.min_examples,
             seed=args.seed,
+            tune_settings=args.tune,
+            target_escalation=args.target_escalation,
         )
     except TrainingError as exc:
         # Not an exception trace. Every one of these says what is missing from

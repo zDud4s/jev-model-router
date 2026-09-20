@@ -300,6 +300,57 @@ you can read both in the same table.
 (Fake backends throughout. The shapes are real; the numbers are not a measurement of any
 model.)
 
+### The first real corpus said no
+
+400 GSM8K questions through `qwen3.5:4b` on a laptop GPU, labelled from the answer key:
+6.4 hours, 295k generated tokens, $0. It failed 70 of them — 60 by running past a 2048-token
+cap without ever stating an answer, 10 by answering wrongly. Then `train`:
+
+| | accuracy | majority baseline |
+|---|---|---|
+| words + length features | 0.760 | 0.823 |
+| length features only | 0.812 | 0.823 |
+
+**Neither beats answering "cheap" every time**, and the report says so itself rather than
+printing the cost table as a result. The strongest weights were `runs`, `equally`, `can` —
+523 weights fitted on 307 examples, memorising vocabulary. The only real signal in the corpus
+is weak and blunt: the longest quarter of the questions failed 26.2% of the time against
+about 14% for the rest, which 523 word features drown rather than exploit.
+
+Two things this does establish. The labelling path works end to end, and it is free. And the
+negative result is legible: a router that could not tell you it had learned nothing would
+have shipped these weights, because its cost column looks like a saving ($0.17 to catch 4 of
+17 failures) right up until you read the line above it.
+
+### What the corpus then taught the trainer
+
+Three of those numbers were the trainer's fault rather than the data's, and each one is now
+a flag on `train`:
+
+- **The words were not merely useless, they were harmful.** Cross-validated on the training
+  split alone, `words + length` scored **0.40 AUC — below chance** — while the same fit
+  without them scored 0.618. A vocabulary fitted on a few hundred prompts describes the
+  corpus. `--tune` cross-validates a small grid (words on/off, `min_df`, `l2`) on the
+  training split and reports every point, so a grid that found nothing says so.
+- **Accuracy was the wrong headline.** At a 17% failure rate, any model that escalates
+  anything scores below "never escalate". The report now prints **AUC**, which needs no
+  threshold, and **lift** — how much likelier an escalated request was to be a failure than a
+  random one. The tuned model: AUC 0.590, lift 1.66x, catching 29.4% of failures for 17.7% of
+  traffic. Weak, and no longer invisible under an accuracy column.
+- **The threshold was a cliff, not a knob.** Every score this model produces falls between
+  0.36 and 0.45, so `0.5` escalated nothing and `0.4` escalated everything — and the sweep
+  printed seven rows of two policies. Thresholds are now read off the training split's own
+  scores: `--target-escalation 0.15` means *escalate the hardest 15%*, and the sweep spans the
+  range the model actually occupies. A threshold that escalates all or none of the held-out
+  set is called out as such.
+
+None of this rescues the result — a 1.66x lift on one benchmark is not a router. It makes the
+next negative result cheaper to read.
+
+One caveat about that cost table on a labelled database: the `always cheap + verify all` row
+prices verification at zero, because here the labels came from an answer key and no verifier
+was called. In production that row costs a judge call per request.
+
 ### What it will not do
 
 - **Overrule an explicit request.** `model: "top"` gets `top`, unscored. Guessing over a

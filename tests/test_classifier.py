@@ -413,7 +413,11 @@ def test_the_report_keeps_money_and_bad_answers_in_separate_columns(corpus_log):
 def test_the_threshold_sweep_is_priced_at_every_step(corpus_log):
     a_corpus(corpus_log)
     report = train_from_log(corpus_log, predicts_tier="cheap", strong_tier="top", min_examples=40)
-    assert len(report.sweep) == 7
+    # The points are shares of the training split's own scores, not a fixed
+    # grid, so two shares that land on equal scores collapse into one point
+    # instead of printing the same policy twice under different numbers.
+    assert 2 <= len(report.sweep) <= 6
+    assert any(threshold == report.model.threshold for threshold, _, _ in report.sweep)
     # Escalating more can only cost more and ship fewer bad answers; a sweep
     # that is not monotone in both is an arithmetic error somewhere.
     costs = [cost for _, cost, _ in report.sweep]
