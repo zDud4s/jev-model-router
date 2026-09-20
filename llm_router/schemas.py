@@ -72,6 +72,25 @@ class Usage(BaseModel):
     # Anthropic report nothing per request.
     billed_usd: float | None = None
 
+    def __add__(self, other: "Usage") -> "Usage":
+        """Two calls' tokens, for a request that took more than one answer.
+
+        `billed_usd` adds only when BOTH sides reported one. Treating "not
+        reported" as zero would understate the bill while looking like a
+        measurement, which is the one thing this field exists to prevent.
+        """
+        both_billed = self.billed_usd is not None and other.billed_usd is not None
+        return Usage(
+            prompt_tokens=self.prompt_tokens + other.prompt_tokens,
+            completion_tokens=self.completion_tokens + other.completion_tokens,
+            total_tokens=self.total_tokens + other.total_tokens,
+            cached_tokens=self.cached_tokens + other.cached_tokens,
+            cache_write_tokens=self.cache_write_tokens + other.cache_write_tokens,
+            billed_usd=(self.billed_usd or 0.0) + (other.billed_usd or 0.0)
+            if both_billed
+            else None,
+        )
+
     @classmethod
     def from_openai(cls, raw: dict[str, Any] | None) -> "Usage":
         raw = raw or {}

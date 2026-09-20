@@ -147,6 +147,18 @@ class VerificationConfig:
     # verifier -- but `stats` counts both, so the choice stays visible.
     on_unparseable: str = "accept"
     on_verifier_error: str = "accept"
+    # Ask the SAME tier once more before paying a stronger one, when the answer
+    # was failed without a review -- empty, or cut off at the output budget.
+    # Measured on 400 GSM8K questions through qwen3.5:4b: of 60 answers that ran
+    # past the budget without finishing, 27 were answered inside that same
+    # budget on the next ask, several in under 300 tokens. Nothing about the
+    # question had changed; the first sample simply ran away.
+    #
+    # Off by default because whether it pays is arithmetic, not a preference. A
+    # retry is worth it when the cheap tier costs less than (retry success rate)
+    # x (the strong tier): at 45% success, a cheap tier at a fiftieth of the
+    # strong tier's price is free money, and one at half the price is a loss.
+    retry_unfinished: bool = False
     # Truncation bounds for what the verifier is shown. A review prompt that
     # grows without limit is how a verification loop silently becomes the most
     # expensive call in the system.
@@ -336,6 +348,7 @@ def _parse_verification(
         "sample_rate",
         "on_unparseable",
         "on_verifier_error",
+        "retry_unfinished",
         "max_transcript_chars",
         "max_answer_chars",
         "max_verdict_tokens",
@@ -385,6 +398,7 @@ def _parse_verification(
         sample_rate=sample_rate,
         on_unparseable=str(raw.get("on_unparseable", "accept")),
         on_verifier_error=str(raw.get("on_verifier_error", "accept")),
+        retry_unfinished=bool(raw.get("retry_unfinished", False)),
         max_transcript_chars=int(raw.get("max_transcript_chars", 12000)),
         max_answer_chars=int(raw.get("max_answer_chars", 8000)),
         max_verdict_tokens=int(raw.get("max_verdict_tokens", 1024)),

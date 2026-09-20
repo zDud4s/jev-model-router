@@ -402,9 +402,51 @@ class Verifier:
             verifier_tier=None,
             reason=reason,
         )
-        await self._escalate(request, served_tier, eligible, outcome)
+        served = self._settings.retry_unfinished and await self._retry(
+            request, served_tier, outcome
+        )
+        if not served:
+            await self._escalate(request, served_tier, eligible, outcome)
         outcome.latency_ms = _elapsed_ms(started)
         return outcome
+
+    async def _retry(
+        self,
+        request: ChatCompletionRequest,
+        served_tier: str,
+        outcome: VerificationOutcome,
+    ) -> bool:
+        """Ask the same tier once more. True when the second answer is finished.
+
+        The request already passed the eligibility gate for this tier and has
+        not changed, so there is nothing to re-check. What IS re-checked is the
+        new answer: a retry that runs away again is not served, and the caller
+        falls through to the escalation it was going to pay for anyway.
+        """
+        try:
+            result = await self._backends[served_tier].complete(request)
+        except Exception as exc:  # noqa: BLE001 - fall through to the escalation
+            outcome.reason = _note(outcome.reason, f"retry failed: {type(exc).__name__}: {exc}")
+            return False
+
+        # Counted whether or not it worked: a retry that failed still cost a call.
+        outcome.escalation_usage = outcome.escalation_usage + result.usage
+        outcome.escalation_cost_usd += cost_usd(
+            self._config.tier(served_tier).prices, result.usage
+        )
+        if self._unfinished(request, answer_text(result.body), result.body) is not None:
+            outcome.reason = _note(
+                outcome.reason, f"a retry at {served_tier!r} was unfinished too"
+            )
+            return False
+
+        outcome.escalated = True
+        outcome.escalated_to = served_tier
+        outcome.body = result.body
+        outcome.reason = _note(
+            outcome.reason, f"answered by a retry at {served_tier!r}, with no escalation"
+        )
+        return True
 
     async def _escalate(
         self,
@@ -438,8 +480,10 @@ class Verifier:
 
         outcome.escalated = True
         outcome.escalated_to = target
-        outcome.escalation_usage = result.usage
-        outcome.escalation_cost_usd = cost_usd(self._config.tier(target).prices, result.usage)
+        # Added, not assigned: a retry may already have spent a call here, and
+        # overwriting would hand the operator a bill missing its first line.
+        outcome.escalation_usage = outcome.escalation_usage + result.usage
+        outcome.escalation_cost_usd += cost_usd(self._config.tier(target).prices, result.usage)
         outcome.body = result.body
         if finish_reason(result.body) == "length" and request.output_budget is None:
             # Worth saying out loud for the truncation case above: escalating a

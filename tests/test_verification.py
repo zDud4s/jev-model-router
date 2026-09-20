@@ -896,3 +896,95 @@ def test_an_escalation_that_is_cut_off_too_names_the_budget_rather_than_the_mode
     assert check["escalated"] == 1
     assert "'top'" in check["reason"]
     assert "cut off at its budget too" in check["reason"]
+
+
+# --- the retry ---------------------------------------------------------------
+#
+# Of those 60 unfinished answers, 33 were answered when the same questions were
+# asked again -- and 27 of the 33 finished inside the ORIGINAL 2048-token
+# budget, several in under 300. The budget was never binding on them. The first
+# sample simply ran away, and the second did not.
+
+
+class FlakyBackend(ScriptedBackend):
+    """Runs away on the first ask and answers on the second."""
+
+    async def complete(self, request: ChatCompletionRequest) -> BackendResponse:
+        first = not self.calls
+        response = await super().complete(request)
+        if first:
+            response.body["choices"][0]["finish_reason"] = "length"
+        return response
+
+
+def _run(config, cheap_backend, log: RequestLog) -> tuple[Any, dict[str, Any], Any]:
+    """One request, the cheap tier's backend chosen by the caller.
+
+    The verification row is read inside the client's lifespan, because leaving
+    it closes the log.
+    """
+    backends: dict[str, Any] = {}
+
+    def factory(tier):
+        backend = (
+            cheap_backend(tier)
+            if tier.name == "cheap"
+            else ScriptedBackend(tier, replies=["the proper answer"])
+        )
+        backends[tier.name] = backend
+        return backend
+
+    with TestClient(create_app(config, backend_factory=factory, log=log)) as client:
+        response = post(client)
+        return response, backends, verification_row(log)
+
+
+def test_a_second_ask_at_the_same_tier_can_answer_what_the_first_ran_away_from() -> None:
+    log = RequestLog(":memory:")
+    config = verifying(retry_unfinished=True)
+
+    response, backends, check = _run(
+        config, lambda tier: FlakyBackend(tier, replies=["I begin by working out", "42"]), log
+    )
+
+    assert response.json()["choices"][0]["message"]["content"] == "42"
+    assert len(backends["cheap"].calls) == 2
+    # The strong tier was never asked, which is the whole point: a second cheap
+    # call instead of a first expensive one.
+    assert len(backends["top"].calls) == 0
+    assert check["escalated_to"] == "cheap"
+    assert "retry" in check["reason"] and "no escalation" in check["reason"]
+    assert check["verifier_cost_usd"] == 0.0
+
+
+def test_a_retry_that_runs_away_too_still_escalates_and_both_calls_are_billed() -> None:
+    log = RequestLog(":memory:")
+    config = verifying(retry_unfinished=True)
+
+    _, backends, check = _run(
+        config, lambda tier: TruncatedBackend(tier, replies=["one", "two"]), log
+    )
+
+    assert len(backends["cheap"].calls) == 2
+    assert len(backends["top"].calls) == 1
+    assert check["escalated_to"] == "top"
+    assert "unfinished too" in check["reason"]
+    # A retry that failed still spent a call, and the row carries both rather
+    # than the escalation overwriting the retry. Counted in tokens because the
+    # cheap tier in this config is unpriced, so dollars would hide the bug.
+    assert check["escalation_output_tokens"] == 2 * backends["top"].usage.completion_tokens
+    assert check["escalation_input_tokens"] == 2 * backends["top"].usage.prompt_tokens
+    assert check["escalation_cost_usd"] == TOP_PER_CALL
+
+
+def test_nothing_is_retried_unless_the_operator_asked_for_it() -> None:
+    # It costs a call on every unfinished answer, so whether it pays is
+    # arithmetic over two price lists rather than a default worth guessing.
+    log = RequestLog(":memory:")
+
+    _, backends, _check = _run(
+        verifying(), lambda tier: FlakyBackend(tier, replies=["I begin by", "42"]), log
+    )
+
+    assert len(backends["cheap"].calls) == 1
+    assert len(backends["top"].calls) == 1

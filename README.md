@@ -382,6 +382,57 @@ negative result is legible: a router that could not tell you it had learned noth
 have shipped these weights, because its cost column looks like a saving ($0.17 to catch 4 of
 17 failures) right up until you read the line above it.
 
+### Then the corpus turned out not to be a corpus
+
+All 60 of those unfinished answers stopped at *exactly* 2048 output tokens, and no correct
+answer in the run came within five tokens of it. That is a cap being hit, not a coincidence,
+so the 60 were asked again with the budget doubled to 4096. 115 minutes, still $0:
+
+| | |
+|---|---|
+| passed on the second ask | **33** |
+| still unfinished at 4096 | 17 |
+| finished, and wrong | 10 |
+
+And then the part that matters. **27 of those 33 recovered answers finished in under 2048
+tokens** — several in under 300. The old budget was never binding on them: the same model,
+the same question, a different sample, and it simply answered. Only 6 of 60 were genuinely
+bought by the extra room.
+
+So the dominant failure mode in this corpus is neither difficulty nor the budget. It is
+**run-to-run variance in the cheap model** — a question that runs away to 2048 tokens on one
+sample and answers in 249 on the next. That bounds what any classifier reading the *prompt*
+can ever do here, and no amount of feature engineering escapes it: an outcome that changes
+between two samples of the same question is not a property of the question. It is also the
+better explanation for the 0.590 AUC than "the features are weak".
+
+It points somewhere, though. If the answer varies, the variance is visible in the answers —
+ask twice and see whether they agree. That reads the generation instead of the prompt, costs
+two cheap calls instead of one strong one, and is the next thing to measure.
+
+#### `retry_unfinished`: ask again before paying more
+
+The first half of that is already worth shipping, because the check is free and so is knowing
+whether it worked. `verification.retry_unfinished: true` re-asks the **same** tier once when
+an answer was failed without a review, and escalates only if the second answer runs away too:
+
+```yaml
+verification:
+  enabled: true
+  verifier_tier: strong
+  retry_unfinished: true
+```
+
+It is off by default because whether it pays is arithmetic rather than a preference. A retry
+is worth it when
+
+> cheap tier price < (retry success rate) × (strong tier price)
+
+At the 45% success rate measured here, a local cheap tier costing a fiftieth of the strong one
+is free money; a cheap tier at half the strong one's price is a loss. A retry that fails is
+still billed — its tokens are added to the escalation's rather than overwritten by them, so
+the row shows both calls.
+
 ### What the corpus then taught the trainer
 
 Four of those numbers were the trainer's fault rather than the data's, and each one is now

@@ -334,3 +334,21 @@ def test_a_stream_the_client_abandons_still_writes_its_row() -> None:
     assert row["billed_cost_usd"] is None
     assert row["http_status"] == 499
     assert "disconnected" in row["error"]
+
+
+def test_two_calls_tokens_add_and_an_unreported_bill_does_not_become_zero() -> None:
+    # A request answered twice -- a retry, or a retry and then an escalation --
+    # carries both calls in one row.
+    reported = Usage(prompt_tokens=10, completion_tokens=5, total_tokens=15, billed_usd=0.02)
+    also = Usage(prompt_tokens=3, completion_tokens=7, total_tokens=10, billed_usd=0.01)
+
+    both = reported + also
+
+    assert (both.prompt_tokens, both.completion_tokens, both.total_tokens) == (13, 12, 25)
+    assert both.billed_usd == 0.03
+
+    # One side did not report what it charged, so the TOTAL is unknown. Adding
+    # zero for it would print a bill that looks measured and is short.
+    silent = Usage(prompt_tokens=1, completion_tokens=1)
+    assert (reported + silent).billed_usd is None
+    assert (reported + silent).prompt_tokens == 11
