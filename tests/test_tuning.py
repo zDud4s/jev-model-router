@@ -7,6 +7,7 @@ import random
 from llm_router.classifier import Example, build_model
 from llm_router.training import (
     TUNING_GRID,
+    auc_interval,
     calibrate_threshold,
     cross_validate,
     roc_auc,
@@ -109,3 +110,32 @@ def test_escalating_nobody_is_a_threshold_above_every_score() -> None:
     threshold = calibrate_threshold(model, examples, 0.0)
 
     assert all(model.score(e.vector) < threshold for e in examples)
+
+
+def test_the_interval_is_wide_when_there_is_little_to_go_on() -> None:
+    # The same ranking at two sample sizes. The point estimate says the same
+    # thing both times and only the interval distinguishes "measured" from
+    # "happened to come out that way", which is why it is printed at all.
+    # Repeating one pattern leaves the AUC untouched -- every pairwise
+    # comparison is duplicated in step -- so only the sample size changes.
+    pattern = [(0.9, 1), (0.95, 0), (0.6, 0), (0.4, 0)]
+
+    small = auc_interval(pattern * 3)
+    large = auc_interval(pattern * 300)
+
+    assert small is not None and large is not None
+    assert roc_auc(pattern * 3) == roc_auc(pattern * 300)
+    assert (small[1] - small[0]) > 3 * (large[1] - large[0])
+    assert large[0] > 0.5
+
+
+def test_an_interval_stays_inside_the_range_an_auc_can_take() -> None:
+    perfect = [(0.9, 1), (0.9, 1), (0.1, 0), (0.1, 0)]
+
+    low, high = auc_interval(perfect)
+
+    assert high == 1.0
+    assert 0.0 <= low <= 1.0
+    # A class that never appears has no interval, for the same reason it has no
+    # AUC: there is no pair to rank.
+    assert auc_interval([(0.9, 1), (0.8, 1)]) is None

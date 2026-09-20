@@ -349,8 +349,8 @@ have shipped these weights, because its cost column looks like a saving ($0.17 t
 
 ### What the corpus then taught the trainer
 
-Three of those numbers were the trainer's fault rather than the data's, and each one is now
-a flag on `train`:
+Four of those numbers were the trainer's fault rather than the data's, and each one is now
+part of what `train` prints:
 
 - **The words were not merely useless, they were harmful.** Cross-validated on the training
   split alone, `words + length` scored **0.40 AUC — below chance** — while the same fit
@@ -368,6 +368,14 @@ a flag on `train`:
   scores: `--target-escalation 0.15` means *escalate the hardest 15%*, and the sweep spans the
   range the model actually occupies. A threshold that escalates all or none of the held-out
   set is called out as such.
+- **The AUC was printed with no error bar.** 0.590 on 96 held-out requests containing 17
+  failures is compatible with anything from 0.436 to 0.745, so the honest reading of the
+  whole exercise is *this corpus cannot tell the model from chance*. Every AUC now carries a
+  95% interval (Hanley–McNeil, checked against a 2000-resample bootstrap that gave
+  [0.424, 0.743] where the formula gives [0.436, 0.745]), and an interval spanning 0.500 is a
+  warning. It is also the cheapest demonstration that the split matters: the same fit scored
+  against the *wrong*, row-wise split reads 0.737 with an interval of [0.600, 0.874] — clear
+  of chance, and entirely an artefact.
 
 None of this rescues the result — a 1.66x lift on one benchmark is not a router. It makes the
 next negative result cheaper to read.
