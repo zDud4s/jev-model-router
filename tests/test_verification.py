@@ -797,3 +797,102 @@ def test_the_reasoning_hint_names_the_verifier_backends_own_knob() -> None:
     local = reason_with("cheap")
     assert "think: false" in local
     assert "'cheap'" in local
+
+
+# --- found by labelling 400 questions with an answer key ---------------------
+#
+# qwen3.5:4b through Ollama, 2026-09-20. 70 of 400 answers were wrong; 60 of
+# those 70 were not wrong at all but unfinished, stopped at exactly the tier's
+# 2048-token budget. No correct answer came within five tokens of it.
+
+
+def test_an_answer_cut_off_by_our_own_budget_is_failed_without_buying_a_review() -> None:
+    log = RequestLog(":memory:")
+    backends: dict[str, Any] = {}
+
+    def factory(tier):
+        backend = (
+            TruncatedBackend(tier, replies=["The first step is to work out how many"])
+            if tier.name == "cheap"
+            else ScriptedBackend(tier, replies=["the proper answer"])
+        )
+        backends[tier.name] = backend
+        return backend
+
+    app = create_app(verifying(), backend_factory=factory, log=log)
+    with TestClient(app) as client:
+        response = post(client)
+        check = verification_row(log)
+
+    assert check["verdict"] == "fail"
+    assert "stops mid-generation" in check["reason"]
+    # The only call to `top` is the escalation: no judge was paid to read a
+    # finish reason that was already in the response.
+    assert len(backends["top"].calls) == 1
+    assert check["verifier_cost_usd"] == 0.0
+    assert check["escalated"] == 1
+    assert response.json()["choices"][0]["message"]["content"] == "the proper answer"
+
+
+def test_a_truncation_the_caller_asked_for_is_reviewed_like_any_other_answer() -> None:
+    # `max_tokens: 20` is a request for a short answer, and a short answer is
+    # what arrived. Failing it would buy a second answer cut off at 20 tokens by
+    # the same cap -- billed to whoever set it.
+    log = RequestLog(":memory:")
+    backends: dict[str, Any] = {}
+
+    def factory(tier):
+        backend = (
+            TruncatedBackend(tier, replies=["4"])
+            if tier.name == "cheap"
+            else ScriptedBackend(tier, replies=["VERDICT: PASS"])
+        )
+        backends[tier.name] = backend
+        return backend
+
+    with TestClient(create_app(verifying(), backend_factory=factory, log=log)) as client:
+        post(client, max_tokens=20)
+        check = verification_row(log)
+
+    assert check["verdict"] == "pass"
+    assert check["verifier_tier"] == "top"
+    assert check["escalated"] == 0
+
+
+def test_an_answer_cut_off_is_failed_even_when_it_was_sampled_out() -> None:
+    # Same argument as the empty answer: sampling rations a paid review, and
+    # reading a finish reason costs nothing.
+    log = RequestLog(":memory:")
+
+    def factory(tier):
+        return (
+            TruncatedBackend(tier, replies=["The first step is"])
+            if tier.name == "cheap"
+            else ScriptedBackend(tier, replies=["the proper answer"])
+        )
+
+    config = verifying(sample_rate=0.0)
+    with TestClient(create_app(config, backend_factory=factory, log=log)) as client:
+        post(client)
+        check = verification_row(log)
+
+    assert check["verdict"] == "fail"
+    assert check["verifier_cost_usd"] == 0.0
+
+
+def test_an_escalation_that_is_cut_off_too_names_the_budget_rather_than_the_model() -> None:
+    # The trap this whole rule walks into if nobody says anything: a stronger
+    # tier capped just as low returns a second unfinished answer, at the
+    # stronger tier's price.
+    log = RequestLog(":memory:")
+
+    def factory(tier):
+        return TruncatedBackend(tier, replies=["The first step is to work out how many"])
+
+    with TestClient(create_app(verifying(), backend_factory=factory, log=log)) as client:
+        post(client)
+        check = verification_row(log)
+
+    assert check["escalated"] == 1
+    assert "'top'" in check["reason"]
+    assert "cut off at its budget too" in check["reason"]

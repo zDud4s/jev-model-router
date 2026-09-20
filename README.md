@@ -118,6 +118,31 @@ avoid, and there is exactly one way to find out what your pass rate is, which is
 
 The report does not hide this. It is the one below, from four requests with one failure.
 
+### The failures a judge should never be paid to find
+
+Some answers are indefensible without reading them. Two are checked before the reviewer is
+called, cost nothing, and therefore ignore `sample_rate` — what sampling rations is a paid
+review, and there is nothing here to pay for:
+
+- **An empty answer.** A thinking model that spends its whole window reasoning returns a 200
+  with nothing in it. An answer that is not there is not a thing to review.
+- **An answer cut off at our own output budget** (`finish_reason: length`). The model was
+  mid-sentence when the budget ran out.
+
+The second one came out of labelling 400 GSM8K questions through `qwen3.5:4b`: **60 of the 70
+failures were not wrong answers but unfinished ones**, every one stopped at exactly the tier's
+2048-token `num_predict`, while no correct answer came within five tokens of it. A judge was
+being bought to rediscover a fact already in the response body.
+
+Two things keep the rule honest:
+
+- **Only when the budget was ours.** A caller who sent `max_tokens: 20` asked for a short
+  answer and got one. Failing it would buy them a second answer cut off at 20 tokens by the
+  same cap, and charge them for it — so a caller-set budget disables the check.
+- **An escalation that is also cut off says so.** A stronger tier capped just as low returns a
+  second unfinished answer at the stronger tier's price. The reason names the tier and the
+  budget, because the fix is that number and not a third call.
+
 ### What it declines to do, and why
 
 - **Streams are never verified.** Once the first byte is on the wire the answer cannot be

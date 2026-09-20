@@ -24,6 +24,12 @@ non-negotiable here:
    verdict is counted, and a verifier that fails is a recorded outcome rather
    than an absence of one.
 
+Not every failure needs a reviewer. An answer that is empty, or that stopped
+mid-sentence at our own output budget, is already known bad from the response
+body -- so those are failed for free, before the paid review and regardless of
+sampling. See `Verifier._unfinished`; the judge is for answers that are finished
+and wrong, which is a much smaller set than it looks.
+
 Streaming is not verified, and that is a property of streaming rather than a
 gap: once the first byte is on the wire the answer cannot be retracted. Those
 requests are recorded as skipped with that reason.
@@ -268,17 +274,13 @@ class Verifier:
             return self.skip(SkipReason.TIER_NOT_VERIFIED, served_tier)
 
         answer = answer_text(body)
-        if not answer:
-            if has_tool_calls(body):
-                # A tool call is a complete answer with no prose in it.
-                return self.skip(SkipReason.NO_ANSWER_TEXT)
-            # No text and no tool calls is not an answer at all. This used to be
-            # the same skip as the tool-call case, and on the first run against
-            # a real model it let an empty 200 through to the client: a thinking
-            # model spent its whole window reasoning and said nothing. Failing it
-            # needs no reviewer, costs nothing, and so ignores sampling --
-            # sampling rations a paid review, and there is nothing here to pay.
-            return await self._fail_empty(request, served_tier, body, eligible)
+        if not answer and has_tool_calls(body):
+            # A tool call is a complete answer with no prose in it.
+            return self.skip(SkipReason.NO_ANSWER_TEXT)
+
+        unfinished = self._unfinished(request, answer, body)
+        if unfinished is not None:
+            return await self._fail_unreviewed(request, served_tier, eligible, unfinished)
 
         if self._rng() >= settings.sample_rate:
             return self.skip(SkipReason.SAMPLED_OUT)
@@ -346,12 +348,51 @@ class Verifier:
         outcome.latency_ms = _elapsed_ms(started)
         return outcome
 
-    async def _fail_empty(
+    def _unfinished(
+        self,
+        request: ChatCompletionRequest,
+        answer: str,
+        body: Mapping[str, Any] | None,
+    ) -> str | None:
+        """Why this answer can be failed without a reviewer, or None.
+
+        Everything read here is already in the response the cheap tier returned,
+        so looking costs nothing -- which is why sampling does not apply. What
+        sampling rations is a paid review, and there is nothing here to pay for.
+        Both cases are one defect: the model was still mid-answer when it
+        stopped, and no judge is needed to see it.
+        """
+        if not answer:
+            # On the first run against a real model this reached the client as a
+            # 200 with nothing in it: a thinking model spent its whole window
+            # reasoning and said nothing. An answer that is not there is not a
+            # thing to review.
+            return f"empty answer (finish_reason={finish_reason(body)}); failed without a review"
+
+        if finish_reason(body) == "length" and request.output_budget is None:
+            # The same defect with some prose in front of it. Measured over 400
+            # GSM8K questions answered by qwen3.5:4b: 60 of the 70 failures were
+            # this, every one stopped at exactly the tier's own output budget,
+            # and a paid judge was being bought to rediscover what the response
+            # already states. The other 10 were wrong arithmetic, which is the
+            # part a judge is actually for.
+            #
+            # Only when the budget was OURS. A caller who asked for 50 tokens
+            # got the 50 tokens they asked for; failing that buys them a second
+            # answer cut off at 50 tokens by the same cap, and charges them for
+            # it.
+            return (
+                "the answer stops mid-generation (finish_reason=length) at the tier's own "
+                "output budget; failed without a review"
+            )
+        return None
+
+    async def _fail_unreviewed(
         self,
         request: ChatCompletionRequest,
         served_tier: str,
-        body: Mapping[str, Any] | None,
         eligible: list[str],
+        reason: str,
     ) -> VerificationOutcome:
         started = time.perf_counter()
         outcome = VerificationOutcome(
@@ -359,10 +400,7 @@ class Verifier:
             # Nobody judged it, and the column says so rather than crediting a
             # verifier that was never called.
             verifier_tier=None,
-            reason=(
-                f"empty answer (finish_reason={finish_reason(body)}); "
-                "failed without a review"
-            ),
+            reason=reason,
         )
         await self._escalate(request, served_tier, eligible, outcome)
         outcome.latency_ms = _elapsed_ms(started)
@@ -403,6 +441,13 @@ class Verifier:
         outcome.escalation_usage = result.usage
         outcome.escalation_cost_usd = cost_usd(self._config.tier(target).prices, result.usage)
         outcome.body = result.body
+        if finish_reason(result.body) == "length" and request.output_budget is None:
+            # Worth saying out loud for the truncation case above: escalating a
+            # cut-off answer to a tier capped just as low buys a second cut-off
+            # answer. The fix is that tier's output budget, not a third call.
+            outcome.reason = _note(
+                outcome.reason, f"the answer from {target!r} is cut off at its budget too"
+            )
 
 
 def _reasoning_off_hint(tier: TierConfig) -> str:
