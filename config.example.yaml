@@ -120,6 +120,23 @@ verification:
   on_unparseable: accept    # accept | escalate
   on_verifier_error: accept # accept | escalate
 
+  # An answer that is empty, or cut off at this tier's own output budget, is
+  # failed without a review: the response body already says so, and reading it
+  # costs nothing, so sample_rate does not apply to those. With this on, the
+  # SAME tier is asked once more before a stronger one is paid for.
+  #
+  # Measured on 400 GSM8K questions through qwen3.5:4b: of 60 answers that ran
+  # past the budget without finishing, 33 were answered on the next ask -- and
+  # 27 of those finished inside the same budget, several in under 300 tokens.
+  # The budget was never binding on them; the first sample ran away.
+  #
+  # Off by default because whether it pays is arithmetic, not taste: a retry is
+  # worth it when the cheap tier costs less than (retry success rate) x the
+  # strong tier. At 45%, a local tier at a fiftieth of the price is free money
+  # and a cheap tier at half the price is a loss. A retry that fails is billed
+  # and then escalates, so the row shows both calls.
+  retry_unfinished: false
+
   # Bounds on what the verifier is shown. A review prompt that grows without
   # limit is how a verification loop quietly becomes the most expensive call in
   # the system.
