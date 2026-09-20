@@ -708,3 +708,18 @@ def test_an_unparseable_verdict_is_not_evidence_about_the_score(corpus_log):
     assert stats.classifier.scored == 1
     assert stats.classifier.reviewed == 0
     assert stats.classifier.bands == []
+
+
+def test_a_target_in_traffic_and_a_target_in_quality_cannot_both_be_set(corpus_log):
+    # They set the same threshold from opposite ends. Honouring one silently
+    # would give the operator a policy they did not ask for and no sign of it.
+    a_corpus(corpus_log)
+    with pytest.raises(TrainingError, match="not both"):
+        train_from_log(
+            corpus_log,
+            predicts_tier="cheap",
+            strong_tier="top",
+            min_examples=40,
+            target_escalation=0.2,
+            target_recall=0.8,
+        )

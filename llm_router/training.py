@@ -384,6 +384,33 @@ def calibrate_threshold(
     return scores[max(index, 0)]
 
 
+def calibrate_for_recall(
+    model: DifficultyModel, examples: Sequence[Example], recall: float
+) -> float:
+    """The highest threshold that still catches this share of the TRAINING
+    split's failures -- i.e. the cheapest policy meeting a quality target.
+
+    The other knob, `calibrate_threshold`, is priced in traffic: "escalate the
+    hardest 15%". This one is priced in quality: "catch 80% of the failures".
+    Operators have a number for the second and rarely for the first, and on a
+    weak model the translation between them is brutal and worth seeing -- catch
+    80% of failures here and you escalate most of the traffic to do it.
+
+    Read off the training split like every other threshold in this module. What
+    the held-out set then reports is a measurement; picking the point on the
+    held-out set would make it a fit.
+    """
+    scores = [model.score(e.vector) for e in examples]
+    failures = sorted((score for score, e in zip(scores, examples) if e.label), reverse=True)
+    if not scores:
+        return 0.5
+    escalate_none = max(scores) + 1e-9
+    if recall <= 0 or not failures:
+        return escalate_none
+    wanted = min(math.ceil(recall * len(failures)), len(failures))
+    return failures[wanted - 1]
+
+
 def sweep_thresholds(
     model: DifficultyModel, rows: Sequence[Row], thresholds: Sequence[float]
 ) -> list[tuple[float, float, int]]:
@@ -516,6 +543,7 @@ def train_from_log(
     seed: int = 0,
     tune_settings: bool = False,
     target_escalation: float | None = None,
+    target_recall: float | None = None,
     **fit_kwargs: Any,
 ) -> TrainingReport:
     rows = load_rows(log, predicts_tier=predicts_tier, strong_tier=strong_tier)
@@ -581,8 +609,17 @@ def train_from_log(
         seed=seed,
         **fit_kwargs,
     )
+    if target_escalation is not None and target_recall is not None:
+        raise TrainingError(
+            "give a target in traffic or a target in quality, not both: "
+            "--target-escalation and --target-recall set the same threshold "
+            "from different ends and would silently disagree"
+        )
     if target_escalation is not None:
         threshold = calibrate_threshold(model, train, target_escalation)
+        model.threshold = threshold
+    elif target_recall is not None:
+        threshold = calibrate_for_recall(model, train, target_recall)
         model.threshold = threshold
     # Every point is a share of the TRAINING split's scores, so the table spans
     # the model's actual range instead of a grid it may never touch.

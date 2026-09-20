@@ -59,6 +59,13 @@ def _build_parser() -> argparse.ArgumentParser:
         default=None,
         help="set the threshold to escalate this share of the training split (e.g. 0.15)",
     )
+    train.add_argument(
+        "--target-recall",
+        type=float,
+        default=None,
+        help="set the threshold to catch this share of the training split's failures "
+        "(e.g. 0.8) -- the same knob priced in quality instead of traffic",
+    )
     train.add_argument("--holdout", type=float, default=0.25)
     train.add_argument("--min-examples", type=int, default=40)
     train.add_argument("--seed", type=int, default=0)
@@ -126,6 +133,7 @@ def _train(config, args) -> int:
             seed=args.seed,
             tune_settings=args.tune,
             target_escalation=args.target_escalation,
+            target_recall=args.target_recall,
         )
     except TrainingError as exc:
         # Not an exception trace. Every one of these says what is missing from

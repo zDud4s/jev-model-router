@@ -367,7 +367,11 @@ part of what `train` prints:
   printed seven rows of two policies. Thresholds are now read off the training split's own
   scores: `--target-escalation 0.15` means *escalate the hardest 15%*, and the sweep spans the
   range the model actually occupies. A threshold that escalates all or none of the held-out
-  set is called out as such.
+  set is called out as such. `--target-recall 0.8` is the same knob priced in quality rather
+  than traffic — *catch 80% of the failures* — which is the number an operator usually has,
+  and on a weak model the exchange rate between the two is worth seeing: on this corpus,
+  catching 70.6% of the held-out failures costs escalating **69.8%** of the traffic, at which
+  point the lift is 1.01x and the model is a coin.
 - **The AUC was printed with no error bar.** 0.590 on 96 held-out requests containing 17
   failures is compatible with anything from 0.436 to 0.745, so the honest reading of the
   whole exercise is *this corpus cannot tell the model from chance*. Every AUC now carries a

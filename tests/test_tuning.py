@@ -2,12 +2,14 @@
 
 from __future__ import annotations
 
+import math
 import random
 
 from llm_router.classifier import Example, build_model
 from llm_router.training import (
     TUNING_GRID,
     auc_interval,
+    calibrate_for_recall,
     calibrate_threshold,
     cross_validate,
     roc_auc,
@@ -139,3 +141,32 @@ def test_an_interval_stays_inside_the_range_an_auc_can_take() -> None:
     # A class that never appears has no interval, for the same reason it has no
     # AUC: there is no pair to rank.
     assert auc_interval([(0.9, 1), (0.8, 1)]) is None
+
+
+def test_a_quality_target_catches_the_share_of_failures_it_names() -> None:
+    # The knob an operator actually has a number for. "Escalate 15%" is a
+    # budget; "catch 80% of the failures" is a promise to whoever reads the
+    # answers, and the two are only the same number by accident.
+    examples = [
+        Example(vector={"n:log_chars": i / 120}, label=int(i > 90), group=f"g{i}")
+        for i in range(120)
+    ]
+    model = build_model(examples, predicts_tier="cheap", use_words=False)
+    failures = [e for e in examples if e.label]
+
+    threshold = calibrate_for_recall(model, examples, 0.5)
+    caught = sum(model.score(e.vector) >= threshold for e in failures)
+
+    assert caught == math.ceil(0.5 * len(failures))
+    # And it is the cheapest threshold that does it: nudging it up loses one.
+    nudged = sum(model.score(e.vector) > threshold for e in failures)
+    assert nudged < caught
+
+
+def test_catching_no_failures_escalates_nobody() -> None:
+    examples = _separable()
+    model = build_model(examples, predicts_tier="cheap")
+
+    threshold = calibrate_for_recall(model, examples, 0.0)
+
+    assert all(model.score(e.vector) < threshold for e in examples)
