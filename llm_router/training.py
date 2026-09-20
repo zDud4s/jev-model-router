@@ -64,6 +64,11 @@ class Row:
     strong_cost_usd: float
     strong_priced: bool
     strong_eligible: bool
+    # False when the verdict came from a rule rather than a judge: an answer
+    # that was empty or cut off at the tier's budget, failed for nothing by the
+    # verification loop. A corpus made mostly of those is not a difficulty
+    # corpus -- the router already catches them without a model.
+    reviewed: bool = True
 
 
 @dataclass
@@ -154,6 +159,7 @@ def load_rows(log: RequestLog, *, predicts_tier: str, strong_tier: str) -> list[
         SELECT r.prompt_text                                   AS prompt_text,
                r.route_cost_usd                                AS route_cost,
                v.verdict                                       AS verdict,
+               v.verifier_tier                                 AS verifier_tier,
                v.verifier_cost_usd + v.escalation_cost_usd     AS loop_cost,
                c.cost_usd                                      AS strong_cost,
                c.priced                                        AS strong_priced,
@@ -205,6 +211,7 @@ def load_rows(log: RequestLog, *, predicts_tier: str, strong_tier: str) -> list[
                 strong_cost_usd=float(entry["strong_cost"] or 0.0),
                 strong_priced=bool(entry["strong_priced"]),
                 strong_eligible=bool(entry["strong_eligible"]),
+                reviewed=entry["verifier_tier"] is not None,
             )
         )
     if not rows:
@@ -655,6 +662,15 @@ def train_from_log(
             "passing one barely more often than a coin would"
             + (", and below chance means the features are actively misleading on unseen "
                "conversations" if grouped.auc < 0.5 else "")
+        )
+    unreviewed = sum(1 for row in rows if row.example.label and not row.reviewed)
+    if positives and unreviewed / positives >= 0.5:
+        warnings.append(
+            f"{unreviewed} of the {positives} failure(s) here were failed without a review "
+            "-- an empty or cut-off answer, which the verification loop already catches for "
+            "nothing. A classifier fitted on this corpus is mostly learning to predict how "
+            "long an answer will be, and nothing needs that predicted. Raise the tier's "
+            "output budget and collect again"
         )
     if grouped.auc_ci is not None and grouped.auc_ci[0] <= 0.5 <= grouped.auc_ci[1]:
         warnings.append(

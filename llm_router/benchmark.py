@@ -76,10 +76,20 @@ def final_answer(reply: str) -> Decimal | None:
     return _number(found[-1]) if found else None
 
 
-def grade(reply: str, expected: str) -> tuple[bool, str]:
+def grade(reply: str, expected: str, finish_reason: str | None = None) -> tuple[bool, str]:
+    """(passed, reason). `finish_reason` separates two failures that look alike.
+
+    A reply with no ANSWER line in it has not answered, but WHY it has not is
+    the difference between a model that cannot do the arithmetic and one that
+    was cut off before it finished. Measured over 400 questions: 60 of 70
+    failures were the second, and a corpus that calls them the same thing
+    teaches a classifier to predict the output budget.
+    """
     want = _number(expected)
     got = final_answer(reply)
     if got is None:
+        if finish_reason == "length":
+            return False, f"expected {expected}; unfinished (finish_reason=length)"
         return False, f"expected {expected}; the reply states no ANSWER line"
     return got == want, f"expected {expected}, answered {got}"
 
@@ -99,6 +109,10 @@ class LabelReport:
     asked: int = 0
     passed: int = 0
     failed: int = 0
+    # Failures that were cut off at the output budget rather than answered
+    # wrongly. Counted apart because the fix is a number in the config, and
+    # because training on them models the budget instead of the difficulty.
+    unfinished: int = 0
     skipped_done: int = 0
     errors: list[str] = field(default_factory=list)
 
@@ -159,8 +173,9 @@ def label(
                 if response.status_code != 200 or not request_id:
                     report.errors.append(f"{response.status_code}: {response.text[:200]}")
                     continue
-                reply = response.json()["choices"][0]["message"].get("content") or ""
-                ok, reason = grade(reply, item.answer)
+                choice = response.json()["choices"][0]
+                reply = choice["message"].get("content") or ""
+                ok, reason = grade(reply, item.answer, choice.get("finish_reason"))
                 log.record_label(
                     request_id, verdict="pass" if ok else "fail", reason=reason, source=verifier
                 )
@@ -168,6 +183,8 @@ def label(
                     report.passed += 1
                 else:
                     report.failed += 1
+                    if choice.get("finish_reason") == "length":
+                        report.unfinished += 1
                 if progress:
                     progress(report.asked, ok, reason)
     finally:
@@ -181,7 +198,20 @@ def format_label_report(report: LabelReport, *, db: str) -> str:
     lines = [
         f"asked {report.asked} question(s)  ->  {db}",
         f"  pass {report.passed}   fail {report.failed}   failure rate {rate}",
-        f"  already labelled, skipped {report.skipped_done}",
     ]
+    if report.unfinished:
+        share = report.unfinished / report.failed
+        lines.append(
+            f"  of those failures, {report.unfinished} ({share:.0%}) were UNFINISHED rather "
+            "than wrong: cut off at the tier's output budget"
+        )
+        if share >= 0.5:
+            lines.append(
+                "  most of this corpus's failures are a budget, not a difficulty. Raise the "
+                "tier's output budget and label again before training on it -- a classifier "
+                "fitted here learns to predict how long an answer will be, and the router "
+                "already fails an unfinished answer without a model."
+            )
+    lines.append(f"  already labelled, skipped {report.skipped_done}")
     lines += [f"  ERROR {e}" for e in report.errors]
     return "\n".join(lines)

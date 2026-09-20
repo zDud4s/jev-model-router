@@ -122,3 +122,58 @@ def test_a_labelled_database_trains(tmp_path) -> None:
 
     assert report.rows == 80
     assert report.model.judged_by == "ground_truth:gsm8k"
+
+
+# --- unfinished is not the same failure as wrong ----------------------------
+#
+# 400 GSM8K questions through qwen3.5:4b, 2026-09-20: 70 failures, 60 of them
+# stopped at exactly the tier's 2048-token budget with no answer stated. Both
+# kinds had been recorded as "the reply states no ANSWER line", so the corpus
+# read as a hard benchmark when most of it was one number in the config.
+
+
+class CutOffBackend(FakeBackend):
+    """Answers `easy` questions; runs out of budget on everything else."""
+
+    async def complete(self, request):
+        text = request.messages[-1].content
+        if "easy" in text:
+            self.content = "ANSWER: 1"
+            return await super().complete(request)
+        self.content = "First I work out how many there are, which means"
+        response = await super().complete(request)
+        response.body["choices"][0]["finish_reason"] = "length"
+        return response
+
+
+def test_an_unfinished_reply_is_graded_apart_from_a_wrong_one() -> None:
+    cut_off, reason = grade("I start by adding", "4", "length")
+    silent, quiet_reason = grade("The answer is obvious.", "4", "stop")
+
+    assert cut_off is False and silent is False
+    assert "unfinished" in reason and "length" in reason
+    assert "unfinished" not in quiet_reason
+
+
+def test_a_corpus_that_is_mostly_budget_says_so_before_it_is_trained_on(tmp_path) -> None:
+    from llm_router.benchmark import format_label_report
+
+    config = parse_config(
+        {**BASE_CONFIG, "router": {"kind": "static", "default_tier": "cheap",
+                                   "strong_tier": "top"}}
+    )
+    items = [Item("easy one", "1"), Item("long one", "1"), Item("long two", "1")]
+    report = label(
+        config,
+        items,
+        db=str(tmp_path / "bench.db"),
+        tier="cheap",
+        source="gsm8k",
+        backend_factory=lambda tier: CutOffBackend(tier),
+    )
+
+    assert (report.failed, report.unfinished) == (2, 2)
+    text = format_label_report(report, db="bench.db")
+    assert "UNFINISHED rather than wrong" in text
+    # The advice is the point: relabel with a bigger budget, do not train here.
+    assert "output budget and label again" in text

@@ -80,6 +80,7 @@ def record(
     opening: str = "let us begin",
     tier: str = "cheap",
     unparseable: bool = False,
+    reviewed: bool = True,
     status: int = 200,
     strong_cost: float = 0.01,
     route_cost: float = 0.0,
@@ -87,7 +88,13 @@ def record(
     model: str | None = None,
 ) -> None:
     verification = (
-        VerificationOutcome(verdict=verdict, verifier_tier="top", unparseable=unparseable)
+        VerificationOutcome(
+            verdict=verdict,
+            # None is how the loop records a verdict no judge made: an empty or
+            # cut-off answer, failed by a rule for nothing.
+            verifier_tier="top" if reviewed else None,
+            unparseable=unparseable,
+        )
         if verdict is not None
         else None
     )
@@ -723,3 +730,42 @@ def test_a_target_in_traffic_and_a_target_in_quality_cannot_both_be_set(corpus_l
             target_escalation=0.2,
             target_recall=0.8,
         )
+
+
+def test_a_corpus_of_failures_no_judge_ever_saw_is_called_out(corpus_log):
+    # The verification loop fails an empty or cut-off answer without paying a
+    # judge. Those verdicts are true, and they are also the cheapest thing in
+    # the system to detect -- so a classifier fitted mostly on them is being
+    # trained to predict something already handled without it.
+    for i in range(60):
+        record(corpus_log, f"short {i}", Verdict.PASS, opening=f"c{i}")
+    for i in range(20):
+        record(
+            corpus_log,
+            f"a much longer question {i} " * 20,
+            Verdict.FAIL,
+            opening=f"u{i}",
+            reviewed=False,
+        )
+    for i in range(4):
+        record(corpus_log, f"wrong but finished {i} " * 20, Verdict.FAIL, opening=f"w{i}")
+
+    report = train_from_log(
+        corpus_log, predicts_tier="cheap", strong_tier="top", min_examples=40
+    )
+
+    assert any("failed without a review" in w for w in report.warnings)
+    assert any("output budget" in w for w in report.warnings)
+
+
+def test_a_corpus_a_judge_actually_read_draws_no_such_warning(corpus_log):
+    for i in range(60):
+        record(corpus_log, f"short {i}", Verdict.PASS, opening=f"c{i}")
+    for i in range(24):
+        record(corpus_log, f"a much longer question {i} " * 20, Verdict.FAIL, opening=f"w{i}")
+
+    report = train_from_log(
+        corpus_log, predicts_tier="cheap", strong_tier="top", min_examples=40
+    )
+
+    assert not any("failed without a review" in w for w in report.warnings)

@@ -208,6 +208,36 @@ than producing a model out of nothing:
 Below 40 labels, or fewer than 5 of the rare class, it refuses: a model fitted on less has
 memorised the log, and "always cheap" is the correct router anyway.
 
+### Labels without a judge
+
+A judge costs one call per label. A question set with an answer key costs nothing, and is
+the more reliable grader of the two — a judge that cannot afford to reason was measured
+missing arithmetic. `label` takes GSM8K's JSONL:
+
+```bash
+python -m llm_router -c config.yaml label --gsm8k test.jsonl --db gsm8k.db --limit 400
+python -m llm_router -c config.yaml train --db gsm8k.db --out classifier.json
+```
+
+Each question goes through the router in process, so the row is the row real traffic would
+write; the reply's final `ANSWER:` line is compared with the key (no such line is a fail, not
+a guess at the last number in the text), and the verdict is stored with `verifier_tier`
+`ground_truth:gsm8k`. It refuses to write to the serving log — `stats` would count those rows
+as traffic — and a rerun resumes where the last one stopped.
+
+What it measures is whether the features can tell a hard word problem from an easy one. That
+is a test of the classifier, not a model of your traffic: routing real requests on it is a
+claim only real verdicts can support.
+
+**A failure that is unfinished is counted apart from one that is wrong.** A reply with no
+`ANSWER:` line may be a model that cannot do the arithmetic, or a model that was cut off at
+the tier's output budget, and those are not the same defect: the first is difficulty, the
+second is a number in the config. When most of a corpus's failures are the second, the label
+report says so and tells you to raise the budget and label again before training — because a
+classifier fitted there learns to predict *how long an answer will be*, and the router
+already fails an unfinished answer without a model. `train` makes the same objection from the
+other side: a corpus whose failures were mostly failed without a review draws a warning.
+
 ### What the report says
 
 From the test suite's fake backends, with a deliberately learnable signal planted — the cheap
