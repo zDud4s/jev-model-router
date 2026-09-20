@@ -769,3 +769,32 @@ def test_a_corpus_a_judge_actually_read_draws_no_such_warning(corpus_log):
     )
 
     assert not any("failed without a review" in w for w in report.warnings)
+
+
+def test_a_price_for_a_bad_answer_turns_the_table_into_a_decision(corpus_log):
+    # The report refuses to invent what a wrong answer costs. Supplied with the
+    # number, it does the arithmetic and names the winner -- and says whose
+    # number it was, because the ranking is worth exactly as much as that.
+    a_corpus(corpus_log)
+    priced = train_from_log(
+        corpus_log,
+        predicts_tier="cheap",
+        strong_tier="top",
+        min_examples=40,
+        bad_answer_cost=0.05,
+    )
+    unpriced = train_from_log(
+        corpus_log, predicts_tier="cheap", strong_tier="top", min_examples=40
+    )
+
+    text = format_report(priced)
+    assert "<- cheapest" in text
+    assert "the price YOU gave" in text
+    cheapest = min(p.cost_usd + p.bad_answers * 0.05 for p in priced.policies)
+    marked = [line for line in text.splitlines() if "<- cheapest" in line]
+    assert any(f"${cheapest:>11.6f}" in line for line in marked)
+
+    # Without it, nothing is ranked and the refusal is still printed.
+    plain = format_report(unpriced)
+    assert "<- cheapest" not in plain
+    assert "will not invent a price for it" in plain

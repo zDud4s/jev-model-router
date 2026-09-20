@@ -128,6 +128,12 @@ class TrainingReport:
     policies: list[Policy] = field(default_factory=list)
     sweep: list[tuple[float, float, int]] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
+    # What the operator says one bad answer costs them, in dollars. None keeps
+    # money and bad answers in separate columns, which is the default because
+    # this module has no way to know the number and will not invent one. Given
+    # one, it does the arithmetic and names the cheapest policy -- which is a
+    # decision, and belongs to whoever supplied the price.
+    bad_answer_cost_usd: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -143,6 +149,7 @@ class TrainingReport:
             "sweep": [
                 {"threshold": t, "cost_usd": c, "bad_answers": b} for t, c, b in self.sweep
             ],
+            "bad_answer_cost_usd": self.bad_answer_cost_usd,
             "warnings": list(self.warnings),
         }
 
@@ -551,6 +558,7 @@ def train_from_log(
     tune_settings: bool = False,
     target_escalation: float | None = None,
     target_recall: float | None = None,
+    bad_answer_cost: float | None = None,
     **fit_kwargs: Any,
 ) -> TrainingReport:
     rows = load_rows(log, predicts_tier=predicts_tier, strong_tier=strong_tier)
@@ -700,6 +708,7 @@ def train_from_log(
         policies=price_policies(model, test_rows, threshold),
         sweep=sweep_thresholds(model, test_rows, sweep_points),
         warnings=warnings,
+        bad_answer_cost_usd=bad_answer_cost,
     )
     model.metrics = {
         "grouped": grouped.to_dict(),
@@ -756,19 +765,34 @@ def format_report(report: TrainingReport) -> str:
     if report.policies:
         lines.append("")
         lines.append("what the held-out traffic would have cost, per policy")
-        lines.append(f"  {'policy':<34} {'cost':>12}  {'bad answers':>11}  escalations")
-        for policy in report.policies:
+        price = report.bad_answer_cost_usd
+        total = "         total" if price is not None else ""
+        lines.append(
+            f"  {'policy':<34} {'cost':>12}  {'bad answers':>11}  escalations{total}"
+        )
+        totals = [p.cost_usd + p.bad_answers * (price or 0.0) for p in report.policies]
+        best = min(totals) if price is not None and totals else None
+        for policy, whole in zip(report.policies, totals):
+            marker = ""
+            if price is not None:
+                marker = f"  ${whole:>11.6f}" + ("  <- cheapest" if whole == best else "")
             lines.append(
                 f"  {policy.name:<34} ${policy.cost_usd:>11.6f}  "
-                f"{policy.bad_answers:>11}  {policy.escalations:>11}"
+                f"{policy.bad_answers:>11}  {policy.escalations:>11}{marker}"
             )
             if policy.note:
                 lines.append(f"      {policy.note}")
-        lines.append(
-            "  Money and bad answers are separate columns because they are separate "
-            "things. What a wrong answer costs you is yours to supply; this report "
-            "will not invent a price for it."
-        )
+        if price is None:
+            lines.append(
+                "  Money and bad answers are separate columns because they are separate "
+                "things. What a wrong answer costs you is yours to supply; this report "
+                "will not invent a price for it."
+            )
+        else:
+            lines.append(
+                f"  Totals are cost + bad answers x ${price:g}, the price YOU gave. The "
+                "ranking is only as good as that number, and nothing here checked it."
+            )
 
     if report.sweep:
         lines.append("")
@@ -776,10 +800,22 @@ def format_report(report: TrainingReport) -> str:
             "threshold sweep on the held-out set -- each point is a share of the "
             "training split's own scores"
         )
+        price = report.bad_answer_cost_usd
+        cheapest = (
+            min(cost + bad * price for _, cost, bad in report.sweep)
+            if price is not None
+            else None
+        )
         for threshold, cost, bad in report.sweep:
             marker = "  <- configured" if abs(threshold - model.threshold) < 1e-9 else ""
+            whole = ""
+            if price is not None:
+                total = cost + bad * price
+                whole = f"   total ${total:>11.6f}" + (
+                    "  <- cheapest" if total == cheapest else ""
+                )
             lines.append(
-                f"  {threshold:>6.4f}   ${cost:>11.6f}   {bad:>4} bad answer(s){marker}"
+                f"  {threshold:>6.4f}   ${cost:>11.6f}   {bad:>4} bad answer(s){whole}{marker}"
             )
 
     top = model.top_features()

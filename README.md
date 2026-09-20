@@ -402,6 +402,10 @@ part of what `train` prints:
   and on a weak model the exchange rate between the two is worth seeing: on this corpus,
   catching 70.6% of the held-out failures costs escalating **69.8%** of the traffic, at which
   point the lift is 1.01x and the model is a coin.
+- **The cost table stopped one step short of a decision.** It prints money and bad answers in
+  separate columns and refuses to invent an exchange rate, which is right — but the operator
+  has one. `--bad-answer-cost 0.05` adds a total to both the policy table and the sweep and
+  marks the cheapest row, over a price the report names as *yours* every time it prints it.
 - **The AUC was printed with no error bar.** 0.590 on 96 held-out requests containing 17
   failures is compatible with anything from 0.436 to 0.745, so the honest reading of the
   whole exercise is *this corpus cannot tell the model from chance*. Every AUC now carries a

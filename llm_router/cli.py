@@ -66,6 +66,13 @@ def _build_parser() -> argparse.ArgumentParser:
         help="set the threshold to catch this share of the training split's failures "
         "(e.g. 0.8) -- the same knob priced in quality instead of traffic",
     )
+    train.add_argument(
+        "--bad-answer-cost",
+        type=float,
+        default=None,
+        help="what one bad answer costs you, in dollars. Given it, the policy table and "
+        "the sweep add a total and name the cheapest; without it they stay separate columns",
+    )
     train.add_argument("--holdout", type=float, default=0.25)
     train.add_argument("--min-examples", type=int, default=40)
     train.add_argument("--seed", type=int, default=0)
@@ -134,6 +141,7 @@ def _train(config, args) -> int:
             tune_settings=args.tune,
             target_escalation=args.target_escalation,
             target_recall=args.target_recall,
+            bad_answer_cost=args.bad_answer_cost,
         )
     except TrainingError as exc:
         # Not an exception trace. Every one of these says what is missing from
