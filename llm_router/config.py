@@ -15,7 +15,7 @@ from typing import Any, Literal
 
 import yaml
 
-BackendKind = Literal["ollama", "openai_compatible"]
+BackendKind = Literal["ollama", "openai_compatible", "jev"]
 
 
 @dataclass(frozen=True)
@@ -62,6 +62,63 @@ class Prices:
 
 
 @dataclass(frozen=True)
+class JevConfig:
+    """How a Jev tier turns one probability into one verdict.
+
+    These are not provider knobs and that is why they are not `extra_body`.
+    Jev answers "how likely is it that this answer is correct" and the
+    verification loop needs PASS or FAIL; `threshold` is where the operator
+    draws that line, which is a decision about this router's economics rather
+    than about TypeSafe's API. A threshold buried in a dict documented as
+    "passed verbatim to the backend request body" would be sent to the provider
+    by anyone reading the field it sat in.
+
+    The default of 0.5 is the neutral reading of a calibrated probability and
+    not a recommendation. Which way to lean is arithmetic the operator has to
+    do: a false FAIL buys an escalation that was not needed, a false PASS ships
+    a wrong answer. Those cost different amounts, so the line between them is
+    not naturally in the middle.
+    """
+
+    threshold: float = 0.5
+    # Overrides the reviewer brief that `build_review_request` puts in the
+    # system message. None means "use whatever the review carried", which keeps
+    # `verification.system_prompt` working for a Jev judge too.
+    instructions: str | None = None
+    # The key the question is asked and answered under. It appears in the
+    # request and in the response, so it only matters that both agree.
+    question_key: str = "verdict"
+
+    @classmethod
+    def parse(cls, raw: dict[str, Any] | None, *, tier: str) -> "JevConfig":
+        if not raw:
+            return cls()
+        if not isinstance(raw, dict):
+            raise ConfigError(f"tier {tier!r}: 'jev' must be a mapping")
+        unknown = set(raw) - {"threshold", "instructions", "question_key"}
+        if unknown:
+            raise ConfigError(f"tier {tier!r}: unknown jev fields: {sorted(unknown)}")
+        threshold = float(raw.get("threshold", 0.5))
+        if not 0.0 <= threshold <= 1.0:
+            raise ConfigError(
+                f"tier {tier!r}: jev.threshold must be between 0 and 1, got {threshold}"
+            )
+        instructions = raw.get("instructions")
+        if instructions is not None and not str(instructions).strip():
+            # An empty string would silently fall through to the built-in
+            # default, which is the opposite of what writing one says.
+            raise ConfigError(f"tier {tier!r}: jev.instructions is empty")
+        question_key = str(raw.get("question_key", "verdict"))
+        if not question_key:
+            raise ConfigError(f"tier {tier!r}: jev.question_key is empty")
+        return cls(
+            threshold=threshold,
+            instructions=str(instructions) if instructions is not None else None,
+            question_key=question_key,
+        )
+
+
+@dataclass(frozen=True)
 class TierConfig:
     """One logical tier, mapped to one concrete backend model."""
 
@@ -77,6 +134,23 @@ class TierConfig:
     timeout_s: float = 600.0
     # Passed verbatim to the backend request body, for provider-specific knobs.
     extra_body: dict[str, Any] = field(default_factory=dict)
+    # Only meaningful when `backend` is `jev`; parse_config rejects it elsewhere
+    # rather than letting a block that does nothing look like it does something.
+    jev: JevConfig = field(default_factory=JevConfig)
+
+    @property
+    def can_serve(self) -> bool:
+        """Whether this tier can answer a client at all.
+
+        False for a judge like Jev, which returns a typed decision and cannot
+        generate text. This is not an eligibility detail, it is the difference
+        between the two kinds of number this project prints: a tier that could
+        not have served the request must never appear in a counterfactual as a
+        cheaper way of having answered it, because it was not a way of
+        answering it. An omitted baseline is a gap and an invented one is a
+        lie, and the whole claim rests on which of the two these are.
+        """
+        return self.backend != "jev"
 
     @property
     def api_key(self) -> str | None:
@@ -223,6 +297,9 @@ class ConfigError(Exception):
 
 _DEFAULT_BASE_URLS: dict[str, str] = {
     "ollama": "http://localhost:11434",
+    # Jev has one endpoint and one vendor, so naming it here saves every config
+    # a line. Still overridable: Cloudflare Workers AI fronts the same model.
+    "jev": "https://api.typesafe.ai/v1",
 }
 
 
@@ -239,10 +316,14 @@ def parse_config(raw: dict[str, Any]) -> Config:
         if not isinstance(entry, dict):
             raise ConfigError(f"tier {name!r} must be a mapping")
         backend = entry.get("backend")
-        if backend not in ("ollama", "openai_compatible"):
+        if backend not in ("ollama", "openai_compatible", "jev"):
             raise ConfigError(
-                f"tier {name!r}: backend must be 'ollama' or 'openai_compatible', "
-                f"got {backend!r}"
+                f"tier {name!r}: backend must be 'ollama', 'openai_compatible' or "
+                f"'jev', got {backend!r}"
+            )
+        if "jev" in entry and backend != "jev":
+            raise ConfigError(
+                f"tier {name!r}: 'jev' settings on a {backend!r} tier do nothing"
             )
         model = entry.get("model")
         if not model:
@@ -261,18 +342,35 @@ def parse_config(raw: dict[str, Any]) -> Config:
             prices=Prices.parse(entry.get("prices")),
             timeout_s=float(entry.get("timeout_s", 600.0)),
             extra_body=dict(entry.get("extra_body") or {}),
+            jev=JevConfig.parse(entry.get("jev"), tier=name),
         )
+
+    def must_serve(tier_name: str, where: str) -> None:
+        """Refuse a judge-only tier anywhere an answer is expected.
+
+        Caught here rather than at the first request, because the failure it
+        prevents is silent: a Jev tier named as `default_tier` would be asked
+        to write prose it structurally cannot write, once per request, forever.
+        """
+        if not tiers[tier_name].can_serve:
+            raise ConfigError(
+                f"{where} {tier_name!r} uses backend {tiers[tier_name].backend!r}, "
+                f"which returns a typed decision and cannot answer a request; "
+                f"it can only verify"
+            )
 
     raw_router = raw.get("router") or {}
     default_tier = raw_router.get("default_tier") or next(iter(tiers))
     if default_tier not in tiers:
         raise ConfigError(f"router.default_tier {default_tier!r} is not a configured tier")
+    must_serve(default_tier, "router.default_tier")
     model_map = dict(raw_router.get("model_map") or {})
     for requested, target in model_map.items():
         if target not in tiers:
             raise ConfigError(
                 f"router.model_map[{requested!r}] points at unknown tier {target!r}"
             )
+        must_serve(target, f"router.model_map[{requested!r}]")
     kind = str(raw_router.get("kind", "static"))
     if kind not in ("static", "classifier"):
         raise ConfigError(f"router.kind must be 'static' or 'classifier', got {kind!r}")
@@ -280,6 +378,8 @@ def parse_config(raw: dict[str, Any]) -> Config:
     strong_tier = raw_router.get("strong_tier")
     if strong_tier and strong_tier not in tiers:
         raise ConfigError(f"router.strong_tier {strong_tier!r} is not a configured tier")
+    if strong_tier:
+        must_serve(strong_tier, "router.strong_tier")
     threshold = raw_router.get("threshold")
     if threshold is not None:
         threshold = float(threshold)
@@ -377,6 +477,24 @@ def _parse_verification(
     if escalate_to and escalate_to not in tiers:
         raise ConfigError(
             f"verification.escalate_to {escalate_to!r} is not a configured tier"
+        )
+    if escalate_to and not tiers[escalate_to].can_serve:
+        # `escalate_to` defaults to the verifier because a judge that has
+        # already read the question is the obvious tier to re-answer it. That
+        # default is wrong for a judge which cannot answer anything, and the
+        # failure would only appear on the first FAILED verdict -- long after
+        # startup, and only for the requests that went wrong. So it is refused
+        # here, and the message says which of the two mistakes was made.
+        if not raw.get("escalate_to"):
+            raise ConfigError(
+                f"verification.verifier_tier {escalate_to!r} returns a typed decision "
+                f"and cannot re-answer a request, so 'escalate_to' has no default "
+                f"here: name the tier that answers a failed verdict"
+            )
+        raise ConfigError(
+            f"verification.escalate_to {escalate_to!r} uses backend "
+            f"{tiers[escalate_to].backend!r}, which returns a typed decision and "
+            f"cannot answer a request"
         )
 
     sample_rate = float(raw.get("sample_rate", 1.0))

@@ -290,10 +290,15 @@ class Verifier:
         review = build_review_request(request, answer, settings)
 
         # The gate again, against the review prompt rather than the original.
+        # `serving=False` because the question here is whether this tier can
+        # take the REVIEW, not whether it could have answered the request. A
+        # judge that returns a typed decision fails the second question by
+        # design and must pass the first, or it could never be asked anything.
         rejection = check_tier(
             self._config.tier(verifier_name),
             review,
             estimated_tokens=estimate_request_budget(review),
+            serving=False,
         )
         if rejection is not None:
             return self.skip(SkipReason.VERIFIER_INELIGIBLE, rejection.detail)

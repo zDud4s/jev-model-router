@@ -73,9 +73,13 @@ def test_the_shipped_example_config_is_valid(tmp_path) -> None:
     example = pathlib.Path(__file__).resolve().parents[1] / "config.example.yaml"
     config = load_config(example)
 
-    assert set(config.tiers) == {"cheap", "mid", "top"}
+    assert set(config.tiers) == {"cheap", "mid", "top", "judge"}
     assert config.router.default_tier == "cheap"
     assert config.log.store_prompts is False
+    # The example ships a judge that cannot serve, so it is also the test that a
+    # catalog may carry one without the router ever trying to answer from it.
+    assert config.tier("judge").can_serve is False
+    assert all(config.tier(name).can_serve for name in ("cheap", "mid", "top"))
 
 
 def test_prices_reject_an_unknown_field() -> None:

@@ -18,12 +18,14 @@ from .base import (
     StreamEnd,
     StreamEvent,
 )
+from .jev import JevBackend
 from .ollama import OllamaBackend
 from .openai_compatible import OpenAICompatibleBackend
 
 BackendFactory = Callable[[TierConfig], Backend]
 
 _REGISTRY: dict[str, BackendFactory] = {
+    "jev": JevBackend,
     "ollama": OllamaBackend,
     "openai_compatible": OpenAICompatibleBackend,
 }
@@ -52,6 +54,7 @@ __all__ = [
     "BackendError",
     "BackendFactory",
     "BackendResponse",
+    "JevBackend",
     "OllamaBackend",
     "OpenAICompatibleBackend",
     "StreamChunk",
