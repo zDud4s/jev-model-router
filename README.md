@@ -165,6 +165,100 @@ Two things keep the rule honest:
 not quietly double your bill. Set them to `escalate` if you would rather pay than ship an
 unchecked answer.
 
+### A judge that is not a model
+
+The loop's cost is a second full generation per checked request, and that is what makes it
+expensive enough to be off by default. `backend: jev` is the other shape a judge can have:
+TypeSafe's Jev is not an LLM, it answers a typed yes/no question with one calibrated
+probability, and it charges $0.042 per 1M input tokens with the output free — roughly a
+hundredth of what the `mid` tier costs to read the same review.
+
+It is a backend and not a new code path, which is the point. A verdict is a boolean, the loop
+already knows how to pick a judge, gate it, bill it and log it, and all of that is keyed on a
+tier — so Jev is a tier whose adapter happens to answer in one number. `verification.py` was
+not changed to support it.
+
+Three things fall out of a judge that returns a probability rather than prose:
+
+- **There is no unparseable verdict.** The failure this project measured twice — a thinking
+  judge spending its whole budget reasoning, writing nothing, and `on_unparseable: accept`
+  passing an answer nobody judged — is unreachable here. A response with no probability in it
+  is raised as a backend error, where `on_verifier_error` decides, and never rendered as a pass.
+- **The evidence outlives the verdict.** The probability is written into the verdict line, so
+  a recorded run can be re-thresholded afterwards. Moving the line on a text judge means
+  paying for the whole run again.
+- **A judge is never a counterfactual.** A Jev tier is ineligible to serve every request, with
+  reason `cannot_generate`. Without that it would sit in the counterfactual table at $0.042
+  per 1M as the cheapest way to have answered everything in the log, which it was not — it was
+  not a way of answering anything. Naming one as `default_tier`, in `model_map`, or as
+  `escalate_to` is refused at startup, including the case where `escalate_to` would have
+  silently *defaulted* to a verifier that cannot answer.
+
+**Whether it is any good at the job is a separate question, and it is now measured.** Jev is a
+System One model: one pass, 70-500ms, no reasoning first. The table two sections down measures
+what happens to a judge that cannot think - 9 of 10 planted verdicts right, and the one it
+missed was *"strawberry has two r's"*. That was the prior. `scripts/judge_eval.py` reviews
+sixteen answers whose truth is known, through the real prompt builder, the real backend and
+the real parser:
+
+```
+python scripts/judge_eval.py -c config.yaml --tier judge     # jev
+python scripts/judge_eval.py -c config.yaml --tier cheap     # a text judge, for comparison
+```
+
+It prints accuracy beside the always-PASS baseline, recall on the wrong answers separately -
+a judge that has learned to say PASS scores well on the first and near zero on the second -
+the count of unparseable verdicts, the cost, the latency, and, for a judge that reports a
+probability, a threshold sweep over the run it just did.
+
+#### What sixteen cases said, 2026-09-21
+
+| | `cheap` (qwen3.5:4b, local) | `jev-latest` | `jev-preview` |
+|---|---|---|---|
+| accuracy | **0.938** | 0.875 | 0.812 |
+| recall on wrong answers | **0.889** | 0.778 | 0.667 |
+| precision on FAIL | 1.000 | 1.000 | 1.000 |
+| unparseable verdicts | 1 | **0** | **0** |
+| median latency | 143,000 ms | **282 ms** | 269 ms |
+| cost, 16 verdicts | $0 | $0.000311 | $0.000311 |
+
+Sixteen cases is a demonstration and not a tuning set, and the accuracy column is the least
+interesting one in it. Four things there are worth more than the ranking.
+
+**The local judge wins on accuracy and cannot be used.** 143 seconds a verdict is not a
+verification loop, it is a batch job. Jev answers in 282 ms, about 500x faster, at $0.0000194
+a verdict. The local tier's $0 is real, and its latency is what that $0 costs.
+
+**Jev misses exactly where a System One model was predicted to miss, and misses confidently.**
+Both failures are the same shape: an answer that needs a computation to check. Case 11 - right
+method, wrong last step - came back at p=0.93 and p=0.94 on two runs. No threshold rescues
+that. Catching it needs a line above 0.94, and the sweep prices the attempt: accuracy falls to
+0.688 at 0.95, because the *correct* answers also sit at 0.94-0.95. This project already wrote
+down that a judge which cannot think cannot count; this is the same sentence with a number
+against it.
+
+**The probabilities are stable, and that is a real difference from the classifier.** Two
+identical runs moved every probability by at most 0.04, median 0.01, and flipped zero verdicts.
+The project's own classifier gave *both* outcomes on 22% of questions across three samples of
+the same text. Jev is not sampling, and it shows. The caveat is that same number read the other
+way: a case within 0.04 of the threshold is a coin toss, and case 15 is that case - 0.46 and
+0.49 on `jev-latest`, 0.50 on `jev-preview`, which is where `preview` lost it.
+
+**`jev-preview` is worse, and its own catalog entry says it "should be better in most ways".**
+0.812 against 0.875, one verdict lost. A vendor's description of an unreleased version is not a
+measurement, and checking cost one command.
+
+So the trade is latency against recall, not quality against price: Jev is not better than the
+incumbent at judging and is three orders of magnitude faster at it. Whether 0.778 recall at
+282 ms beats 0.889 at 143 seconds depends on what a missed bad answer costs, which is a number
+this repo does not have and real traffic would supply.
+
+One wire note, because it cost an afternoon and a reader will hit it too: `model` is a
+**required** field in the request body, and TypeSafe's written guide says the opposite - that
+the endpoint names its own model. The live API answers `422 missing: body.model`, and the
+service publishes its own schema at `/openapi.json`, which settles it. The accepted names come
+from `GET /v1/models` and are `jev-latest` and `jev-preview`; plain `jev` is rejected.
+
 ## The classifier: route on a prediction instead of a guess
 
 Verification answers "was the cheap answer good?" — afterwards, having already bought two
@@ -704,6 +798,43 @@ So `max_verdict_tokens` now defaults to **1024**. For a judge that answers direc
 nothing — it stops at 6–26 tokens by itself — and for a thinking one it is the difference
 between a verdict and a silent pass. At this model's list price it is under a hundredth of a
 cent a review.
+
+### 1024 judges arithmetic, and does not always judge prose
+
+The first run of `scripts/judge_eval.py` found the same failure again, in a place the earlier
+measurements could not have looked. The local `qwen3.5:4b`, reasoning on, at the 1024 this
+section had just settled on:
+
+| | |
+|---|---|
+| accuracy | 0.938 (15/16) |
+| always-PASS baseline | 0.438 |
+| recall on the wrong answers | 0.889 (8 of 9 caught) |
+| precision on FAIL | 1.000 (8 of 8 flags real) |
+| unparseable | **1** |
+| cost | $0 |
+| latency | 143s median |
+
+The single miss was not a wrong verdict. Asked to review a confident and wrong one-sentence
+description of a mutex, the judge spent the entire 1024 reasoning and emitted **no content at
+all** — empty answer, `finish_reason: length` — and `on_unparseable: accept` would have shipped
+the wrong answer as a pass. It reproduced on a re-run, and the same case answered correctly, as
+`FAIL`, at 4096.
+
+What made that case different is the thing the earlier numbers could not vary: every planted
+answer behind the 490–1054 figure had arithmetic or a checkable fact in it, and that is what
+lets the reasoning stop. An open question gives it nothing to stop on. So `1024` was not
+measured too loosely — it was measured on a corpus that could not contain this, which is the
+same shape of mistake as fitting a classifier on GSM8K and calling the result general.
+
+The default stays 1024: one case on one model is not a curve, and the honest report of it is
+this paragraph rather than a changed number. Raise it if your judge thinks and your traffic is
+open-ended.
+
+It also sharpens what a judge like Jev is actually for. The failure here is not ignorance —
+the model knew the answer was wrong and said so with more room. It is **reasoning that does not
+terminate**, and a System One judge cannot have it: one pass, no chain, always a probability.
+That is not a risk Jev reduces. It is a risk that does not exist in it.
 
 ### Still not tested
 

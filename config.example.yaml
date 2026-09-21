@@ -92,6 +92,59 @@ tiers:
       cache_read: 1.50
       cache_write: 18.75
 
+  # A judge rather than a model. `backend: jev` is TypeSafe's Jev, which is not
+  # an LLM: it answers a typed yes/no question with one calibrated probability
+  # and cannot generate text at all. So a Jev tier can VERIFY and can never
+  # SERVE -- name it as `verifier_tier` below, never as `default_tier`, and a
+  # streamed request to it fails loudly rather than half-working.
+  #
+  # The appeal is arithmetic. A text judge buys a second full generation for
+  # every request it checks; this is $0.042 per 1M input tokens with the output
+  # free, which is roughly a hundredth of what the `mid` tier above charges to
+  # read the same review. Whether it is worth it is NOT arithmetic, and the
+  # measurement is `scripts/judge_eval.py` -- point it at this tier and at a
+  # text judge, and read the recall on wrong answers rather than the accuracy.
+  # Jev is a System One model, meaning it answers in one pass without reasoning
+  # first, and the one thing this project has measured twice is that a judge
+  # which cannot think cannot count. That prior is what the script is for.
+  #
+  # `model` IS sent, and is required. TypeSafe's written guide says the
+  # endpoint names its own model; the live API disagrees with 422 `missing:
+  # body.model`, and its published schema at /openapi.json marks the field
+  # required. Corrected 2026-09-21 against the service rather than the docs,
+  # which is also where the name `jev-latest` came from -- `jev` is rejected.
+  judge:
+    backend: jev
+    # Sent in the body and required there. `jev-latest` and `jev-preview` are
+    # what GET /v1/models lists; the response says which version answered, so
+    # the log keeps a specific one even though this names an alias.
+    model: jev-latest
+    # Default; a Cloudflare Workers AI gateway fronting the same model goes here.
+    base_url: https://api.typesafe.ai/v1
+    api_key_env: TYPESAFE_API_KEY
+    # TypeSafe's guide says 64k and Cloudflare's model page says 32k. The lower
+    # reading is the safe one until an invoice settles it.
+    context_window: 32000
+    supports_tools: false
+    prices:
+      input: 0.042
+      # Written down rather than omitted. An omitted price is "I did not say";
+      # this one really is zero, and the report may only claim what was stated.
+      output: 0.0
+    jev:
+      # Where the probability becomes a verdict. Not `extra_body`, because it is
+      # never sent to TypeSafe -- it is this router's decision about its own
+      # economics, and 0.5 is the neutral reading rather than a recommendation.
+      # A false FAIL buys an escalation nobody needed; a false PASS ships a
+      # wrong answer. Those cost different amounts, so the line between them is
+      # not naturally in the middle. `judge_eval.py` sweeps it for you.
+      threshold: 0.5
+      # Optional. Replaces the reviewer brief for this tier only; leaving it out
+      # means the brief the verification loop already builds is used, so
+      # `verification.system_prompt` keeps working for a Jev judge too.
+      # instructions: |
+      #   ...
+
 # The verification loop: a stronger tier reads the cheap tier's answer and says
 # whether it stands. A failed verdict re-runs the request at `escalate_to`, and
 # the client receives that second answer instead.
@@ -152,6 +205,21 @@ verification:
   # (Ollama: extra_body {think: false}; OpenRouter: {reasoning: {enabled:
   # false}}) is ~6 tokens a verdict and both judges then passed a wrong answer
   # they caught with reasoning on.
+  #
+  # 1024 is enough to judge arithmetic and not always enough to judge PROSE.
+  # Added 2026-09-20 from `scripts/judge_eval.py`: reviewing a wrong one-sentence
+  # description of a mutex, the local qwen3.5:4b spent the whole 1024 reasoning
+  # and emitted NO content at all -- empty answer, finish_reason `length`, and
+  # `on_unparseable: accept` would have shipped the wrong answer as a pass. It
+  # reproduced on a re-run, and the same case answered correctly at 4096. The
+  # earlier numbers above could not have caught this: every planted answer they
+  # were measured on had arithmetic or a fact in it, which is what lets the
+  # reasoning terminate. An open question has nothing to stop it.
+  #
+  # The default stays 1024 because that is one case on one model, not a curve.
+  # If your judge thinks AND your traffic is open-ended, raise it -- by the same
+  # argument that took this from 200 to 1024, it costs a direct judge nothing
+  # and buys a thinking one the difference between a verdict and a silent pass.
   max_verdict_tokens: 1024
 
   # Optional. Replaces the built-in reviewer instructions wholesale. Whatever
