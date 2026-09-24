@@ -643,7 +643,50 @@ curl http://127.0.0.1:8080/v1/chat/completions \
 ```
 
 Endpoints: `POST /v1/chat/completions` (streaming and non-streaming), `GET /v1/models`,
-`GET /healthz`.
+`GET /healthz`, `POST /v1/route` and `POST /v1/route/{id}/outcome` (below), and the live
+routing view at `GET /routing`.
+
+### Route only: for a caller that runs the model itself
+
+An agent runner cannot hand its work to a proxy: the work is many turns of tools in a
+worktree, and the runner spawns the CLI that does it. It asks which model and effort
+instead, runs it, and reports what its gate said. Nothing is run here, no quota is spent;
+with `router.kind: capabilities` a decision is one Jev call.
+
+```http
+POST /v1/route
+{
+  "task": "Fix the race in core/src/scheduler.rs: a job runs twice after a restart",
+  "stage": "implement",                      // optional, shown to Jev and logged
+  "files": ["core/src/scheduler.rs"],        // optional
+  "attempt": 2,                              // optional
+  "gate_output": "...",                      // optional: why the last attempt failed (tail kept)
+  "failed": ["claude-sonnet-5@low"],         // optional: tier names or model[@effort] that failed it
+  "runners": ["claude", "codex"],            // optional: only tiers these CLIs run
+  "packet": {"verifiable": true}             // optional: any other context, as-is
+}
+-> 200 {"decision_id": "rt_...", "runner": "claude", "model": "claude-opus-5-5",
+        "effort": "medium", "tier": "claude:claude-opus-5-5@medium", "success": 0.83,
+        "estimated_cost_usd": 0.018, "rule": "...", "router": "capabilities:...",
+        "unknown_failed": []}
+-> 400 a malformed body; 422 no eligible tier runs on the runners given
+```
+
+A retry names what failed, and the router never offers a tier it rates below it. The
+decision is written to `route_decisions`, a table of its own: nothing was called, and a row
+of zeros among `requests` would read as a free request in every cost report.
+
+```http
+POST /v1/route/{decision_id}/outcome
+{"status": "pass" | "fail" | "rate_limited" | "error",
+ "detail": "optional text", "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
+-> 200; 404 unknown decision; 409 an outcome was already reported (the first one is kept)
+```
+
+`pass`/`fail` is the label `llm-router calibrate --from-log` learns each model family's
+scale from; `error` means the run broke for a reason that says nothing about the model, and
+is not learnt from. `rate_limited` takes that subscription off the table until its window
+turns -- the router cannot see a 429 on a call it did not make.
 
 ## Read the log back
 

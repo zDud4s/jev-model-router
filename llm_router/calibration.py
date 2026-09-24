@@ -149,7 +149,8 @@ def write_scale(path: str | Path, scale: float) -> None:
 # `route_reason`), the tier it went to and a verdict -- one labelled trial of
 # P(success | needs, tier). A request the client resent with `failed_tiers` is a
 # second source: each tier it names failed THAT task, whose needs the resend's
-# own row holds. Enough trials per family and that family gets its own scale,
+# own row holds. A runner that routes through /v1/route reports its gate's
+# verdict as the decision's outcome: a third, and the one that matters most. Enough trials per family and that family gets its own scale,
 # the one under which the observed passes and failures are most likely.
 
 
@@ -192,6 +193,26 @@ def log_outcomes(log: Any, config: Config) -> list[Outcome]:
         needs = {str(k): float(v) for k, v in needs.items()}
         if row["verdict"] in ("pass", "fail") and row["tier"] in caps.cards:
             out.append(Outcome(row["tier"], needs, row["verdict"] == "pass", "verdict"))
+        for tier in reason.get("skipped_failed") or []:
+            if tier in caps.cards:
+                out.append(Outcome(tier, needs, False, "client"))
+    decisions = log.query(
+        """
+        SELECT tier, route_reason, outcome FROM route_decisions
+        WHERE route_model LIKE 'capabilities:%' AND route_reason IS NOT NULL
+        """
+    )
+    for row in decisions:
+        try:
+            reason = json.loads(row["route_reason"])
+        except (TypeError, ValueError):
+            continue
+        needs = reason.get("need") if isinstance(reason, dict) else None
+        if not isinstance(needs, dict) or not needs:
+            continue
+        needs = {str(k): float(v) for k, v in needs.items()}
+        if row["outcome"] in ("pass", "fail") and row["tier"] in caps.cards:
+            out.append(Outcome(row["tier"], needs, row["outcome"] == "pass", "outcome"))
         for tier in reason.get("skipped_failed") or []:
             if tier in caps.cards:
                 out.append(Outcome(tier, needs, False, "client"))

@@ -13,6 +13,7 @@ log failure change what the client receives.
 
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import sys
@@ -40,6 +41,7 @@ from .eligibility import evaluate
 from .pricing import cost_usd, counterfactuals
 from .routing import Router, build_router
 from .schemas import ChatCompletionRequest, ModelList, Usage, error_body, model_card
+from .route_api import OUTCOMES, parse_route_ask, runner_of
 from .trace import PREVIEW_CHARS, TraceStore, prompt_preview
 from .verification import (
     SkipReason,
@@ -210,6 +212,95 @@ def create_app(
             traces.stage(trace, "route", **_route_view(decision, config, began))
             traces.finish(trace, "ok")
             return {"trace": trace["id"], "tier": decision.tier, "score": decision.score}
+
+    @app.post("/v1/route")
+    async def route_only(raw_request: Request) -> Any:
+        """Which model and effort should run this task. Nothing is run; see route_api.py."""
+        try:
+            ask = parse_route_ask(await raw_request.json(), config)
+        except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+            return JSONResponse(status_code=400, content=error_body(f"invalid route request: {exc}"))
+        request = ask.request
+        decision_id = f"rt_{uuid.uuid4().hex[:16]}"
+        trace = (
+            traces.start(decision_id, kind="route", preview=prompt_preview(request.messages),
+                         requested_model=ask.stage or "route")
+            if traces is not None else None
+        )
+        eligibility = evaluate(config, request, catalog["unavailable"])
+        eligible = [t for t in eligibility.eligible if ask.can_run(config.tiers[t])]
+        if trace is not None:
+            traces.stage(trace, "eligibility", eligible=eligible,
+                         rejected=[r.as_dict() for r in eligibility.rejections])
+        if not eligible:
+            if trace is not None:
+                traces.finish(trace, "error")
+            runners = sorted(ask.runners) or "any runner"
+            return JSONResponse(status_code=422, content=error_body(
+                f"no eligible tier runs on {runners}"))
+        began = time.perf_counter()
+        decision = active_router.decide(request, eligible)
+        if inspect.isawaitable(decision):
+            decision = await decision
+        tier = config.tiers[decision.tier]
+        detail = decision.detail or {}
+        picked = next((o for o in detail.get("options", []) if o.get("tier") == decision.tier), {})
+        if trace is not None:
+            traces.stage(trace, "route", **_route_view(decision, config, began))
+            traces.finish(trace, "ok")
+        await asyncio.to_thread(
+            request_log.record_decision, decision_id,
+            task=_prompt_text(request), tier=decision.tier, model=tier.model, effort=tier.effort,
+            runner=runner_of(tier), stage=ask.stage, route_score=decision.score,
+            route_model=decision.model, route_reason=decision.reason,
+        )
+        return {
+            "decision_id": decision_id,
+            "tier": decision.tier,
+            "runner": runner_of(tier),
+            "model": tier.model,
+            "effort": tier.effort,
+            "success": decision.score,
+            "estimated_cost_usd": picked.get("cost"),
+            "rule": detail.get("rule") or decision.reason,
+            "router": decision.model,
+            "unknown_failed": list(ask.unknown_failed),
+        }
+
+    @app.post("/v1/route/{decision_id}/outcome")
+    async def route_outcome(decision_id: str, raw_request: Request) -> Any:
+        """What the caller's gate made of a routed task: the label calibration learns from."""
+        try:
+            payload = await raw_request.json()
+        except json.JSONDecodeError as exc:
+            return JSONResponse(status_code=400, content=error_body(f"invalid outcome: {exc}"))
+        status = payload.get("status") if isinstance(payload, dict) else None
+        if status not in OUTCOMES:
+            return JSONResponse(status_code=400, content=error_body(f"'status' must be one of {list(OUTCOMES)}"))
+        raw_usage = payload.get("usage")
+        try:
+            usage = Usage.model_validate(raw_usage) if isinstance(raw_usage, dict) else None
+        except ValidationError as exc:
+            return JSONResponse(status_code=400, content=error_body(f"invalid usage: {exc}"))
+        detail = payload.get("detail")
+        result = await asyncio.to_thread(
+            request_log.set_outcome, decision_id, status, str(detail)[:2000] if detail else None, usage
+        )
+        if result == "missing":
+            return JSONResponse(status_code=404, content=error_body(f"no decision {decision_id!r}"))
+        if result == "exists":
+            return JSONResponse(status_code=409, content=error_body(f"decision {decision_id!r} already has an outcome"))
+        row = request_log.decision(decision_id)
+        observe = getattr(active_router, "observe", None)
+        if observe is not None and row is not None:
+            try:
+                if status == "rate_limited":
+                    observe(row["tier"], Usage(), 429)
+                elif usage is not None:
+                    observe(row["tier"], usage, 200)
+            except Exception:  # noqa: BLE001 - accounting must not fail the report
+                pass
+        return {"decision_id": decision_id, "status": status, "tier": row["tier"] if row else None}
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:

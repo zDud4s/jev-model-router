@@ -283,12 +283,13 @@ def _calibrate_from_log(config, args) -> int:
     finally:
         log.close()
     if not outcomes:
-        print(f"no judged capabilities outcomes in {config.log.path}: turn verification on, "
-              "or have the client resend failures with failed_tiers")
+        print(f"no judged capabilities outcomes in {config.log.path}: report outcomes to "
+              "/v1/route/<id>/outcome, turn verification on, or resend failures with failed_tiers")
         return 1
     fits = fit_family_scales(router, outcomes, min_samples=args.min_samples)
-    verdicts = sum(o.source == "verdict" for o in outcomes)
-    print(f"{len(outcomes)} outcome(s): {verdicts} verdict(s), {len(outcomes) - verdicts} client-reported failure(s)")
+    count = {s: sum(o.source == s for o in outcomes) for s in ("outcome", "verdict", "client")}
+    print(f"{len(outcomes)} outcome(s): {count['outcome']} reported by a runner, {count['verdict']} verifier "
+          f"verdict(s), {count['client']} failure(s) named on a retry")
     print(f"{'family':24} {'n':>5} {'passed':>7} {'predicted':>9}  scale")
     for fit in fits:
         scale = f"{fit.scale:.3f}" if fit.scale is not None else f"(needs {args.min_samples})"

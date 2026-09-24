@@ -31,7 +31,7 @@ from .pricing import Counterfactual
 from .schemas import Usage
 from .verification import VerificationOutcome
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 # Each entry is one forward migration, applied in order. Never edit a migration
 # that has shipped; append a new one. The list index + 1 is its version.
@@ -145,6 +145,36 @@ _MIGRATIONS: list[str] = [
     ALTER TABLE requests ADD COLUMN upstream_id     TEXT;
     ALTER TABLE requests ADD COLUMN billed_cost_usd REAL;
     ALTER TABLE requests ADD COLUMN billed_source   TEXT;
+    """,
+    # --- v5: decisions for a caller that runs the model itself ---------------
+    #
+    # Their own table, not rows in `requests`: nothing was called and nothing
+    # was billed here, and a row of zeros among real calls would read as a free
+    # request in every cost report. The outcome arrives later, from the caller's
+    # gate, and is the label calibration learns from.
+    """
+    CREATE TABLE IF NOT EXISTS route_decisions (
+        id                    INTEGER PRIMARY KEY AUTOINCREMENT,
+        decision_id           TEXT    NOT NULL UNIQUE,
+        ts                    TEXT    NOT NULL,
+        stage                 TEXT,
+        tier                  TEXT    NOT NULL,
+        model                 TEXT,
+        effort                TEXT,
+        runner                TEXT,
+        route_score           REAL,
+        route_model           TEXT,
+        route_reason          TEXT,
+        task_sha256           TEXT    NOT NULL,
+        task_text             TEXT,
+        outcome               TEXT,
+        outcome_ts            TEXT,
+        outcome_detail        TEXT,
+        outcome_input_tokens  INTEGER,
+        outcome_output_tokens INTEGER
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_route_decisions_ts ON route_decisions(ts);
     """,
 ]
 
@@ -427,6 +457,67 @@ class RequestLog:
                     [(cost, row_id, tier) for tier, cost in costs.items()],
                 )
             self._conn.commit()
+
+    def record_decision(
+        self,
+        decision_id: str,
+        *,
+        task: str,
+        tier: str,
+        model: str | None,
+        effort: str | None,
+        runner: str | None,
+        stage: str | None,
+        route_score: float | None,
+        route_model: str | None,
+        route_reason: str | None,
+    ) -> bool:
+        """Write one route-only decision. Never raises: the caller is waiting on the answer."""
+        try:
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO route_decisions (decision_id, ts, stage, tier, model, effort, runner, "
+                    "route_score, route_model, route_reason, task_sha256, task_text) "
+                    "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        decision_id, datetime.now(timezone.utc).isoformat(), stage, tier, model, effort, runner,
+                        route_score, route_model, route_reason, sha256_hex(task),
+                        task if self.store_prompts else None,
+                    ),
+                )
+                self._conn.commit()
+            return True
+        except Exception as exc:  # noqa: BLE001 - losing the row must not lose the answer
+            self.failed_writes += 1
+            self._record_failure(decision_id, exc)
+            return False
+
+    def decision(self, decision_id: str) -> sqlite3.Row | None:
+        with self._lock:
+            return self._conn.execute(
+                "SELECT * FROM route_decisions WHERE decision_id = ?", (decision_id,)
+            ).fetchone()
+
+    def set_outcome(self, decision_id: str, status: str, detail: str | None, usage: Usage | None) -> str:
+        """`ok`, `missing`, or `exists` -- the first outcome reported is the one kept."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE route_decisions SET outcome = ?, outcome_ts = ?, outcome_detail = ?, "
+                "outcome_input_tokens = ?, outcome_output_tokens = ? "
+                "WHERE decision_id = ? AND outcome IS NULL",
+                (
+                    status, datetime.now(timezone.utc).isoformat(), detail,
+                    usage.prompt_tokens if usage else None, usage.completion_tokens if usage else None,
+                    decision_id,
+                ),
+            )
+            self._conn.commit()
+            if cursor.rowcount:
+                return "ok"
+            found = self._conn.execute(
+                "SELECT 1 FROM route_decisions WHERE decision_id = ?", (decision_id,)
+            ).fetchone()
+            return "exists" if found else "missing"
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         with self._lock:
