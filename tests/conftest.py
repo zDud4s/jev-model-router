@@ -24,6 +24,9 @@ from llm_router.schemas import ChatCompletionRequest, Usage, build_chunk, build_
 
 BASE_CONFIG: dict[str, Any] = {
     "log": {"path": ":memory:"},
+    # The startup check reads this machine's CLI caches; tests that want it
+    # pass `catalog_check` to create_app.
+    "catalog": {"check_on_start": False},
     "router": {"kind": "static", "default_tier": "cheap"},
     "tiers": {
         # Local, free, small window, no tools: the tier the eligibility gate

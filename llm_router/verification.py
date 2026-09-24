@@ -233,6 +233,19 @@ def build_review_request(
     )
 
 
+def _carry_prefilter(outcome: VerificationOutcome, prefiltered: VerificationOutcome | None) -> None:
+    """Put a prefilter that did not pass onto the verifier's row: its cost, and what it said."""
+    if prefiltered is None:
+        return
+    outcome.verifier_usage = prefiltered.verifier_usage + outcome.verifier_usage
+    outcome.verifier_cost_usd += prefiltered.verifier_cost_usd
+    said = "did not pass" if prefiltered.verdict is Verdict.FAIL else "gave no verdict"
+    outcome.reason = (
+        f"prefilter {prefiltered.verifier_tier} {said} ({prefiltered.reason}); "
+        f"{outcome.verifier_tier}: {outcome.reason}"
+    )
+
+
 class Verifier:
     """Runs the loop. Holds no state between requests beyond its collaborators."""
 
@@ -242,8 +255,11 @@ class Verifier:
         backends: Mapping[str, Backend],
         *,
         rng: Callable[[], float] | None = None,
+        router: Any = None,
     ) -> None:
         self._config = config
+        # Asked for the escalation tier when `escalate_to` is `auto`.
+        self._router = router
         self._settings = config.verification
         self._backends = backends
         # Injected so a test can decide sampling instead of hoping.
@@ -304,11 +320,17 @@ class Verifier:
             return self.skip(SkipReason.VERIFIER_INELIGIBLE, rejection.detail)
 
         started = time.perf_counter()
+        prefiltered = await self._prefilter(review)
+        if prefiltered is not None and prefiltered.verdict is Verdict.PASS:
+            prefiltered.latency_ms = _elapsed_ms(started)
+            return prefiltered
+
         outcome = VerificationOutcome(verdict=Verdict.ERROR, verifier_tier=verifier_name)
         try:
             result = await self._backends[verifier_name].complete(review)
         except Exception as exc:  # noqa: BLE001 - a broken verifier must not break the request
             outcome.reason = f"verifier failed: {type(exc).__name__}: {exc}"
+            _carry_prefilter(outcome, prefiltered)
             if settings.on_verifier_error == "escalate":
                 await self._escalate(request, served_tier, eligible, outcome)
             outcome.latency_ms = _elapsed_ms(started)
@@ -347,10 +369,42 @@ class Verifier:
             outcome.reason = reason
 
         outcome.verdict = Verdict.PASS if passed else Verdict.FAIL
+        _carry_prefilter(outcome, prefiltered)
         if not passed:
             await self._escalate(request, served_tier, eligible, outcome)
 
         outcome.latency_ms = _elapsed_ms(started)
+        return outcome
+
+    async def _prefilter(self, review: ChatCompletionRequest) -> VerificationOutcome | None:
+        """Ask the prefilter; a PASS is final, anything else is only a referral.
+
+        Returns None when there is no prefilter or it cannot take this review.
+        Otherwise the outcome carries what it said and what it cost, whatever
+        it said -- a doubt that the verifier then overrules is still evidence
+        of how often the prefilter doubts, and still on the bill.
+        """
+        name = self._settings.prefilter_tier
+        if not name:
+            return None
+        tier = self._config.tier(name)
+        if check_tier(tier, review, estimated_tokens=estimate_request_budget(review), serving=False):
+            return None
+        outcome = VerificationOutcome(verdict=Verdict.ERROR, verifier_tier=name)
+        try:
+            result = await self._backends[name].complete(review)
+        except Exception as exc:  # noqa: BLE001 - a broken prefilter only costs the saving
+            outcome.reason = f"failed: {type(exc).__name__}: {exc}"
+            return outcome
+        outcome.verifier_usage = result.usage
+        outcome.verifier_cost_usd = cost_usd(tier.prices, result.usage)
+        passed, reason = parse_verdict(answer_text(result.body))
+        outcome.reason = reason
+        if passed:
+            outcome.verdict = Verdict.PASS
+            outcome.reason = f"prefilter {name} passed: {reason}"
+        elif passed is False:
+            outcome.verdict = Verdict.FAIL
         return outcome
 
     def _unfinished(
@@ -462,6 +516,16 @@ class Verifier:
     ) -> None:
         """Re-answer the ORIGINAL request at the stronger tier. Mutates `outcome`."""
         target = self._settings.escalate_to
+        if target == "auto":
+            choose = getattr(self._router, "escalation", None)
+            try:
+                target = await choose(request, served_tier, eligible) if choose is not None else None
+            except Exception as exc:  # noqa: BLE001 - a broken choice keeps the answer, and says so
+                outcome.reason = _note(outcome.reason, f"escalation choice failed: {type(exc).__name__}: {exc}")
+                return
+            if not target:
+                outcome.reason = _note(outcome.reason, "no other tier is rated as strong as the one that failed")
+                return
         if not target or target == served_tier:
             outcome.reason = _note(
                 outcome.reason, "no escalation target distinct from the served tier"
@@ -524,11 +588,11 @@ def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
 
 
-def build_verifier(config: Config, backends: Mapping[str, Backend]) -> Verifier | None:
+def build_verifier(config: Config, backends: Mapping[str, Backend], router: Any = None) -> Verifier | None:
     """None when verification is off, so the caller has nothing to branch on."""
     if not config.verification.enabled:
         return None
-    return Verifier(config, backends)
+    return Verifier(config, backends, router=router)
 
 
 __all__ = [

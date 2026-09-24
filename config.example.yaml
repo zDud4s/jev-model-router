@@ -14,7 +14,7 @@ log:
   store_prompts: false
 
 router:
-  kind: static          # static | classifier
+  kind: static          # static | classifier | capabilities
   default_tier: cheap
   # Optional: let a client that hardcodes a vendor model string pick a tier.
   model_map:
@@ -48,6 +48,76 @@ router:
   # with sample_rate 0.25 labels 2.5% of would-be escalations, not 10%.
   #
   # explore_rate: 0.05
+
+  # --- kind: capabilities ---------------------------------------------------
+  # Jev reads a short packet built from the request (plus any `packet` object
+  # the client sends: kind, size, risk, files, `failed_tiers`) and answers one
+  # yes/no probability per requirement. Each destination tier has a card with a
+  # level 0..3 per requirement; the cheapest tier whose estimated success
+  # reaches `target` serves the request. A tier is a model AND an effort
+  # (`effort:` on claude_cli / codex_cli tiers), so the router picks both.
+  # Cost is the tier's `prices` when it bills per token, else the card's
+  # `list_prices` -- the same price per token for a subscription as for the
+  # API: quota is a share of those tokens. A 429 takes a subscription out
+  # until its window turns.
+  #
+  # With `discover`, the tiers are not listed at all: every model the Claude
+  # Code and Codex subscriptions (and a local Ollama) serve, at every effort it
+  # takes, becomes a tier `<source>:<model>@<effort>` at startup, its card built
+  # from the first `profiles` glob that matches -- or `fallback_profile`, as the
+  # last resort, and reported. Nothing is excluded by hand: a model that costs
+  # more than a newer one and does no better simply never wins.
+  # A complete configuration over both subscriptions: config.capabilities.yaml.
+  #
+  # capabilities:
+  #   jev_tier: judge
+  #   target: 0.8
+  #   floor: 0.2            # Jev's "no" band: p at or below it is "not needed"
+  #   max_effort: high      # efforts above it are not generated as tiers
+  #   # `target` (default): the cheapest tier with success >= target.
+  #   # `expected_cost`: the least price + (1 - success) x the cost of failing,
+  #   # so the bar moves per task. Failing costs a redo on the tier `target` picks,
+  #   # times `detected` when something catches it (the packet says
+  #   # `verifiable: true`, or the router's verifier checks that tier) or
+  #   # `undetected` when not, times the stakes (packet `stakes: low|normal|high`,
+  #   # else Jev's reading of a `precision` requirement).
+  #   rule: expected_cost
+  #   failure: {detected: 1.5, undetected: 4.0, stakes: {low: 0.5, normal: 1.0, high: 3.0}}
+  #   # `llm-router calibrate --anchors FILE` sets miss_scale from tasks with a
+  #   # tier known to be (or not be) enough; `calibrate --from-log` fits one
+  #   # scale per model family from judged outcomes (verifier verdicts, and
+  #   # tiers a client resent as `failed_tiers`).
+  #   miss_scale: 1.0
+  #   family_scales: {}
+  #   subscriptions:
+  #     claude: {window_hours: 5}   # after a 429, off the table for this long
+  #   requirements:
+  #     reasoning: The state is a task packet. Does it need deep, multi-step reasoning?
+  #     multi_file: The state is a task packet. Does it need changes across several files?
+  #   cards:
+  #     cheap: {levels: {reasoning: 1, multi_file: 0}, list_prices: {input: 0.1, output: 0.4}}
+  #     top:   {levels: {reasoning: 3, multi_file: 3}, output_tokens: 3000}
+
+# Cheap first, then up: with `escalate_to: auto` a failed verdict is re-answered
+# on the tier the capabilities router picks among those rated at least as
+# strong as the one that failed. Every checked answer costs a review call.
+#
+# verification:
+#   enabled: true
+#   prefilter_tier: judge
+#   verifier_tier: "claude:claude-sonnet-5@low"
+#   escalate_to: auto
+
+# At startup every tier is checked against the models its provider serves now
+# (Claude Code's model catalog and CLI version, `codex debug models`, Ollama's
+# tags) -- none of it spends quota. A tier whose model or effort is no longer
+# served leaves eligibility with the reason logged; models no tier uses are
+# listed. The report is kept in `path`, rewritten only when it changes, and
+# served on /healthz. `llm-router check --catalog` runs the same check by hand.
+#
+# catalog:
+#   check_on_start: true
+#   path: llm-router.catalog.json
 
 tiers:
   # A local model. No prices, so it costs zero -- that is the correct answer,
@@ -144,6 +214,28 @@ tiers:
       # `verification.system_prompt` keeps working for a Jev judge too.
       # instructions: |
       #   ...
+      #
+      # Optional, and measured: several narrow questions in ONE call, averaged
+      # in logit space, with `threshold` applied to the result. `questions` ask
+      # "is it right in this respect"; `error_questions` ask "is there a
+      # defect" and are read as 1 - p. On 434 reviewed answers (2026-09-23,
+      # Opus 5 as the reference) eight of them beat the single question by
+      # +0.023 AUC, 95% CI [0.008, 0.038], for ~30% more input tokens -- the
+      # state is read once. Two candidates that sounded obvious did not earn a
+      # place: "would the code compile" (0.59) and "was the task delivered"
+      # (0.64). Replaces `instructions` and `question_key`; setting either
+      # beside these is refused.
+      # questions:
+      #   faithful: >-
+      #     Does every statement the answer makes about the code, diff or text
+      #     the user supplied agree with what that material actually says?
+      #   coherent: >-
+      #     Is everything the answer says consistent with the user's material
+      #     and with the answer's own other statements?
+      # error_questions:
+      #   has_error: >-
+      #     Does this answer contain at least one error: a wrong claim, a
+      #     misreading, code that would not work, a wrong calculation?
 
 # The verification loop: a stronger tier reads the cheap tier's answer and says
 # whether it stands. A failed verdict re-runs the request at `escalate_to`, and
@@ -158,6 +250,16 @@ tiers:
 verification:
   enabled: false
   verifier_tier: top        # who judges
+  # Optional: a cheaper judge asked FIRST, whose PASS is final and whose
+  # anything-else hands the review to `verifier_tier`. It never fails an answer
+  # by itself -- wrong, unsure or down, it only costs the saving. Built for a
+  # Jev tier: as the ONLY judge it reached AUC ~0.78 against Opus 5, too weak
+  # to escalate on, but in front of one at `jev.threshold: 0.865` it passed
+  # 15-17% of natural traffic without the Opus review and let 1-2% of bad
+  # answers through (and 0 of 18 natural failures). Its reply stays in the
+  # verdict's reason either way, so the log can count both its leaks and its
+  # savings.
+  # prefilter_tier: judge
   verify_tiers: [cheap]     # which served tiers get judged; empty = all but the verifier
   escalate_to: top          # who re-answers a failed verdict; defaults to verifier_tier
 

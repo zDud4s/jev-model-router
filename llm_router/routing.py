@@ -24,8 +24,8 @@ failure mode the rest of this project exists to avoid. So `choose` became
 from __future__ import annotations
 
 import random
-from dataclasses import dataclass
-from typing import Callable, Protocol, runtime_checkable
+from dataclasses import dataclass, field
+from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
 
 from .classifier import DifficultyModel, ModelError
 from .config import Config, ConfigError
@@ -45,6 +45,10 @@ class RouteDecision:
     # scores spanning a retraining is two models' numbers in one histogram.
     model: str | None = None
     reason: str = ""
+    # Everything the decision was made from, for the live routing view: the
+    # packet, every answer, every option weighed. Too large for the log row,
+    # which keeps `reason`; held in memory only, by `trace.py`.
+    detail: dict[str, Any] | None = field(default=None, compare=False)
 
 
 @runtime_checkable
@@ -53,8 +57,13 @@ class Router(Protocol):
 
     def decide(
         self, request: ChatCompletionRequest, candidates: list[str]
-    ) -> RouteDecision:
-        """Return a decision naming one of `candidates`. Never called with an empty list."""
+    ) -> RouteDecision | Awaitable[RouteDecision]:
+        """Return a decision naming one of `candidates`. Never called with an empty list.
+
+        May be a coroutine: a router that asks a service before it decides (the
+        capabilities router asks Jev) cannot answer synchronously, and the app
+        awaits whatever it gets back.
+        """
         ...
 
 
@@ -240,6 +249,11 @@ def build_router(config: Config) -> Router:
             # it is quiet. `kind: static` is how you ask for that behaviour.
             raise ConfigError(f"router.kind 'classifier': {exc}") from None
         return ClassifierRouter(config, model)
+    if kind == "capabilities":
+        # Imported here: the capabilities module builds on this one.
+        from .capabilities import CapabilityRouter
+
+        return CapabilityRouter(config)
     # Failing loudly on an unknown kind is better than silently serving every
     # request from the default tier.
     raise ValueError(f"unknown router kind: {kind!r}")

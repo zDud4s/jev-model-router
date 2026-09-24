@@ -13,7 +13,9 @@ log failure change what the client receives.
 
 from __future__ import annotations
 
+import inspect
 import json
+import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -21,7 +23,7 @@ from typing import Any, AsyncIterator, Callable
 
 import anyio
 from fastapi import FastAPI, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import ValidationError
 
 from .backends import (
@@ -38,6 +40,7 @@ from .eligibility import evaluate
 from .pricing import cost_usd, counterfactuals
 from .routing import Router, build_router
 from .schemas import ChatCompletionRequest, ModelList, Usage, error_body, model_card
+from .trace import PREVIEW_CHARS, TraceStore, prompt_preview
 from .verification import (
     SkipReason,
     Verdict,
@@ -75,21 +78,47 @@ def create_app(
     log: RequestLog | None = None,
     router: Router | None = None,
     verifier: Verifier | None = None,
+    catalog_check: Callable[[Config], Any] | None = None,
 ) -> FastAPI:
     """Build the app. Every collaborator is injectable, which is how tests avoid the network."""
+
+    # The catalog check runs first: discovered tiers must exist before the
+    # backends, router and verifier that serve them are built.
+    catalog: dict[str, Any] = {"report": None, "unavailable": {}, "discovered": 0, "unprofiled": []}
+    if config.catalog.check_on_start:
+        from .catalog import startup_check
+        from .discovery import expand
+
+        try:
+            report = (catalog_check or startup_check)(config)
+            catalog["report"] = report
+            catalog["unavailable"] = dict(report.unavailable)
+            if getattr(report, "discovered", None):
+                config, found, unprofiled = expand(config, report)
+                catalog["discovered"] = len(found)
+                catalog["unprofiled"] = unprofiled
+                print(f"catalog: {len(found)} tier(s) discovered", file=sys.stderr)
+                if unprofiled:
+                    print(f"  on the fallback profile (write a profile): {', '.join(unprofiled)}", file=sys.stderr)
+        except Exception as exc:  # noqa: BLE001 - a broken check must not stop the proxy
+            print(f"catalog check failed, serving the configured tiers: {type(exc).__name__}: {exc}", file=sys.stderr)
 
     request_log = log or RequestLog(config.log.path, store_prompts=config.log.store_prompts)
     backends: dict[str, Backend] = build_backends(config, backend_factory)
     active_router: Router = router or build_router(config)
     # None when verification is off, so the request path has one branch rather
     # than a cascade of `if config.verification.enabled` checks.
-    active_verifier: Verifier | None = verifier or build_verifier(config, backends)
+    active_verifier: Verifier | None = verifier or build_verifier(config, backends, active_router)
+    traces: TraceStore | None = TraceStore(config.trace.keep) if config.trace.enabled else None
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
         yield
         for backend in backends.values():
             await backend.aclose()
+        closer = getattr(active_router, "aclose", None)
+        if closer is not None:
+            await closer()
         request_log.close()
 
     app = FastAPI(title="llm-router", version="0.1.0", lifespan=lifespan)
@@ -125,7 +154,62 @@ def create_app(
                 "base_rate": model.base_rate,
                 "metrics": model.metrics,
             }
+        if catalog["report"] is not None:
+            body["catalog"] = {
+                "checked_at": catalog["report"].checked_at,
+                "unavailable": catalog["unavailable"],
+                "unconfigured": catalog["report"].unconfigured,
+                "discovered_tiers": catalog["discovered"],
+                "unprofiled": catalog["unprofiled"],
+            }
+        state = getattr(active_router, "state", None)
+        if callable(state):
+            # The capabilities router's rules fingerprint and each
+            # subscription's window, so a router that has started refusing a
+            # subscription says so here rather than in a pattern of tiers.
+            body["routing"] = state()
         return body
+
+    if traces is not None:
+
+        @app.get("/routing", response_class=HTMLResponse)
+        async def routing_page() -> str:
+            from .routing_page import PAGE
+
+            return PAGE
+
+        @app.get("/routing/traces")
+        async def routing_traces(after: int = 0) -> dict[str, Any]:
+            return {"seq": traces.seq, "traces": traces.since(after)}
+
+        @app.post("/routing/dry-run")
+        async def routing_dry_run(raw_request: Request) -> Any:
+            """Route a request without answering it: eligibility and the router only.
+
+            With the capabilities router that is one Jev call and nothing else --
+            no destination model runs, no quota is spent.
+            """
+            try:
+                payload = await raw_request.json()
+                request = ChatCompletionRequest.model_validate({"model": "auto", **payload})
+            except (ValidationError, json.JSONDecodeError, ValueError) as exc:
+                return JSONResponse(status_code=400, content=error_body(f"invalid request: {exc}"))
+            request_id = f"dry_{uuid.uuid4().hex[:12]}"
+            trace = traces.start(request_id, kind="dry-run", preview=prompt_preview(request.messages),
+                                 requested_model=request.model)
+            eligibility = evaluate(config, request, catalog["unavailable"])
+            traces.stage(trace, "eligibility", eligible=list(eligibility.eligible),
+                         rejected=[r.as_dict() for r in eligibility.rejections])
+            if not eligibility.eligible:
+                traces.finish(trace, "error")
+                return {"trace": trace["id"], "tier": None}
+            began = time.perf_counter()
+            decision = active_router.decide(request, list(eligibility.eligible))
+            if inspect.isawaitable(decision):
+                decision = await decision
+            traces.stage(trace, "route", **_route_view(decision, config, began))
+            traces.finish(trace, "ok")
+            return {"trace": trace["id"], "tier": decision.tier, "score": decision.score}
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
@@ -155,9 +239,19 @@ def create_app(
             return JSONResponse(status_code=400, content=error_body(f"invalid request: {exc}"))
 
         prompt = _prompt_text(request)
+        trace = (
+            traces.start(request_id, kind="request", preview=prompt_preview(request.messages),
+                         requested_model=request.model)
+            if traces is not None
+            else None
+        )
+
+        def stage(name: str, **data: Any) -> None:
+            if trace is not None:
+                traces.stage(trace, name, **data)
 
         # --- eligibility gate, before any routing decision --------------------
-        eligibility = evaluate(config, request)
+        eligibility = evaluate(config, request, catalog["unavailable"])
         base_entry = LogEntry(
             request_id=request_id,
             prompt_text=prompt,
@@ -167,7 +261,11 @@ def create_app(
             rejections=eligibility.rejections,
         )
 
+        stage("eligibility", eligible=list(eligibility.eligible),
+              rejected=[r.as_dict() for r in eligibility.rejections])
         if not eligibility.eligible:
+            if trace is not None:
+                traces.finish(trace, "error")
             reasons = "; ".join(f"{r.tier}: {r.detail}" for r in eligibility.rejections)
             base_entry.http_status = 400
             base_entry.error = f"no eligible tier ({reasons})"
@@ -182,7 +280,11 @@ def create_app(
             )
 
         # --- route ------------------------------------------------------------
+        route_began = time.perf_counter()
         decision = active_router.decide(request, list(eligibility.eligible))
+        if inspect.isawaitable(decision):
+            decision = await decision
+        stage("route", **_route_view(decision, config, route_began))
         tier_name = decision.tier
         tier = config.tier(tier_name)
         backend = backends[tier_name]
@@ -225,7 +327,30 @@ def create_app(
             base_entry.latency_ms = _elapsed_ms(started)
             base_entry.http_status = status
             base_entry.error = error
+            observe = getattr(active_router, "observe", None)
+            if observe is not None:
+                # What each call really spent, charged to the tier that made
+                # it: an escalation spends the quota of the tier it went to.
+                try:
+                    observe(tier_name, usage, status)
+                    if verification is not None and verification.escalated and verification.escalated_to:
+                        observe(verification.escalated_to, verification.escalation_usage, 200)
+                except Exception:  # noqa: BLE001 - accounting must not fail a request
+                    pass
             await request_log.record_async(base_entry)
+            if trace is not None:
+                state = getattr(active_router, "state", None)
+                stage(
+                    "done",
+                    status=status,
+                    error=error,
+                    final_tier=base_entry.final_tier,
+                    usage=usage.model_dump(),
+                    cost_usd=base_entry.cost_usd,
+                    verdict=verification.verdict.value if verification is not None else None,
+                    subscriptions=(state() or {}).get("subscriptions") if callable(state) else None,
+                )
+                traces.finish(trace, "ok" if status < 400 else "error")
 
         # --- call -------------------------------------------------------------
         # A stream cannot be verified: by the time an answer could be judged the
@@ -242,6 +367,8 @@ def create_app(
             if decision.model:
                 headers["X-Router-Model"] = decision.model
 
+        stage("call", tier=tier_name, backend=tier.backend, model=tier.model, effort=tier.effort,
+              stream=request.stream)
         if request.stream:
             events = backend.stream(request)
             try:
@@ -341,6 +468,10 @@ def create_app(
 
         # --- verify -----------------------------------------------------------
         body = result.body
+        try:
+            stage("answer", text=str(body["choices"][0]["message"]["content"])[:PREVIEW_CHARS])
+        except (KeyError, IndexError, TypeError):
+            pass
         base_entry.upstream_id = _upstream_id(body)
         verification: VerificationOutcome | None = None
         if active_verifier is not None:
@@ -362,6 +493,19 @@ def create_app(
         return JSONResponse(status_code=200, content=body, headers=headers)
 
     return app
+
+
+def _route_view(decision: Any, config: Config, began: float) -> dict[str, Any]:
+    tier = config.tiers.get(decision.tier)
+    return {
+        "tier": decision.tier,
+        "model": tier.model if tier else None,
+        "effort": tier.effort if tier else None,
+        "score": decision.score,
+        "reason": decision.reason,
+        "detail": decision.detail,
+        "router_ms": int((time.perf_counter() - began) * 1000),
+    }
 
 
 def _skip(

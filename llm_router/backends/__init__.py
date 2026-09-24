@@ -18,6 +18,8 @@ from .base import (
     StreamEnd,
     StreamEvent,
 )
+from .claude_cli import ClaudeCliBackend
+from .codex_cli import CodexCliBackend
 from .jev import JevBackend
 from .ollama import OllamaBackend
 from .openai_compatible import OpenAICompatibleBackend
@@ -25,6 +27,8 @@ from .openai_compatible import OpenAICompatibleBackend
 BackendFactory = Callable[[TierConfig], Backend]
 
 _REGISTRY: dict[str, BackendFactory] = {
+    "claude_cli": ClaudeCliBackend,
+    "codex_cli": CodexCliBackend,
     "jev": JevBackend,
     "ollama": OllamaBackend,
     "openai_compatible": OpenAICompatibleBackend,
@@ -54,6 +58,8 @@ __all__ = [
     "BackendError",
     "BackendFactory",
     "BackendResponse",
+    "ClaudeCliBackend",
+    "CodexCliBackend",
     "JevBackend",
     "OllamaBackend",
     "OpenAICompatibleBackend",

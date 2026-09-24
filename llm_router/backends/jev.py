@@ -53,6 +53,7 @@ edit rather than a patch.
 
 from __future__ import annotations
 
+import math
 from typing import Any, AsyncIterator
 
 import httpx
@@ -116,12 +117,7 @@ class JevBackend:
             # so an alias here still leaves a specific version in the log.
             "model": self.tier.model,
             "state": "\n\n".join(state),
-            "questions": {
-                settings.question_key: {
-                    "type": "noul",
-                    "instructions": instructions or DEFAULT_INSTRUCTIONS,
-                }
-            },
+            "questions": _questions(settings, instructions),
         }
         body.update(self.tier.extra_body)
         return body
@@ -145,24 +141,27 @@ class JevBackend:
         if not isinstance(payload, dict):
             raise BackendError(f"{self.tier.name}: upstream sent no JSON object", status=502)
 
-        key = self.tier.jev.question_key
-        answer = (payload.get("answers") or {}).get(key)
-        probability = answer.get("noul") if isinstance(answer, dict) else None
-        if isinstance(probability, bool) or not isinstance(probability, (int, float)):
-            # No probability means the call did not work, whatever the status
-            # said. Rendering a verdict from it would invent a judgement nobody
-            # made, and `on_verifier_error` exists precisely so that case has
-            # somewhere to go that is not a silent pass.
-            raise BackendError(
-                f"{self.tier.name}: response carried no noul probability for {key!r}",
-                status=502,
-                body=payload,
-            )
+        settings = self.tier.jev
+        answers = payload.get("answers") or {}
+        if settings.asks_many:
+            correct = {
+                **{k: _probability(self.tier.name, answers, k, payload) for k in settings.questions},
+                # Asked the other way round: "yes" is the defect.
+                **{k: 1.0 - _probability(self.tier.name, answers, k, payload) for k in settings.error_questions},
+            }
+            # The mean in logit space, not of the probabilities: one confident
+            # "no" at 0.02 moves it far more than a hesitant 0.45 does, which
+            # is what a doubt that sure of itself deserves.
+            probability = _sigmoid(sum(_logit(p) for p in correct.values()) / len(correct))
+            weakest = min(correct, key=correct.__getitem__)
+            evidence = f" over {len(correct)} questions, weakest {weakest}={correct[weakest]:.3f}"
+        else:
+            probability = _probability(self.tier.name, answers, settings.question_key, payload)
+            evidence = ""
 
-        probability = float(probability)
-        threshold = self.tier.jev.threshold
+        threshold = settings.threshold
         verdict = "PASS" if probability >= threshold else "FAIL"
-        detail = f"jev p(correct)={probability:.3f} threshold={threshold:.2f}"
+        detail = f"jev p(correct)={probability:.3f}{evidence} threshold={threshold:.2f}"
         usage = _usage_of(payload.get("usage"))
         return BackendResponse(
             body=build_completion(
@@ -183,6 +182,48 @@ class JevBackend:
     async def aclose(self) -> None:
         if self._owns_client:
             await self._client.aclose()
+
+
+def _questions(settings: Any, instructions: str | None) -> dict[str, dict[str, str]]:
+    if not settings.asks_many:
+        return {
+            settings.question_key: {
+                "type": "noul",
+                "instructions": instructions or DEFAULT_INSTRUCTIONS,
+            }
+        }
+    # A configured set replaces the reviewer's brief: each question IS the
+    # criterion it asks about, and the brief would be one more, unmeasured.
+    asked = {**settings.questions, **settings.error_questions}
+    return {key: {"type": "noul", "instructions": text} for key, text in asked.items()}
+
+
+def _probability(tier: str, answers: dict[str, Any], key: str, payload: Any) -> float:
+    answer = answers.get(key)
+    probability = answer.get("noul") if isinstance(answer, dict) else None
+    if isinstance(probability, bool) or not isinstance(probability, (int, float)):
+        # No probability means the call did not work, whatever the status
+        # said. Rendering a verdict from it would invent a judgement nobody
+        # made, and `on_verifier_error` exists precisely so that case has
+        # somewhere to go that is not a silent pass. With several questions the
+        # same holds for each: a verdict averaged over the ones that did answer
+        # is a verdict on a question set nobody configured.
+        raise BackendError(
+            f"{tier}: response carried no noul probability for {key!r}",
+            status=502,
+            body=payload,
+        )
+    return float(probability)
+
+
+def _logit(p: float) -> float:
+    # Jev answers in hundredths, and 0.0 or 1.0 would be an infinite vote.
+    p = min(max(p, 1e-4), 1 - 1e-4)
+    return math.log(p / (1 - p))
+
+
+def _sigmoid(z: float) -> float:
+    return 1 / (1 + math.exp(-z))
 
 
 def _text_of(content: Any) -> str:

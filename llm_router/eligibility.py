@@ -14,6 +14,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
+from typing import Mapping
 
 from .config import Config, TierConfig
 from .schemas import ChatCompletionRequest
@@ -28,6 +29,8 @@ class RejectionReason(str, Enum):
     # THIS request being too large or too toolful for a tier that could
     # otherwise have served it.
     CANNOT_GENERATE = "cannot_generate"
+    # The startup catalog check found the model or effort of the tier not served.
+    UNAVAILABLE = "unavailable"
 
 
 @dataclass(frozen=True)
@@ -97,14 +100,27 @@ def check_tier(
     return None
 
 
-def evaluate(config: Config, request: ChatCompletionRequest) -> EligibilityResult:
-    """Partition the configured tiers into those that can serve this request and those that cannot."""
+def evaluate(
+    config: Config,
+    request: ChatCompletionRequest,
+    unavailable: Mapping[str, str] | None = None,
+) -> EligibilityResult:
+    """Partition the configured tiers into those that can serve this request and those that cannot.
+
+    `unavailable` is the verdict of the startup catalog check, tier -> why. It
+    is a fact about the tier rather than the request, but it belongs in the same
+    list: a request that could not go to its usual tier says so in its own row.
+    """
     estimated = estimate_request_budget(request)
+    unavailable = unavailable or {}
     eligible: list[str] = []
     rejections: list[Rejection] = []
     # Configuration order is preserved so that "first eligible" is a stable,
     # operator-controlled fallback rather than dictionary luck.
     for name, tier in config.tiers.items():
+        if name in unavailable:
+            rejections.append(Rejection(tier=name, reason=RejectionReason.UNAVAILABLE, detail=unavailable[name]))
+            continue
         rejection = check_tier(tier, request, estimated_tokens=estimated)
         if rejection is None:
             eligible.append(name)

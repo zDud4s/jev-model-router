@@ -501,3 +501,206 @@ def test_a_judge_that_answers_nothing_never_becomes_a_pass_in_the_log() -> None:
         assert check["escalated"] == 0
 
     log.close()
+
+
+# --- several questions in one call ------------------------------------------
+#
+# Measured on 434 reviewed answers (227 natural, 207 with one planted defect):
+# eight narrow questions asked together and averaged in logit space beat the
+# single question by +0.023 AUC, 95% CI [0.008, 0.038] -- and cost one call,
+# because the state is read once however many questions ride on it.
+
+
+def answering(probs: dict[str, float], seen: list[dict[str, Any]] | None = None) -> httpx.AsyncClient:
+    """A client that answers each question it is asked from `probs`."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        if seen is not None:
+            seen.append(body)
+        answers = {k: {"type": "noul", "noul": probs[k]} for k in body["questions"] if k in probs}
+        return httpx.Response(
+            200,
+            json={"model": "jev-1.13.0", "answers": answers, "usage": {"input_tokens": 1300, "output_tokens": 0}},
+        )
+
+    return httpx.AsyncClient(transport=httpx.MockTransport(handler))
+
+
+MANY = {"questions": {"right": "Is it right?", "coherent": "Does it hang together?"},
+        "error_questions": {"flawed": "Does it contain an error?"}}
+
+
+async def test_every_configured_question_rides_on_one_call_over_the_same_state() -> None:
+    config = config_with(jev=MANY)
+    seen: list[dict[str, Any]] = []
+    backend = JevBackend(config.tier("judge"), client=answering({"right": 0.9, "coherent": 0.9, "flawed": 0.1}, seen))
+
+    await backend.complete(a_review(config, answer="4"))
+
+    assert len(seen) == 1
+    assert seen[0]["questions"] == {
+        "right": {"type": "noul", "instructions": "Is it right?"},
+        "coherent": {"type": "noul", "instructions": "Does it hang together?"},
+        "flawed": {"type": "noul", "instructions": "Does it contain an error?"},
+    }
+    # The state is what a single question reads: the review, not the brief.
+    assert "=== ANSWER UNDER REVIEW ===" in seen[0]["state"]
+
+
+async def test_the_answers_are_averaged_in_logit_space_with_error_questions_flipped() -> None:
+    config = config_with(jev={**MANY, "threshold": 0.75})
+    probs = {"right": 0.9, "coherent": 0.5, "flawed": 0.2}
+    backend = JevBackend(config.tier("judge"), client=answering(probs))
+
+    result = await backend.complete(a_review(config))
+    content = result.body["choices"][0]["message"]["content"]
+
+    # logit(0.9)=2.197, logit(0.5)=0, and "flawed" at 0.2 is p(correct)=0.8,
+    # logit 1.386. Mean 1.195, back through the sigmoid: 0.768.
+    assert content.startswith("VERDICT: PASS")
+    assert "p(correct)=0.768" in content
+    # The weakest question is named, so a failure says where it came from.
+    assert "weakest coherent=0.500" in content
+
+
+async def test_one_confident_doubt_can_fail_the_answer_on_its_own() -> None:
+    config = config_with(jev={**MANY, "threshold": 0.75})
+    backend = JevBackend(config.tier("judge"), client=answering({"right": 0.9, "coherent": 0.9, "flawed": 0.97}))
+
+    result = await backend.complete(a_review(config))
+
+    assert result.body["choices"][0]["message"]["content"].startswith("VERDICT: FAIL")
+
+
+async def test_a_question_left_unanswered_is_an_error_and_never_a_pass() -> None:
+    config = config_with(jev=MANY)
+    backend = JevBackend(config.tier("judge"), client=answering({"right": 0.99, "coherent": 0.99}))
+
+    with pytest.raises(BackendError, match="flawed"):
+        await backend.complete(a_review(config))
+
+
+@pytest.mark.parametrize(
+    "jev, message",
+    [
+        ({"questions": {}}, "questions"),
+        ({"questions": {"a": "  "}}, "empty"),
+        ({"questions": {"a": "x"}, "error_questions": {"a": "y"}}, "both"),
+        ({"questions": {"a": "x"}, "instructions": "z"}, "instructions"),
+        ({"questions": {"a": "x"}, "question_key": "k"}, "question_key"),
+        ({"questions": ["a"]}, "mapping"),
+    ],
+    ids=["empty-map", "empty-text", "key-in-both", "with-instructions", "with-question-key", "not-a-map"],
+)
+def test_an_ambiguous_question_set_is_refused_at_startup(jev, message) -> None:
+    with pytest.raises(ConfigError, match=message):
+        config_with(jev=jev)
+
+
+# --- Jev as a prefilter: it may pass an answer, and never fails one ---------
+#
+# Measured on the same 434 answers: as the only judge Jev reaches AUC ~0.78
+# against an Opus 5 reference, which is not a verdict to escalate on. Asked
+# first, and trusted only when it passes, it keeps a share of answers away from
+# the expensive judge -- and a Jev that is wrong, unsure or down costs only
+# that saving, never a verdict.
+
+
+def prefiltered(**verification: Any) -> Config:
+    settings = {"enabled": True, "verifier_tier": "top", "prefilter_tier": "judge", "escalate_to": "mid"}
+    settings.update(verification)
+    tiers = {**BASE_CONFIG["tiers"], "judge": JEV_TIER}
+    return parse_config({**BASE_CONFIG, "tiers": tiers, "verification": settings})
+
+
+def test_a_confident_prefilter_pass_never_calls_the_verifier() -> None:
+    log = RequestLog(":memory:")
+    app, backends = build_app(prefiltered(), log, client=judging(noul=0.97), answers={"top": "VERDICT: FAIL - no"})
+
+    with TestClient(app) as http:
+        response = post(http)
+        check = log.query("SELECT * FROM verifications")[0]
+
+        assert response.json()["choices"][0]["message"]["content"] == "hello"
+        assert backends["top"].calls == []
+        assert check["verdict"] == "pass"
+        # Who decided, in the column that says who decided.
+        assert check["verifier_tier"] == "judge"
+        assert "p(correct)=0.970" in check["reason"]
+        assert check["verifier_cost_usd"] == pytest.approx(1000 * 0.042 / 1_000_000)
+
+    log.close()
+
+
+def test_a_prefilter_fail_is_only_a_referral_and_the_verifier_decides() -> None:
+    log = RequestLog(":memory:")
+    app, backends = build_app(
+        prefiltered(), log, client=judging(noul=0.10),
+        answers={"top": "VERDICT: FAIL - the sum is wrong", "mid": "the proper answer"},
+    )
+
+    with TestClient(app) as http:
+        response = post(http)
+        check = log.query("SELECT * FROM verifications")[0]
+
+        assert len(backends["top"].calls) == 1
+        assert response.json()["choices"][0]["message"]["content"] == "the proper answer"
+        assert check["verdict"] == "fail" and check["verifier_tier"] == "top"
+        assert check["escalated"] == 1 and check["escalated_to"] == "mid"
+        # Both reviews were bought, and both are on the bill.
+        top = 100 * 15.0 / 1_000_000 + 50 * 75.0 / 1_000_000
+        assert check["verifier_cost_usd"] == pytest.approx(1000 * 0.042 / 1_000_000 + top)
+        # What the prefilter said survives beside the verdict, so its leaks and
+        # its savings can both be counted from the log later.
+        assert "p(correct)=0.100" in check["reason"]
+        assert "the sum is wrong" in check["reason"]
+
+    log.close()
+
+
+def test_the_verifier_can_overrule_a_prefilter_that_doubted() -> None:
+    log = RequestLog(":memory:")
+    app, _ = build_app(prefiltered(), log, client=judging(noul=0.10), answers={"top": "VERDICT: PASS"})
+
+    with TestClient(app) as http:
+        response = post(http)
+        check = log.query("SELECT * FROM verifications")[0]
+
+        assert response.json()["choices"][0]["message"]["content"] == "hello"
+        assert check["verdict"] == "pass" and check["verifier_tier"] == "top"
+        assert check["escalated"] == 0
+
+    log.close()
+
+
+def test_a_prefilter_that_breaks_hands_the_review_to_the_verifier() -> None:
+    log = RequestLog(":memory:")
+    app, backends = build_app(
+        prefiltered(), log, client=judging(payload={"answers": {}}), answers={"top": "VERDICT: PASS"}
+    )
+
+    with TestClient(app) as http:
+        post(http)
+        check = log.query("SELECT * FROM verifications")[0]
+
+        # Not an ERROR row: the review happened, just not where it was tried first.
+        assert len(backends["top"].calls) == 1
+        assert check["verdict"] == "pass" and check["verifier_tier"] == "top"
+        assert "prefilter" in check["reason"]
+
+    log.close()
+
+
+@pytest.mark.parametrize(
+    "verification, message",
+    [
+        ({"prefilter_tier": "nowhere"}, "not a configured tier"),
+        ({"prefilter_tier": "top"}, "same tier"),
+        ({"enabled": False}, "requires"),
+    ],
+    ids=["unknown", "same-as-verifier", "verification-off"],
+)
+def test_a_prefilter_that_could_not_work_is_refused_at_startup(verification, message) -> None:
+    with pytest.raises(ConfigError, match=message):
+        prefiltered(**verification)

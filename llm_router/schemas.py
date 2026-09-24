@@ -47,7 +47,8 @@ class ChatCompletionRequest(BaseModel):
     def forwardable(self) -> dict[str, Any]:
         """The request body to pass on, minus fields the router owns itself."""
         body = self.model_dump(exclude_none=True)
-        for owned in ("model", "stream", "stream_options"):
+        # `packet` is the capabilities router's input, not the model's.
+        for owned in ("model", "stream", "stream_options", "packet"):
             body.pop(owned, None)
         return body
 

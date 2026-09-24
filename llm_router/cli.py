@@ -104,13 +104,34 @@ def _build_parser() -> argparse.ArgumentParser:
     reconcile.add_argument("--dry-run", action="store_true", help="report only; write nothing")
     reconcile.add_argument("--json", action="store_true", help="emit JSON instead of text")
 
+    calibrate = sub.add_parser(
+        "calibrate",
+        help="set miss_scale from anchors: tasks with a tier known to be (or not be) enough; asks Jev only",
+    )
+    calibrate.add_argument("--anchors", help="YAML list of {task, packet?, sufficient?, insufficient?}")
+    calibrate.add_argument(
+        "--from-log", action="store_true",
+        help="fit one scale per model family from judged outcomes in the request log (no calls at all)",
+    )
+    calibrate.add_argument("--min-samples", type=int, default=30, help="trials a family needs before it gets a scale")
+    calibrate.add_argument("--write", action="store_true", help="write the scale into the config file")
+    calibrate.add_argument(
+        "--margin", type=float, default=0.03,
+        help="how far above the target a sufficient tier must land (Jev's readings vary between calls)",
+    )
+
     check = sub.add_parser("check", help="validate the config and exit")
     check.add_argument(
         "--prices",
         action="store_true",
         help="also compare each tier's prices with the provider's published list",
     )
-    check.add_argument("--json", action="store_true", help="emit JSON (with --prices)")
+    check.add_argument(
+        "--catalog",
+        action="store_true",
+        help="also check every tier against the models its provider serves now, and update the catalog file",
+    )
+    check.add_argument("--json", action="store_true", help="emit JSON (with --prices or --catalog)")
     return parser
 
 
@@ -181,6 +202,104 @@ def _train(config, args) -> int:
     return 0
 
 
+def _calibrate(config, args) -> int:
+    import asyncio
+
+    from .calibration import calibrate, load_anchors, with_scale, write_scale
+    from .capabilities import CapabilityRouter
+    from .catalog import check_catalog
+    from .discovery import expand
+    from .schemas import ChatCompletionRequest
+
+    if config.router.kind != "capabilities":
+        print("calibrate needs router.kind: capabilities", file=sys.stderr)
+        return 2
+    if args.from_log:
+        return _calibrate_from_log(config, args)
+    if not args.anchors:
+        print("calibrate needs --anchors or --from-log", file=sys.stderr)
+        return 2
+    try:
+        anchors = load_anchors(args.anchors)
+    except ConfigError as exc:
+        print(f"anchors: {exc}", file=sys.stderr)
+        return 2
+    config, _, _ = expand(config, check_catalog(config))
+
+    async def run():
+        router = CapabilityRouter(config)
+        try:
+            scale, results, conflicts = await calibrate(config, anchors, router, margin=args.margin)
+            after = CapabilityRouter(with_scale(config, scale), ask=router._ask)
+            candidates = [n for n, t in config.tiers.items() if t.can_serve]
+            for anchor, result in zip(anchors, results):
+                request = ChatCompletionRequest.model_validate({
+                    "model": "auto", "messages": [{"role": "user", "content": anchor["task"]}],
+                    **({"packet": anchor["packet"]} if anchor.get("packet") else {}),
+                })
+                async def fixed(packet, questions, needs=result.needs):
+                    return needs
+                after._ask = fixed
+                result.picked_after = (await after.decide(request, candidates)).tier
+            return scale, results, conflicts
+        finally:
+            await router.aclose()
+
+    try:
+        scale, results, conflicts = asyncio.run(run())
+    except ConfigError as exc:
+        print(f"anchors: {exc}", file=sys.stderr)
+        return 2
+    for result in results:
+        print(f"\n{result.task[:90]}")
+        print("  need: " + " ".join(f"{k}={v:.2f}" for k, v in result.needs.items()))
+        for tier, (op, bound) in result.bounds.items():
+            print(f"  {'enough' if op == '<=' else 'not enough'}: {tier}  -> scale {op} {bound:.3f}")
+        print(f"  routed after calibration: {result.picked_after}")
+    print(f"\nmiss_scale: {scale:.3f} (was {config.router.capabilities.miss_scale:.3f})")
+    for conflict in conflicts:
+        print(f"  conflict: {conflict}")
+    if args.write:
+        write_scale(args.config, scale)
+        print(f"written to {args.config}")
+    return 1 if conflicts else 0
+
+
+def _calibrate_from_log(config, args) -> int:
+    from .calibration import fit_family_scales, log_outcomes, write_family_scales
+    from .capabilities import CapabilityRouter
+    from .catalog import check_catalog
+    from .discovery import expand
+
+    config, _, _ = expand(config, check_catalog(config))
+
+    async def never(packet, questions):  # the log already holds what Jev read
+        raise RuntimeError("calibrate --from-log asks nobody")
+
+    router = CapabilityRouter(config, ask=never)
+    log = RequestLog(config.log.path)
+    try:
+        outcomes = log_outcomes(log, config)
+    finally:
+        log.close()
+    if not outcomes:
+        print(f"no judged capabilities outcomes in {config.log.path}: turn verification on, "
+              "or have the client resend failures with failed_tiers")
+        return 1
+    fits = fit_family_scales(router, outcomes, min_samples=args.min_samples)
+    verdicts = sum(o.source == "verdict" for o in outcomes)
+    print(f"{len(outcomes)} outcome(s): {verdicts} verdict(s), {len(outcomes) - verdicts} client-reported failure(s)")
+    print(f"{'family':24} {'n':>5} {'passed':>7} {'predicted':>9}  scale")
+    for fit in fits:
+        scale = f"{fit.scale:.3f}" if fit.scale is not None else f"(needs {args.min_samples})"
+        print(f"{fit.family:24} {fit.n:5d} {fit.passes / fit.n:7.0%} {fit.predicted:9.0%}  {scale}")
+    scales = {f.family: f.scale for f in fits if f.scale is not None}
+    if args.write and scales:
+        write_family_scales(args.config, {**config.router.capabilities.family_scales, **scales})
+        print(f"written to {args.config}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -190,9 +309,33 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config error: {exc}", file=sys.stderr)
         return 2
 
+    if args.command == "calibrate":
+        return _calibrate(config, args)
+
     if args.command == "check":
-        if not (args.prices and args.json):
+        quiet = args.json and (args.prices or args.catalog)
+        if not quiet:
             print(f"config OK: {len(config.tiers)} tier(s): {', '.join(config.tiers)}")
+        if args.catalog:
+            from .catalog import check_catalog, write_if_changed
+
+            report = check_catalog(config)
+            if config.catalog.path and write_if_changed(report, config.catalog.path) and not quiet:
+                print(f"catalog updated: {config.catalog.path}")
+            from .discovery import expand
+
+            _, found, unprofiled = expand(config, report)
+            if args.json:
+                print(json.dumps({**report.to_dict(), "discovered_tiers": [f.tier for f in found],
+                                  "unprofiled": unprofiled}, indent=2))
+            else:
+                print(report.summary())
+                if found:
+                    print(f"catalog: {len(found)} tier(s) discovered")
+                if unprofiled:
+                    print(f"  on the fallback profile (write a profile): {', '.join(unprofiled)}")
+            if not args.prices:
+                return 1 if report.unavailable else 0
         if not args.prices:
             return 0
         from .price_check import check_prices, format_report
