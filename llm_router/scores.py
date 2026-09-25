@@ -570,7 +570,7 @@ def parse_scores(
     eff = _mapping(raw.get("efforts"), "efforts")
     _only(eff, {"labels", "patterns"}, "efforts")
     efforts = EffortRules(
-        labels={str(k).lower(): str(v) for k, v in _mapping(eff.get("labels"), "efforts.labels").items()},
+        labels={str(k).lower(): str(v).lower() for k, v in _mapping(eff.get("labels"), "efforts.labels").items()},
         patterns=_regexes(eff.get("patterns"), "efforts.patterns"),
     )
     mk = _mapping(raw.get("model_keys"), "model_keys")

@@ -526,3 +526,8 @@ def test_a_bad_imported_row_drops_its_benchmarks_import_only_and_non_finite_numb
     assert len(scores.errors) == 1 and "'code'" in scores.errors[0]
     held = {(p.benchmark, p.model): p.cost_usd for p in scores.points if p.imported}
     assert held == {("lore", "acme-large"): None, ("lore", "acme-small"): 2.0}
+
+
+def test_effort_label_values_are_lowercased_like_their_keys():
+    _, scores = scored([pt("code", "m", "Extra High", 50)], extra={"efforts": {"labels": {"Extra High": "XHigh"}}})
+    assert scores.points[0].effort == "xhigh" and scores.efforts.matchable("xhigh")
