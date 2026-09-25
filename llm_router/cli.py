@@ -285,6 +285,9 @@ def _calibrate(config, args) -> int:
         print("  need: " + " ".join(f"{k}={v:.2f}" for k, v in result.needs.items()))
         for tier, (op, bound) in result.bounds.items():
             print(f"  {'enough' if op == '<=' else 'not enough'}: {tier}  -> scale {op} {bound:.3f}")
+        for tier, own in result.family_scaled.items():
+            kind = "enough" if tier in result.sufficient else "not enough"
+            print(f"  {kind}: {tier}  -> its family scale {own:.3f} decides it; miss_scale is not bounded by it")
         for _, family, req, old, new, how in result.capped:
             print(f"  capped: {family} {req} {old:.2f} -> {new:.2f} ({how})")
         print(f"  routed after calibration: {result.picked_after}")

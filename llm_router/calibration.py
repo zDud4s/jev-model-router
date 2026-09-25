@@ -19,7 +19,8 @@ makes every tier more likely to succeed -- so each anchor bounds it:
 
 The scale kept is the largest one every `sufficient` anchor allows, capped at 1
 (anchors can make the router trust models more, never less than the priors on
-their own say).
+their own say). A tier whose family has a fitted scale (`family_scales`) bounds
+nothing: the global scale never reaches it.
 
 An `insufficient` anchor that tier still reaches (above `target - margin`) is
 then enforced on ONE requirement. No scale can do it: the `sufficient` anchors
@@ -56,11 +57,13 @@ class AnchorResult:
     sufficient: list[str]
     insufficient: list[str]
     needs: dict[str, float]
-    bounds: dict[str, tuple[str, float]]  # tier -> ("<=" or ">=", scale)
+    bounds: dict[str, tuple[str, float]]  # tier -> ("<=" or ">=", scale); tiers the global scale reaches
     picked_after: str | None = None
     because: str | None = None
     # (tier, family key, requirement, old level, new level, "because" | "weakest link")
     capped: list[tuple[str, str, str, float, float, str]] = field(default_factory=list)
+    # Tiers with a fitted family scale: the global scale never reaches them, so they bound nothing.
+    family_scaled: dict[str, float] = field(default_factory=dict)
 
 
 def load_anchors(path: str | Path, requirements: dict[str, str] | None = None) -> list[dict[str, Any]]:
@@ -166,10 +169,9 @@ async def calibrate(
 ) -> Calibration:
     """Fit `miss_scale` from the `sufficient` anchors, then cap one requirement per violated `insufficient` one.
 
-    A known asymmetry: the `bounds` line (`_scale_bound`) is about the global
-    scale, while the capping uses the tier's fitted family scale when it has
-    one. For such a family the "not enough: ... scale >= s" line can disagree
-    with the capping verdict; the capping verdict is the one that holds.
+    A tier whose family has a fitted scale bounds nothing: `success` uses its
+    family scale, so the global scale never reaches it (`family_scaled`). Its
+    anchors still count for the capping and its protection, under that scale.
     """
     from .capabilities import build_packet
 
@@ -191,7 +193,11 @@ async def calibrate(
         for tier in result.sufficient + result.insufficient:
             if tier not in caps.cards:
                 raise ConfigError(f"anchor names {tier!r}, which is not a carded tier (is it discovered?)")
-            if tier in result.sufficient:
+            if router.family_key(tier) in caps.family_scales:
+                # Its own scale decides it, not miss_scale: a bound from it would move the global
+                # scale for tiers it says nothing about, and move again once a cap lowers its levels.
+                result.family_scaled[tier] = caps.family_scales[router.family_key(tier)]
+            elif tier in result.sufficient:
                 result.bounds[tier] = ("<=", _scale_bound(router, needs, tier, enough))
             else:
                 result.bounds[tier] = (">=", _scale_bound(router, needs, tier, short))

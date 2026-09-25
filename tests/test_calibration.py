@@ -173,3 +173,36 @@ def test_level_caps_are_written_beside_family_scales_merged_lower_wins_and_comme
     assert text.count("level_caps:") == 1 and "# the table" in text
     assert '    level_caps: {"mid": {"code": 1.0, "reasoning": 0.345}}' in text  # floored, never rounded up
     assert parse_config(raw_config(level_caps={"mid": {"reasoning": 0.345}})).router.capabilities.level_caps
+
+
+def test_a_run_with_family_scales_is_idempotent_through_the_written_config(tmp_path):
+    # mid has a family scale, so the global scale never reaches it: a cap on mid must not
+    # move the global scale on the next run (it did: the capped mid bounded it lower).
+    import yaml
+
+    from llm_router.config import load_config
+    from llm_router.config import _DEFAULT_MISS
+
+    ask = ByTask({"ALPHA": {"reasoning": 0.6, "code": 0.9}, "BETA": {"reasoning": 0.99, "code": 0.1},
+                  "GAMMA": {"reasoning": 0.9, "code": 0.9}})
+    anchors = [{"task": "ALPHA job", "sufficient": "mid"}, {"task": "BETA job", "insufficient": "mid"},
+               {"task": "GAMMA job", "sufficient": "top"}]
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(raw_config(family_scales={"mid": 0.3}, miss=list(_DEFAULT_MISS)),
+                                   default_flow_style=None), encoding="utf-8")
+
+    def once():
+        config = load_config(path)
+        cal = asyncio.run(calibrate(config, anchors, CapabilityRouter(config, ask=ask), margin=0.0))
+        write_scale(path, cal.scale)
+        if cal.caps:
+            write_level_caps(path, cal.caps)
+        return cal
+
+    first = once()
+    assert first.caps and not first.conflicts
+    second = once()
+    assert f"{second.scale:.3f}" == f"{first.scale:.3f}" and not any(r.capped for r in second.results)
+    assert not second.conflicts
+    written = load_config(path).router.capabilities
+    assert written.miss_scale == pytest.approx(round(first.scale, 3)) and set(written.level_caps) == {"mid"}
