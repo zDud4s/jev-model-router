@@ -313,6 +313,9 @@ def import_sources(
             except ImportFailure as exc:
                 report.errors[bench.key] = str(exc)
                 continue
+            except Exception as exc:  # noqa: BLE001 - a table that cannot be read fails only its benchmark
+                report.errors[bench.key] = f"{type(exc).__name__}: {exc}"[:300]
+                continue
             found[bench.key], metas[bench.key] = rows, meta
             summary.rows += read
             summary.skipped += skipped

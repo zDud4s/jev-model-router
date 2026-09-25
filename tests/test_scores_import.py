@@ -314,3 +314,35 @@ def test_a_trickling_response_is_cut_at_the_deadline(monkeypatch):
     with pytest.raises(TimeoutError):
         scores_import._read(Trickle(), deadline=1025.0)
     assert clock.now == 1030.0
+
+
+def test_a_benchmark_that_yields_no_points_is_an_error_and_keeps_its_previous_points(tmp_path):
+    config, _ = setup(tmp_path, {"code": CODE})
+    import_sources(config, load_scores(config),
+                   Fetch(**{"https://hub_test": zipped(code__csv=HUB_TABLE, meta__csv=META)}), now=NOW)
+    before = imported(tmp_path)["benchmarks"]["code"]
+    empty = [{**HUB_TABLE[0], "Score": ""}]
+    report = import_sources(config, load_scores(config),
+                            Fetch(**{"https://hub_test": zipped(code__csv=empty, meta__csv=META)}), now=NOW)
+    assert "no point" in report.errors["code"]
+    assert imported(tmp_path)["benchmarks"]["code"] == before
+
+
+def test_an_unreadable_table_fails_only_its_benchmark(tmp_path):
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as archive:
+        archive.writestr("bad.csv", b"Model version,Score\n\xff\xfe,0.5\n")
+        text = io.StringIO()
+        csv.DictWriter(text, fieldnames=list(HUB_TABLE[0])).writeheader()
+        csv.DictWriter(text, fieldnames=list(HUB_TABLE[0])).writerows(HUB_TABLE)
+        archive.writestr("code.csv", text.getvalue())
+        meta = io.StringIO()
+        csv.DictWriter(meta, fieldnames=list(META[0])).writeheader()
+        csv.DictWriter(meta, fieldnames=list(META[0])).writerows(META)
+        archive.writestr("meta.csv", meta.getvalue())
+    bad = {"description": "b", "requirements": {"reasoning": 1.0},
+           "data": {"source": "hub", "table": "bad.csv", "score": "Score"}}
+    config, _ = setup(tmp_path, {"code": CODE, "bad": bad})
+    report = import_sources(config, load_scores(config), Fetch(**{"https://hub_test": buffer.getvalue()}), now=NOW)
+    assert "UnicodeDecodeError" in report.errors["bad"]
+    assert set(imported(tmp_path)["benchmarks"]) == {"code"}
