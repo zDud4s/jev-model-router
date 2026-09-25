@@ -531,3 +531,26 @@ def test_a_bad_imported_row_drops_its_benchmarks_import_only_and_non_finite_numb
 def test_effort_label_values_are_lowercased_like_their_keys():
     _, scores = scored([pt("code", "m", "Extra High", 50)], extra={"efforts": {"labels": {"Extra High": "XHigh"}}})
     assert scores.points[0].effort == "xhigh" and scores.efforts.matchable("xhigh")
+
+
+def test_generated_files_are_replaced_whole_or_not_at_all(tmp_path, monkeypatch):
+    from llm_router.scores import write_json, write_sidecar
+
+    path = tmp_path / "b.derived.json"
+    write_sidecar(path, jev={"code": 1})
+    assert json_load(path) == {"jev": {"code": 1}}
+
+    def interrupted(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr("os.replace", interrupted)
+    with pytest.raises(OSError):
+        write_json(path, {"fit": {}})
+    assert json_load(path) == {"jev": {"code": 1}}  # the old file, intact
+    assert [p.name for p in tmp_path.iterdir()] == ["b.derived.json"]  # no temporary file left behind
+
+
+def json_load(path):
+    import json
+
+    return json.loads(path.read_text(encoding="utf-8"))

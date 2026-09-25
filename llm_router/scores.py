@@ -23,7 +23,9 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -709,7 +711,17 @@ def benchmark_weights(
 
 
 def write_json(path: str | Path, data: dict[str, Any]) -> None:
-    Path(path).write_text(json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n", encoding="utf-8")
+    """Write through a temporary file beside `path`, then swap it in: a reader sees the old file or the new one."""
+    target = Path(path)
+    body = json.dumps(data, indent=2, sort_keys=True, ensure_ascii=False) + "\n"
+    fd, temp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(body)
+        os.replace(temp, target)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
 
 
 def write_sidecar(path: str | Path, **blocks: Any) -> None:
