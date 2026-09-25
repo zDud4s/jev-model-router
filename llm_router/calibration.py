@@ -39,7 +39,9 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import re
+import tempfile
 from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
@@ -284,10 +286,22 @@ def _set_scale(text: str, scale: float, path: str | Path) -> str:
     return text[: match.end()] + insert + text[match.end():]
 
 
+def _replace(target: Path, text: str) -> None:
+    """Write through a temporary file beside `target`, then swap it in: the config is the old file or the new one."""
+    fd, temp = tempfile.mkstemp(prefix=f".{target.name}.", suffix=".tmp", dir=target.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+        os.replace(temp, target)
+    except BaseException:
+        Path(temp).unlink(missing_ok=True)
+        raise
+
+
 def write_scale(path: str | Path, scale: float) -> None:
     """Set `miss_scale` in the config file, keeping every comment around it."""
     target = Path(path)
-    target.write_text(_set_scale(target.read_text(encoding="utf-8"), scale, path), encoding="utf-8")
+    _replace(target, _set_scale(target.read_text(encoding="utf-8"), scale, path))
 
 
 def write_calibration(path: str | Path, scale: float, level_caps: dict[str, dict[str, float]]) -> None:
@@ -296,7 +310,7 @@ def write_calibration(path: str | Path, scale: float, level_caps: dict[str, dict
     text = _set_scale(target.read_text(encoding="utf-8"), scale, path)
     if level_caps:
         text = _set_level_caps(text, level_caps, path)
-    target.write_text(text, encoding="utf-8")
+    _replace(target, text)
 
 
 # ---------------------------------------------------------------- from outcomes
@@ -430,7 +444,7 @@ def write_family_scales(path: str | Path, scales: dict[str, float]) -> None:
         insert = (f"\n{indent}# Fitted by `llm-router calibrate --from-log`: a family here ignores miss_scale."
                   f"\n{indent}{line}")
         text = text[: match.end()] + insert + text[match.end():]
-    target.write_text(text, encoding="utf-8")
+    _replace(target, text)
 
 
 def _flow_line(text: str, key: str, path: str | Path) -> re.Match[str] | None:
@@ -443,6 +457,12 @@ def _flow_line(text: str, key: str, path: str | Path) -> re.Match[str] | None:
     if match is None:
         return None
     value = match.group(2).split("#", 1)[0].strip()
+    if value[:1] in ("{", "["):
+        try:
+            yaml.safe_load(match.group(2))  # the whole line: a `#` inside a quoted key is no comment
+        except yaml.YAMLError:
+            raise ConfigError(f"{path}: `{key}:` is a flow mapping that does not close on its line; write it "
+                              f"on one line (e.g. {key}: {{\"family\": {{\"requirement\": 1.0}}}}) and rerun") from None
     below = text[match.end():].splitlines()
     nxt = next((ln for ln in below if ln.strip() and not ln.strip().startswith("#")), "")
     deeper = len(nxt) - len(nxt.lstrip()) > len(match.group(1))
@@ -489,7 +509,7 @@ def write_level_caps(path: str | Path, level_caps: dict[str, dict[str, float]]) 
     `level_caps:` is refused with a ConfigError rather than corrupted.
     """
     target = Path(path)
-    target.write_text(_set_level_caps(target.read_text(encoding="utf-8"), level_caps, path), encoding="utf-8")
+    _replace(target, _set_level_caps(target.read_text(encoding="utf-8"), level_caps, path))
 
 
 __all__ = [

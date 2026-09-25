@@ -302,3 +302,47 @@ def test_a_need_on_a_level_that_misses_nothing_is_still_blamed_on_the_most_neede
     assert not cal.conflicts
     (_, _, req, old, new, how), = cal.results[0].capped
     assert (req, old, how) == ("code", 3, "weakest link") and new < 3
+
+
+from llm_router.calibration import write_calibration, write_family_scales  # noqa: E402
+
+FLAT = "router:\n  capabilities:\n    miss: [0.9, 0.5, 0.2, 0.05]\n    miss_scale: 1.0\n    family_scales: {}\n"
+
+
+@pytest.mark.parametrize("write", [
+    lambda p: write_scale(p, 0.5),
+    lambda p: write_calibration(p, 0.5, {"mid": {"code": 1.0}}),
+    lambda p: write_family_scales(p, {"mid": 0.4}),
+    lambda p: write_level_caps(p, {"mid": {"code": 1.0}}),
+])
+def test_every_config_writer_swaps_the_file_in_whole_or_leaves_it(tmp_path, monkeypatch, write):
+    import os
+
+    path = tmp_path / "c.yaml"
+    path.write_text(FLAT, encoding="utf-8")
+
+    def interrupted(src, dst):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(os, "replace", interrupted)
+    with pytest.raises(OSError, match="disk full"):
+        write(path)
+    assert path.read_text(encoding="utf-8") == FLAT
+    assert [p.name for p in tmp_path.iterdir()] == ["c.yaml"]  # no temporary file left behind
+    monkeypatch.undo()
+    write(path)
+    assert path.read_text(encoding="utf-8") != FLAT
+
+
+@pytest.mark.parametrize("key", ["family_scales", "level_caps"])
+def test_a_flow_mapping_that_does_not_close_on_its_line_is_refused_not_corrupted(tmp_path, key):
+    path = tmp_path / "c.yaml"
+    text = ("router:\n  capabilities:\n    miss: [0.9, 0.5, 0.2, 0.05]\n    miss_scale: 1.0\n"
+            f'    {key}: {{"a": {{"code": 1.0}},\n      "b": {{"code": 2.0}}}}\n    floor: 0.2\n')
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError, match=f"{key}.*one line"):
+        if key == "family_scales":
+            write_family_scales(path, {"mid": 0.4})
+        else:
+            write_level_caps(path, {"mid": {"reasoning": 1.0}})
+    assert path.read_text(encoding="utf-8") == text
