@@ -221,3 +221,22 @@ def test_a_tier_on_the_fallback_profile_is_never_capped_the_operator_is_told_to_
     cal = asyncio.run(calibrate(config, [{"task": "x", "insufficient": tier}], router, margin=0.0))
     assert cal.caps == {} and not cal.results[0].capped
     assert len(cal.conflicts) == 1 and "fallback profile" in cal.conflicts[0] and "write a profile" in cal.conflicts[0]
+
+
+def test_a_family_cap_names_every_other_tier_of_the_family_it_lowers():
+    # The anchor is about opus at low effort; the cap is family-wide, so it also flattens
+    # the higher efforts' reasoning. That is reported per tier, before and after.
+    from test_discovery import expanded
+
+    config, _, _ = expanded()
+    tier = "claude:claude-opus-5-5@low"
+    needs = {"reasoning": 0.6, "code": 0.0, "niche": 0.0}
+    router = CapabilityRouter(config, ask=Ask(needs))
+    cal = asyncio.run(calibrate(config, [{"task": "x", "insufficient": tier, "because": "reasoning"}], router))
+    (_, family, req, old, new, _), = cal.results[0].capped
+    assert family == "claude-opus-*" and req == "reasoning" and new < old
+    lowered = {t: (r, before, after) for t, r, before, after in cal.results[0].lowered}
+    assert tier not in lowered
+    assert lowered["claude:claude-opus-5-5@high"] == ("reasoning", 2.5, new)
+    cards = config.router.capabilities.cards
+    assert all(cards[t].levels["reasoning"] > new for t in lowered)

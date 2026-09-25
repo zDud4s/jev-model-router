@@ -290,6 +290,8 @@ def _calibrate(config, args) -> int:
             print(f"  {kind}: {tier}  -> its family scale {own:.3f} decides it; miss_scale is not bounded by it")
         for _, family, req, old, new, how in result.capped:
             print(f"  capped: {family} {req} {old:.2f} -> {new:.2f} ({how})")
+        for tier, req, before, after in result.lowered:
+            print(f"    also lowers: {tier} {req} {before:.2f} -> {after:.2f}")
         print(f"  routed after calibration: {result.picked_after}")
     print(f"\nmiss_scale: {cal.scale:.3f} (was {config.router.capabilities.miss_scale:.3f})")
     if cal.caps:

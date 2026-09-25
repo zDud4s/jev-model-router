@@ -62,6 +62,9 @@ class AnchorResult:
     because: str | None = None
     # (tier, family key, requirement, old level, new level, "because" | "weakest link")
     capped: list[tuple[str, str, str, float, float, str]] = field(default_factory=list)
+    # Other tiers of the capped family the cap also lowers: (tier, requirement, before, after).
+    # A cap is family-wide, so an anchor about one effort flattens the higher ones too.
+    lowered: list[tuple[str, str, float, float]] = field(default_factory=list)
     # Tiers with a fitted family scale: the global scale never reaches them, so they bound nothing.
     family_scaled: dict[str, float] = field(default_factory=dict)
 
@@ -246,6 +249,11 @@ async def calibrate(
                 conflicts.append(f"{where}, but capping {key} {req} at {level:.2f} would break {t} on "
                                  f"{other.task[:60]!r}, which is enough; not capped")
                 continue
+            for other_tier in sorted(caps.cards):
+                if other_tier != tier and router.family_key(other_tier) == key:
+                    before = levels(other_tier).get(req, 0.0)
+                    if level < before:
+                        result.lowered.append((other_tier, req, before, level))
             new.setdefault(key, {})[req] = level
             result.capped.append((tier, key, req, now, level, how))
     return Calibration(scale, merge_caps(caps.level_caps, new), results, conflicts)
