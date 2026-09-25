@@ -73,6 +73,26 @@ def _sse(chunk: dict[str, Any]) -> str:
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
 
+def _benchmark_scores(config: Config, fetch: Callable[[str, dict[str, str]], bytes] | None) -> Any:
+    """The benchmark evidence for discovered cards, refreshed when stale. None: cards are the profiles alone."""
+    caps = config.router.capabilities
+    if caps is None or caps.benchmarks is None:
+        return None
+    from .scores import load_scores
+    from .scores_import import refresh
+
+    try:
+        scores = load_scores(config)
+        refreshed, lines = refresh(config, scores, fetch)
+        for line in lines:
+            print(line, file=sys.stderr)
+        return load_scores(config) if refreshed else scores
+    except Exception as exc:  # noqa: BLE001 - the profiles alone still route
+        print(f"benchmarks failed to load, cards are the profiles alone: {type(exc).__name__}: {exc}",
+              file=sys.stderr)
+        return None
+
+
 def create_app(
     config: Config,
     *,
@@ -81,6 +101,7 @@ def create_app(
     router: Router | None = None,
     verifier: Verifier | None = None,
     catalog_check: Callable[[Config], Any] | None = None,
+    benchmark_fetch: Callable[[str, dict[str, str]], bytes] | None = None,
 ) -> FastAPI:
     """Build the app. Every collaborator is injectable, which is how tests avoid the network."""
 
@@ -96,12 +117,19 @@ def create_app(
             catalog["report"] = report
             catalog["unavailable"] = dict(report.unavailable)
             if getattr(report, "discovered", None):
-                config, found, unprofiled = expand(config, report)
+                scores = _benchmark_scores(config, benchmark_fetch)
+                config, found, unprofiled = expand(config, report, scores)
                 catalog["discovered"] = len(found)
                 catalog["unprofiled"] = unprofiled
                 print(f"catalog: {len(found)} tier(s) discovered", file=sys.stderr)
                 if unprofiled:
                     print(f"  on the fallback profile (write a profile): {', '.join(unprofiled)}", file=sys.stderr)
+                if scores is not None:
+                    from .discovery import served_ids
+                    from .scores_derive import startup_lines
+
+                    for line in startup_lines(scores, config.router.capabilities, served_ids(found, report)):
+                        print(line, file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 - a broken check must not stop the proxy
             print(f"catalog check failed, serving the configured tiers: {type(exc).__name__}: {exc}", file=sys.stderr)
 
