@@ -21,6 +21,7 @@ import json
 import os
 import re
 import statistics
+import time
 import urllib.parse
 import urllib.request
 import zipfile
@@ -32,8 +33,11 @@ from typing import Any, Callable
 from .config import Config
 from .scores import Benchmark, Scores, Source, split_model, write_json
 
-Fetch = Callable[[str, dict[str, str]], bytes]
+# fetch(url, headers, deadline): the body, or an exception once `_clock()` passes `deadline`.
+Fetch = Callable[[str, dict[str, str], float], bytes]
 MAX_PAGES = 50
+_CHUNK = 1 << 16
+_clock = time.monotonic
 _MISSING = object()
 
 
@@ -60,12 +64,28 @@ class _PrivateHeaders(urllib.request.HTTPRedirectHandler):
         return new
 
 
+def _read(response: Any, deadline: float) -> bytes:
+    """The body, read in chunks so a server that trickles is cut at the deadline, not per socket read."""
+    chunks: list[bytes] = []
+    while True:
+        if _clock() > deadline:
+            raise TimeoutError("timed out")
+        chunk = response.read(_CHUNK)
+        if not chunk:
+            return b"".join(chunks)
+        chunks.append(chunk)
+
+
 def http_fetch(timeout: float) -> Fetch:
-    def fetch(url: str, headers: dict[str, str]) -> bytes:
+    """`timeout` bounds each socket operation; `deadline` bounds the whole fetch."""
+    def fetch(url: str, headers: dict[str, str], deadline: float) -> bytes:
+        left = deadline - _clock()
+        if left <= 0:
+            raise TimeoutError("timed out")
         request = urllib.request.Request(url, headers={"User-Agent": "llm-router", **headers})
         opener = urllib.request.build_opener(_PrivateHeaders(set(headers)))
-        with opener.open(request, timeout=timeout) as response:  # noqa: S310 - URLs come from the operator's file
-            return response.read()
+        with opener.open(request, timeout=min(timeout, left)) as response:  # noqa: S310 - URLs come from the operator's file
+            return _read(response, deadline)
 
     return fetch
 
@@ -102,14 +122,16 @@ def _number(value: Any) -> float | None:
     return out if out == out else None  # NaN is no score
 
 
-def _pages(source: Source, fetch: Fetch, headers: dict[str, str]) -> list[Any]:
+def _pages(source: Source, fetch: Fetch, headers: dict[str, str], deadline: float) -> list[Any]:
     """The rows of a JSON source, over every page."""
     rows: list[Any] = []
     for page in range(1, MAX_PAGES + 1):
         url = source.url
         if source.paging:
             url += ("&" if "?" in url else "?") + f"{source.paging[0]}={page}"
-        document = json.loads(fetch(url, headers))
+        if _clock() > deadline:
+            raise TimeoutError(f"timed out after {page - 1} page(s)")
+        document = json.loads(fetch(url, headers, deadline))
         items = _dotted(document, source.items) if source.items else document
         if not isinstance(items, list):
             raise ImportFailure(f"{source.items or 'the document'} is not a list")
@@ -270,12 +292,14 @@ def import_sources(
                 out["sources"][name] = {**out["sources"].get(name, {}), "status": "failed"}
                 continue
             headers[source.api_key_header] = key
+        # One budget for the whole source, every page included.
+        deadline = _clock() + scores.settings.refresh_timeout_s
         try:
             if source.format == "csv_zip":
-                archive = zipfile.ZipFile(io.BytesIO(fetch(source.url, headers)))
+                archive = zipfile.ZipFile(io.BytesIO(fetch(source.url, headers, deadline)))
                 payload: Any = (archive, _metadata(archive, source))
             else:
-                payload = _pages(source, fetch, headers)
+                payload = _pages(source, fetch, headers, deadline)
         except Exception as exc:  # noqa: BLE001 - one source's failure must not lose the others
             report.errors[name] = f"{type(exc).__name__}: {exc}"[:300]
             out["sources"][name] = {**out["sources"].get(name, {}), "status": "failed"}

@@ -36,9 +36,11 @@ class Fetch:
     def __init__(self, **by_url: bytes | list[bytes]) -> None:
         self.by_url = by_url
         self.calls: list[tuple[str, dict[str, str]]] = []
+        self.deadlines: list[float] = []
 
-    def __call__(self, url: str, headers: dict[str, str]) -> bytes:
+    def __call__(self, url: str, headers: dict[str, str], deadline: float) -> bytes:
         self.calls.append((url, headers))
+        self.deadlines.append(deadline)
         for prefix, body in self.by_url.items():
             if url.startswith(prefix.replace("_", ".")):
                 if isinstance(body, list):
@@ -267,3 +269,48 @@ def test_a_keyed_source_over_plain_http_is_refused_before_any_fetch(tmp_path, mo
     fetch = Fetch()
     report = import_sources(config, load_scores(config), fetch, now=NOW)
     assert "https" in report.errors["api"] and fetch.calls == []
+
+
+class Clock:
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def __call__(self) -> float:
+        return self.now
+
+
+def test_a_source_has_refresh_timeout_s_for_all_its_pages_and_fails_with_timed_out(tmp_path, monkeypatch):
+    import llm_router.scores_import as scores_import
+
+    monkeypatch.setenv("TEST_BENCH_KEY", "k")
+    clock = Clock()
+    monkeypatch.setattr(scores_import, "_clock", clock)
+    page = json.dumps({"data": [{"name": "acme-large (high)", "i": 50.0}], "more": True}).encode()
+
+    class Slow(Fetch):
+        def __call__(self, url, headers, deadline):
+            clock.now += 20.0  # each page takes 20 s; the source has 30
+            return super().__call__(url, headers, deadline)
+
+    bench = {"description": "i", "requirements": {"reasoning": 1.0}, "scale": 0.01, "data": {"source": "api", "score": "i"}}
+    config, _ = setup(tmp_path, {"index": bench})
+    fetch = Slow(**{"https://api_test": [page] * 10})
+    report = import_sources(config, load_scores(config), fetch, now=NOW)
+    assert fetch.deadlines[0] == 1000.0 + 30.0 and len(fetch.calls) == 2
+    assert "timed out" in report.errors["api"] and "index" not in imported(tmp_path)["benchmarks"]
+
+
+def test_a_trickling_response_is_cut_at_the_deadline(monkeypatch):
+    import llm_router.scores_import as scores_import
+
+    clock = Clock()
+    monkeypatch.setattr(scores_import, "_clock", clock)
+
+    class Trickle:
+        def read(self, n=-1):
+            clock.now += 10.0
+            return b"x"
+
+    with pytest.raises(TimeoutError):
+        scores_import._read(Trickle(), deadline=1025.0)
+    assert clock.now == 1030.0

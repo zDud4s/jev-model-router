@@ -73,7 +73,7 @@ def _sse(chunk: dict[str, Any]) -> str:
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
 
-def _benchmark_scores(config: Config, fetch: Callable[[str, dict[str, str]], bytes] | None) -> Any:
+def _benchmark_scores(config: Config, fetch: Callable[[str, dict[str, str], float], bytes] | None) -> Any:
     """The benchmark evidence for discovered cards, refreshed when stale. None: cards are the profiles alone."""
     caps = config.router.capabilities
     if caps is None or caps.benchmarks is None:
@@ -101,7 +101,7 @@ def create_app(
     router: Router | None = None,
     verifier: Verifier | None = None,
     catalog_check: Callable[[Config], Any] | None = None,
-    benchmark_fetch: Callable[[str, dict[str, str]], bytes] | None = None,
+    benchmark_fetch: Callable[[str, dict[str, str], float], bytes] | None = None,
 ) -> FastAPI:
     """Build the app. Every collaborator is injectable, which is how tests avoid the network."""
 
