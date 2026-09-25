@@ -21,6 +21,7 @@ import json
 import os
 import re
 import statistics
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -67,13 +68,19 @@ class _PrivateHeaders(urllib.request.HTTPRedirectHandler):
 
 
 def _read(response: Any, deadline: float) -> bytes:
-    """The body, read in chunks so a server that trickles is cut at the deadline, not per socket read."""
+    """The body, checked against the deadline after every socket read.
+
+    `read1` returns after at most one read of the socket, so a server that
+    trickles bytes is cut at the first byte past the deadline; `read(n)` would
+    keep reading, each read with a fresh socket timeout, until n bytes or EOF.
+    """
+    read = getattr(response, "read1", None) or response.read
     chunks: list[bytes] = []
     size = 0
     while True:
         if _clock() > deadline:
             raise TimeoutError("timed out")
-        chunk = response.read(_CHUNK)
+        chunk = read(_CHUNK)
         if not chunk:
             return b"".join(chunks)
         chunks.append(chunk)
@@ -94,6 +101,35 @@ def http_fetch(timeout: float) -> Fetch:
             return _read(response, deadline)
 
     return fetch
+
+
+def _within(fetch: Fetch, url: str, headers: dict[str, str], deadline: float) -> bytes:
+    """`fetch`, given up at `deadline` whatever it is blocked on (DNS, a connect, a socket read).
+
+    The fetch runs in a daemon thread. One still running at the deadline is
+    abandoned: its result is dropped, and it writes nothing, so it can race with
+    nothing. `http_fetch` ends such a thread soon after, at its next read of the body.
+    """
+    left = deadline - _clock()
+    if left <= 0:
+        raise TimeoutError("timed out")
+    result: list[bytes] = []
+    error: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            result.append(fetch(url, headers, deadline))
+        except BaseException as exc:  # noqa: BLE001 - handed to the caller's thread
+            error.append(exc)
+
+    worker = threading.Thread(target=run, name="benchmarks-fetch", daemon=True)
+    worker.start()
+    worker.join(left)
+    if worker.is_alive():
+        raise TimeoutError("timed out")
+    if error:
+        raise error[0]
+    return result[0]
 
 
 @dataclass
@@ -139,7 +175,7 @@ def _pages(source: Source, fetch: Fetch, headers: dict[str, str], deadline: floa
             url += ("&" if "?" in url else "?") + f"{source.paging[0]}={page}"
         if _clock() > deadline:
             raise TimeoutError(f"timed out after {page - 1} page(s)")
-        document = json.loads(fetch(url, headers, deadline))
+        document = json.loads(_within(fetch, url, headers, deadline))
         items = _dotted(document, source.items) if source.items else document
         if not isinstance(items, list):
             raise ImportFailure(f"{source.items or 'the document'} is not a list")
@@ -318,7 +354,7 @@ def import_sources(
         deadline = _clock() + scores.settings.refresh_timeout_s
         try:
             if source.format == "csv_zip":
-                archive = zipfile.ZipFile(io.BytesIO(fetch(source.url, headers, deadline)))
+                archive = zipfile.ZipFile(io.BytesIO(_within(fetch, source.url, headers, deadline)))
                 payload: Any = (archive, _metadata(archive, source))
             else:
                 payload = _pages(source, fetch, headers, deadline)

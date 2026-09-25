@@ -393,3 +393,28 @@ def test_check_catalog_reports_dominance_as_text_and_json(tmp_path, monkeypatch,
     cli.main(["-c", path, "check", "--catalog", "--json"])
     body = json.loads(capsys.readouterr().out)
     assert "dominated" in body and body["unused_level_caps"] == []
+
+
+def test_startup_returns_within_the_refresh_budget_when_a_fetch_hangs(tmp_path, capsys, backend_factory):
+    import threading
+    import time
+
+    release = threading.Event()
+
+    def hang(url, headers, deadline):
+        release.wait(10)
+        return b""
+
+    body = {"sources": {"hub": SOURCES["hub"]}, "benchmarks": {
+        **BENCHES, "hubbed": {"description": "d", "requirements": {"reasoning": 1.0},
+                              "data": {"source": "hub", "table": "t.csv", "score": "Score"}}}, "points": POINTS}
+    config = _app_config(tmp_path, body, refresh_timeout_s=0.3)
+    try:
+        start = time.monotonic()
+        app = create_app(config, backend_factory=backend_factory, log=RequestLog(":memory:"),
+                         catalog_check=lambda c: REPORT, benchmark_fetch=hang)
+        assert time.monotonic() - start < 2.0
+        assert "import failed for hub, keeping its previous points: TimeoutError: timed out" in capsys.readouterr().err
+        assert "cli:acme-large@high" in app.state.config.router.capabilities.cards  # served on the evidence on disk
+    finally:
+        release.set()

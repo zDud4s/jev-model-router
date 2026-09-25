@@ -5,6 +5,7 @@ from __future__ import annotations
 import csv
 import io
 import json
+import time
 import zipfile
 from datetime import datetime, timezone
 
@@ -409,3 +410,61 @@ def test_where_compares_numbers_as_numbers_and_words_without_case(tmp_path, monk
     config, _ = setup(tmp_path, {"index": bench})
     import_sources(config, load_scores(config), Fetch(**{"https://api_test": doc}), now=NOW)
     assert [p["model"] for p in imported(tmp_path)["benchmarks"]["index"]["points"]] == ["acme-large (high)"]
+
+
+def _trickle_server(interval: float, count: int):
+    """A loopback server that promises `count` bytes and sends one every `interval` seconds."""
+    import socket
+    import threading
+
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+
+    def serve() -> None:
+        try:
+            conn, _ = listener.accept()
+            with conn:
+                conn.recv(65536)
+                conn.sendall(f"HTTP/1.1 200 OK\r\nContent-Length: {count}\r\n\r\n".encode())
+                for _ in range(count):
+                    time.sleep(interval)
+                    conn.sendall(b"x")
+        except OSError:
+            pass  # the client gave up: the point of the test
+
+    threading.Thread(target=serve, daemon=True).start()
+    return listener, f"http://127.0.0.1:{listener.getsockname()[1]}/data"
+
+
+def test_a_server_trickling_bytes_over_loopback_is_cut_at_the_deadline():
+    from llm_router.scores_import import _clock, http_fetch
+
+    listener, url = _trickle_server(0.05, 60)  # 3 s of bytes, each well inside the socket timeout
+    try:
+        start = time.monotonic()
+        with pytest.raises(TimeoutError):
+            http_fetch(5.0)(url, {}, _clock() + 0.4)
+        assert time.monotonic() - start < 1.0
+    finally:
+        listener.close()
+
+
+def test_a_fetch_that_hangs_is_abandoned_at_the_source_deadline(tmp_path):
+    import threading
+
+    release = threading.Event()
+
+    def hang(url, headers, deadline):
+        release.wait(10)
+        return b""
+
+    config, path = setup(tmp_path, {"code": CODE})
+    config = parse_config(raw_config(benchmarks={"path": str(path), "refresh_timeout_s": 0.3}))
+    try:
+        start = time.monotonic()
+        report = import_sources(config, load_scores(config), hang, now=NOW)
+        assert time.monotonic() - start < 1.0
+        assert "timed out" in report.errors["hub"]
+    finally:
+        release.set()
