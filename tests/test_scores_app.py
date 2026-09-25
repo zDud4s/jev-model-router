@@ -453,3 +453,35 @@ def test_startup_returns_within_the_refresh_budget_when_a_fetch_hangs(tmp_path, 
         assert "cli:acme-large@high" in app.state.config.router.capabilities.cards  # served on the evidence on disk
     finally:
         release.set()
+
+
+def test_a_benchmarks_file_that_is_not_utf8_is_a_config_error_naming_it(tmp_path, monkeypatch, capsys):
+    from llm_router.config import ConfigError
+    from llm_router.scores import load_scores
+
+    path = _cli_config(tmp_path, monkeypatch, CURATED)
+    (tmp_path / "b.yaml").write_bytes(b"points: [\xff\xfe]\n")
+    with pytest.raises(ConfigError, match="b.yaml"):
+        load_scores(cli.load_config(path))
+    assert cli.main(["-c", path, "benchmarks", "check"]) == 2
+    assert "b.yaml" in capsys.readouterr().err
+
+
+def test_a_benchmarks_file_that_cannot_be_read_is_a_config_error_naming_it(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    from llm_router.config import ConfigError
+    from llm_router.scores import load_scores
+
+    path = _cli_config(tmp_path, monkeypatch, CURATED)
+    config = cli.load_config(path)
+    real = Path.read_text
+
+    def denied(self, *args, **kwargs):
+        if self.name == "b.yaml":
+            raise PermissionError(13, "Permission denied")
+        return real(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", denied)
+    with pytest.raises(ConfigError, match="b.yaml.*Permission denied"):
+        load_scores(config)

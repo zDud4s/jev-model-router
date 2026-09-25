@@ -313,6 +313,10 @@ def read_curated(config: Config) -> tuple[Path, Any]:
         return path, yaml.safe_load(path.read_text(encoding="utf-8")) or {}
     except yaml.YAMLError as exc:
         raise ConfigError(f"{path}: not valid YAML: {exc}") from None
+    except UnicodeDecodeError as exc:
+        raise ConfigError(f"{path}: not UTF-8 text: {exc}") from None
+    except OSError as exc:
+        raise ConfigError(f"{path}: cannot be read: {exc}") from None
 
 
 def load_scores(config: Config) -> Scores | None:
