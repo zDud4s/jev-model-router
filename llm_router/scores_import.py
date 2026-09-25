@@ -329,6 +329,9 @@ def import_sources(
             summary.benchmarks.append(key)
             out["benchmarks"][key] = {"source": name, "fetched_at": stamp, **metas[key], "points": points}
         out["sources"][name] = {"fetched_at": stamp, "rows": summary.rows, "status": "ok"}
+    if not any(s.benchmarks for s in report.sources.values()):
+        # Nothing was imported: the last good import's time stands, so the next start tries again.
+        out["imported_at"] = previous.get("imported_at")
     write_json(path, out)
     return report
 

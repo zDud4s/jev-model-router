@@ -346,3 +346,19 @@ def test_an_unreadable_table_fails_only_its_benchmark(tmp_path):
     report = import_sources(config, load_scores(config), Fetch(**{"https://hub_test": buffer.getvalue()}), now=NOW)
     assert "UnicodeDecodeError" in report.errors["bad"]
     assert set(imported(tmp_path)["benchmarks"]) == {"code"}
+
+
+def test_a_refresh_where_every_source_failed_is_retried_at_the_next_start(tmp_path):
+    from datetime import timedelta
+
+    from llm_router.scores_import import refresh
+
+    config, _ = setup(tmp_path, {"code": CODE})
+    import_sources(config, load_scores(config),
+                   Fetch(**{"https://hub_test": zipped(code__csv=HUB_TABLE, meta__csv=META)}), now=NOW)
+    later = NOW + timedelta(days=2)
+    failing = Fetch()
+    assert refresh(config, load_scores(config), failing, now=later)[0]
+    assert imported(tmp_path)["imported_at"] == NOW.isoformat(timespec="seconds")  # not advanced
+    refresh(config, load_scores(config), failing, now=later + timedelta(minutes=1))
+    assert len(failing.calls) == 2  # still stale: tried again
