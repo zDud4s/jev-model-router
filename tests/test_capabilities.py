@@ -282,3 +282,17 @@ def test_success_can_be_asked_about_levels_other_than_the_cards():
     needs = {"reasoning": 0.9, "code": 0.9}
     assert r.success(needs, "mid", levels={"reasoning": 3, "code": 3}) == pytest.approx(r.success(needs, "top"))
     assert r._caps.cards["mid"].levels == {"reasoning": 2, "code": 2}  # the card is untouched
+
+
+def test_a_family_scale_fitted_for_a_hand_written_card_is_applied():
+    # A hand-written card has no family; calibrate --from-log keys its scale by the tier name.
+    needs = {"reasoning": 0.9, "code": 0.9}
+    fitted = router(Ask(), family_scales={"mid": 0.1})
+    assert fitted.success(needs, "mid") == pytest.approx(fitted.success(needs, "mid", scale=0.1))
+    assert fitted.success(needs, "top") == pytest.approx(fitted.success(needs, "top", scale=1.0))
+
+
+def test_a_tier_is_priced_at_what_it_bills_or_else_at_its_cards_list_price():
+    r = router(Ask())
+    assert (r.prices("mid").input, r.prices("mid").output) == (3.0, 15.0)
+    assert (r.prices("sub").input, r.prices("sub").output) == (5.0, 25.0)

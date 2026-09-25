@@ -288,13 +288,27 @@ class CapabilityRouter:
         card = self._caps.cards[tier]
         floor = self._caps.floor
         if scale is None:
-            scale = self._caps.family_scales.get(card.family or "", self._caps.miss_scale)
+            scale = self.scale_for(tier)
         table = card.levels if levels is None else levels
         p = 1.0
         for key, need in needs.items():
             strength = max(0.0, need - floor) / (1.0 - floor)
             p *= 1.0 - strength * min(1.0, scale * self._miss(table.get(key, 0.0)))
         return p
+
+    def family_key(self, tier: str) -> str:
+        """The key a family scale or a level cap is kept under: the profile glob, or the tier for a hand-written card."""
+        return self._caps.cards[tier].family or tier
+
+    def scale_for(self, tier: str, default: float | None = None) -> float:
+        """The tier's family scale if one is fitted, else `default` (the configured `miss_scale` when None)."""
+        fallback = self._caps.miss_scale if default is None else default
+        return self._caps.family_scales.get(self.family_key(tier), fallback)
+
+    def prices(self, tier_name: str) -> Prices:
+        """What a tier really bills wins; the card's list prices stand in where it bills nothing."""
+        tier = self._config.tier(tier_name)
+        return tier.prices if tier.prices.configured else self._caps.cards[tier_name].list_prices
 
     def _miss(self, level: float) -> float:
         """`miss` at a level between the table's points, linearly."""
@@ -306,12 +320,9 @@ class CapabilityRouter:
     def cost(self, tier_name: str, prompt_tokens: int) -> float:
         tier = self._config.tier(tier_name)
         card = self._caps.cards[tier_name]
-        # What a tier really bills wins; the card's list prices stand in where it
-        # bills nothing -- a subscription's quota, or a local model's machine.
         if tier.subscription and self.ledger.locked(tier.subscription):
             return math.inf  # answered 429: not available until the window turns
-        prices = tier.prices if tier.prices.configured else card.list_prices
-        return _usd(prices, prompt_tokens + card.input_overhead, card.output_tokens)
+        return _usd(self.prices(tier_name), prompt_tokens + card.input_overhead, card.output_tokens)
 
     async def decide(
         self, request: ChatCompletionRequest, candidates: list[str], *, also_failed: frozenset[str] = frozenset()
