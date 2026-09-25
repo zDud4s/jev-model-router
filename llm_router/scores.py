@@ -598,6 +598,11 @@ def parse_scores(
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         jev, fit = {}, Fit()
         errors.append(f"{sidecar_path}: {type(exc).__name__}: {exc}")
+    try:
+        status = {str(k): str(v.get("status", "")) for k, v in ((imported or {}).get("sources") or {}).items()}
+    except (AttributeError, TypeError, ValueError) as exc:
+        status = {}
+        errors.append(f"{imported_path}: sources: {type(exc).__name__}: {exc}")
     return Scores(
         sources=sources, efforts=efforts, keys=rules, benchmarks=benchmarks, points=tuple(kept),
         superseded=tuple(superseded), readings=readings,
@@ -606,7 +611,7 @@ def parse_scores(
         rho={b: 0.0 if b in scale.detached else min(1.0, n / FULL_LINKS) for b, n in link_counts.items()},
         links=link_counts, scale=scale,
         jev=jev, fit=fit, settings=settings, imported_at=(imported or {}).get("imported_at"),
-        imported_status={str(k): str(v.get("status", "")) for k, v in ((imported or {}).get("sources") or {}).items()},
+        imported_status=status,
         sidecar_path=sidecar_path, imported_path=imported_path, errors=tuple(errors),
     )
 

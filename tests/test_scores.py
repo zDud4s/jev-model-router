@@ -500,3 +500,12 @@ def test_a_benchmark_group_that_shares_no_model_with_the_main_scale_counts_for_n
     assert evidence_for(caps, scores, ("q1",), "high").coverage["niche"] == 0.0
     assert "benchmarks: not linked to the main scale (no model shared with it), counting for nothing: away, far" \
         in startup_lines(scores, caps, {})
+
+
+def test_an_unreadable_source_status_in_the_imported_file_is_an_error_about_that_file():
+    caps = caps_with()
+    raw = {"sources": HUB, "benchmarks": copy.deepcopy(HUBBED), "points": AROUND}
+    body = {**imported([{"model": "acme-large", "effort": "high", "score": 50}]), "sources": {"hub": "done"}}
+    scores = parse_scores(raw, caps, imported=body, imported_path="b.imported.json")
+    assert len(scores.errors) == 1 and scores.errors[0].startswith("b.imported.json: ")
+    assert scores.imported_status == {} and len(scores.points) == len(AROUND) + 1
