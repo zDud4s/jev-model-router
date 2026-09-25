@@ -486,3 +486,17 @@ def test_a_curated_effort_is_resolved_like_an_imported_one_and_an_unknown_label_
     _, scores = scored([pt("code", "m", "High", 50), pt("code", "n", "extra  high", 50), pt("code", "o", "turbo", 50)],
                        extra={"efforts": {"labels": {"extra high": "xhigh"}}})
     assert {p.model: p.effort for p in scores.points} == {"m": "high", "n": "xhigh", "o": "turbo"}
+
+
+def test_a_benchmark_group_that_shares_no_model_with_the_main_scale_counts_for_nothing():
+    from llm_router.scores_derive import startup_lines
+
+    benches = {**BENCHES, "far": {"description": "d", "requirements": {"niche": 1.0}},
+               "away": {"description": "d", "requirements": {}}}
+    island = [pt(b, f"q{i}", "high", 30 + 10 * i, origin="independent") for b in ("far", "away") for i in range(2)]
+    caps, scores = scored(THREE + island, benches)
+    assert scores.links["far"] == 2 and scores.rho["far"] == 0.0 and scores.rho["code"] == 1.0
+    assert scores.scale.detached == ("away", "far")
+    assert evidence_for(caps, scores, ("q1",), "high").coverage["niche"] == 0.0
+    assert "benchmarks: not linked to the main scale (no model shared with it), counting for nothing: away, far" \
+        in startup_lines(scores, caps, {})

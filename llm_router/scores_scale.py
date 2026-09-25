@@ -20,6 +20,12 @@ deterministic. The scale is then fixed so that the mean alpha_b is 1 and the
 mean beta_b/alpha_b is 0: ability 0 means 50% above chance on a benchmark of
 average difficulty, a reference the operator's choice of benchmarks sets rather
 than the crowd each import brings.
+
+Benchmarks are placed against each other only through the models they share,
+so a group of benchmarks that shares no linking model with the rest could only
+be placed by the priors. The scale is the largest connected group (most
+benchmarks, then most linking models, then the first name); the others are
+`detached` and read nothing from it.
 """
 
 from __future__ import annotations
@@ -49,6 +55,7 @@ class Scale:
     beta: dict[str, float]
     theta: dict[Node, float]  # only linking nodes
     rounds: int
+    detached: tuple[str, ...] = ()  # benchmarks with linking points outside the main group, sorted
 
     def ability(self, bench: str, y: float) -> float | None:
         """A score's ability on the shared scale, read through the benchmark's difficulty and spread."""
@@ -65,9 +72,37 @@ def linking(observations: list[Obs]) -> set[Node]:
     return {node for node, benches in seen.items() if len(benches) >= 2}
 
 
+def groups(observations: list[Obs]) -> list[tuple[frozenset[str], int]]:
+    """(benchmarks, linking nodes) per connected group of the benchmark <-> linking node graph, main one first."""
+    links = linking(observations)
+    parent: dict[object, object] = {}
+
+    def find(x: object) -> object:
+        while parent.setdefault(x, x) != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for o in observations:
+        if o.node in links:
+            parent[find(("bench", o.bench))] = find(("node", o.node))
+    members: dict[object, tuple[set[str], set[Node]]] = {}
+    for o in observations:
+        if o.node in links:
+            benches, nodes = members.setdefault(find(("bench", o.bench)), (set(), set()))
+            benches.add(o.bench)
+            nodes.add(o.node)
+    out = [(frozenset(b), len(n)) for b, n in members.values()]
+    return sorted(out, key=lambda g: (-len(g[0]), -g[1], sorted(g[0])))
+
+
 def fit_scale(observations: list[Obs]) -> Scale:
     links = linking(observations)
-    obs = sorted((o for o in observations if o.node in links), key=lambda o: (o.bench, repr(o.node)))
+    found = groups(observations)
+    main = found[0][0] if found else frozenset()
+    detached = tuple(sorted(b for g, _ in found[1:] for b in g))
+    obs = sorted((o for o in observations if o.node in links and o.bench in main),
+                 key=lambda o: (o.bench, repr(o.node)))
     by_node: dict[Node, list[Obs]] = {}
     by_bench: dict[str, list[Obs]] = {}
     for o in obs:
@@ -108,7 +143,7 @@ def fit_scale(observations: list[Obs]) -> Scale:
         shift = statistics.fmean(beta[b] / alpha[b] for b in alpha)
         theta = {n: t - shift for n, t in theta.items()}
         beta = {b: beta[b] - shift * alpha[b] for b in alpha}
-    return Scale(alpha, beta, theta, rounds)
+    return Scale(alpha, beta, theta, rounds, detached)
 
 
-__all__ = ["Obs", "Scale", "fit_scale", "linking"]
+__all__ = ["Obs", "Scale", "fit_scale", "groups", "linking"]

@@ -250,6 +250,9 @@ def startup_lines(scores: Scores, caps: CapabilitiesConfig, served: dict[str, tu
     unread = [b for b in scores.benchmarks if b not in base_weights(scores, caps)]
     if unread:
         lines.append(f"benchmarks: unread (run `llm-router benchmarks read`): {', '.join(unread)}")
+    if scores.scale.detached:
+        lines.append("benchmarks: not linked to the main scale (no model shared with it), counting for nothing: "
+                     + ", ".join(scores.scale.detached))
     if ambiguous:
         lines.append(f"benchmarks: ambiguous model key(s), used for no tier: {', '.join(sorted(ambiguous))}")
     if scores.keys.keep_dates:

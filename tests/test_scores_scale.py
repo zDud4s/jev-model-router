@@ -32,3 +32,18 @@ def test_models_seen_on_one_benchmark_only_do_not_move_its_scale():
     crowd = [Obs("b1", (f"weak-{i}", None), -3.0, 1.0) for i in range(20)]
     assert fit_scale(obs + crowd) == fit_scale(obs)
     assert fit_scale(obs + crowd).ability("b1", -3.0) is not None  # still read through b1's scale
+
+
+def test_only_the_largest_linked_group_of_benchmarks_is_the_scale():
+    # {b1, b2} and {b3, b4} share no model: nothing places one pair against the other.
+    main = [Obs(b, (f"m{i}", None), 0.3 * i - s, 1.0) for b, s in (("b1", 0.0), ("b2", 0.5)) for i in range(6)]
+    island = [Obs(b, (f"n{i}", None), 0.2 * i, 1.0) for b in ("b3", "b4") for i in range(3)]
+    fitted = fit_scale(main + island)
+    assert set(fitted.alpha) == {"b1", "b2"} and fitted.detached == ("b3", "b4")
+    assert fitted.ability("b3", 0.0) is None
+    assert fitted == fit_scale(main + island[::-1])  # order-independent
+    # A tie in benchmarks goes to the group with more linking models, then to the first name.
+    assert fit_scale(main[:6] + main[6:] + [Obs(b, (f"n{i}", None), 0.1, 1.0) for b in ("b3", "b4")
+                                            for i in range(7)]).detached == ("b1", "b2")
+    even = [Obs(b, (f"n{i}", None), 0.2 * i, 1.0) for b in ("b3", "b4") for i in range(6)]
+    assert fit_scale(main + even).detached == ("b3", "b4")

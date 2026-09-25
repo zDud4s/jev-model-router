@@ -602,7 +602,9 @@ def parse_scores(
         sources=sources, efforts=efforts, keys=rules, benchmarks=benchmarks, points=tuple(kept),
         superseded=tuple(superseded), readings=readings,
         slots={(p.benchmark, key_of[p.model], p.effort): p for p in kept},
-        rho={b: min(1.0, n / FULL_LINKS) for b, n in link_counts.items()}, links=link_counts, scale=scale,
+        # A benchmark off the main group is not placed against the others: unlinked, whatever its own links.
+        rho={b: 0.0 if b in scale.detached else min(1.0, n / FULL_LINKS) for b, n in link_counts.items()},
+        links=link_counts, scale=scale,
         jev=jev, fit=fit, settings=settings, imported_at=(imported or {}).get("imported_at"),
         imported_status={str(k): str(v.get("status", "")) for k, v in ((imported or {}).get("sources") or {}).items()},
         sidecar_path=sidecar_path, imported_path=imported_path, errors=tuple(errors),
