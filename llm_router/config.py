@@ -333,6 +333,64 @@ _DEFAULT_THINKING = ("reasoning", "debugging", "math", "ambiguity", "precision")
 
 
 @dataclass(frozen=True)
+class BenchmarksConfig:
+    """Where the benchmark evidence lives, and how it becomes a level. See `scores.py`."""
+
+    path: str
+    # The level at ability 0 (50% above chance on a benchmark of average
+    # difficulty) and the levels per unit of ability. None: the line through the
+    # profiles' own levels, so the evidence reorders models without moving their
+    # average or spread; `benchmarks fit` then moves it by offsets.
+    a: float | None = None
+    k: float | None = None
+    # The profile's weight in the blend, in evidence units: a level is
+    # C/(C + profile_weight) measured and the rest profile. Small, because a
+    # written guess is weak next to a measured point.
+    profile_weight: float = 0.25
+    # A vendor-reported point's evidence, relative to an independent one.
+    vendor_weight: float = 0.5
+    # Startup runs `benchmarks import` when the import is older than this. None:
+    # only on command.
+    refresh_hours: float | None = 24.0
+    refresh_timeout_s: float = 30.0
+
+
+def _parse_benchmarks(raw: Any) -> BenchmarksConfig | None:
+    if raw is None:
+        return None
+    where = "router.capabilities.benchmarks"
+    if not isinstance(raw, dict):
+        raise ConfigError(f"{where} must be a mapping")
+    extra = set(raw) - {"path", "a", "k", "profile_weight", "vendor_weight", "refresh_hours", "refresh_timeout_s"}
+    if extra:
+        raise ConfigError(f"{where}: unknown fields {sorted(extra)}")
+    if not raw.get("path"):
+        raise ConfigError(f"{where}.path is required")
+    try:
+        a = None if raw.get("a") is None else float(raw["a"])
+        k = None if raw.get("k") is None else float(raw["k"])
+        weight = float(raw.get("profile_weight", 0.25))
+        vendor = float(raw.get("vendor_weight", 0.5))
+        refresh = None if raw.get("refresh_hours", 24.0) is None else float(raw.get("refresh_hours", 24.0))
+        timeout = float(raw.get("refresh_timeout_s", 30.0))
+    except (TypeError, ValueError) as exc:
+        raise ConfigError(f"{where}: {exc}") from None
+    if a is not None and not 0.0 <= a <= 3.0:
+        raise ConfigError(f"{where}.a must be in [0, 3], got {a}")
+    if k is not None and not 0.1 <= k <= 4.0:
+        raise ConfigError(f"{where}.k must be in [0.1, 4], got {k}")
+    if weight <= 0:
+        raise ConfigError(f"{where}.profile_weight must be positive, got {weight}")
+    if not 0.0 < vendor <= 1.0:
+        raise ConfigError(f"{where}.vendor_weight must be in (0, 1], got {vendor}")
+    if refresh is not None and refresh <= 0:
+        raise ConfigError(f"{where}.refresh_hours must be positive or null, got {refresh}")
+    if timeout <= 0:
+        raise ConfigError(f"{where}.refresh_timeout_s must be positive, got {timeout}")
+    return BenchmarksConfig(str(raw["path"]), a, k, weight, vendor, refresh, timeout)
+
+
+@dataclass(frozen=True)
 class DiscoverSource:
     """A provider whose every served model, at every effort it takes, becomes a tier."""
 
@@ -462,6 +520,9 @@ class CapabilitiesConfig:
     # Per-family `miss_scale`, fitted by `calibrate --from-log` from verified
     # outcomes. A family listed here ignores the global `miss_scale`.
     family_scales: dict[str, float] = field(default_factory=dict)
+    # Benchmark evidence that derives discovered cards' levels. None: cards are
+    # the profiles and the effort rule alone.
+    benchmarks: BenchmarksConfig | None = None
 
     @classmethod
     def parse(cls, raw: Any, tiers: dict[str, "TierConfig"], must_serve: Any) -> "CapabilitiesConfig":
@@ -470,7 +531,7 @@ class CapabilitiesConfig:
         unknown = set(raw) - {
             "jev_tier", "requirements", "cards", "target", "miss", "floor", "subscriptions", "max_packet_chars",
             "discover", "profiles", "fallback_profile", "effort_rules", "thinking", "miss_scale", "max_effort",
-            "rule", "failure", "family_scales",
+            "rule", "failure", "family_scales", "benchmarks",
         }
         if unknown:
             raise ConfigError(f"unknown router.capabilities fields: {sorted(unknown)}")
@@ -602,6 +663,7 @@ class CapabilitiesConfig:
             rule=rule,
             failure=failure,
             family_scales=family_scales,
+            benchmarks=_parse_benchmarks(raw.get("benchmarks")),
         )
 
 
