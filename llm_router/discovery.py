@@ -26,6 +26,8 @@ from dataclasses import dataclass, replace
 
 from .catalog import CatalogReport, Offered, _older
 from .config import EFFORTS, CapabilitiesConfig, Config, DiscoverSource, ModelCard, ModelProfile, TierConfig
+from .scores import Scores
+from .scores_derive import DerivedCard, derive, effort_prior, line_for, served_keys
 
 
 @dataclass(frozen=True)
@@ -46,15 +48,17 @@ def profile_for(caps: CapabilitiesConfig, model: Offered) -> tuple[ModelProfile,
     return caps.fallback_profile, False
 
 
-def card_for(caps: CapabilitiesConfig, profile: ModelProfile, effort: str | None, source: DiscoverSource) -> ModelCard:
-    rule = caps.effort_rules.get(effort) if effort else None
-    levels = dict(profile.levels)
-    output = profile.output_tokens
-    if rule is not None:
-        for key in caps.thinking:
-            if key in levels:
-                levels[key] = min(3.0, max(0.0, levels[key] + rule.shift))
-        output = max(1, round(output * rule.output))
+def card_for(
+    caps: CapabilitiesConfig,
+    profile: ModelProfile,
+    effort: str | None,
+    source: DiscoverSource,
+    derived: DerivedCard | None = None,
+) -> ModelCard:
+    if derived is None:
+        levels, output = effort_prior(caps, profile, effort)
+    else:
+        levels, output = dict(derived.levels), derived.output_tokens
     return ModelCard(
         levels=levels,
         output_tokens=output,
@@ -80,12 +84,16 @@ def _usable(source: DiscoverSource, model: Offered, matched: bool, cli_version: 
     return True
 
 
-def expand(config: Config, report: CatalogReport) -> tuple[Config, list[Discovered], list[str]]:
+def expand(
+    config: Config, report: CatalogReport, scores: Scores | None = None
+) -> tuple[Config, list[Discovered], list[str]]:
     """The config with every discovered tier and card added.
 
     Returns (config, discovered tiers, models served on the fallback profile).
     A (backend, model, effort) an explicit tier already covers is not added
-    twice: the explicit tier and its card win.
+    twice: the explicit tier and its card win. With `scores`, every card it
+    builds is derived from benchmark evidence (see `scores_derive.py`), on one
+    (a, k) line fitted across all of them.
     """
     caps = config.router.capabilities
     if caps is None or not caps.discover:
@@ -95,6 +103,9 @@ def expand(config: Config, report: CatalogReport) -> tuple[Config, list[Discover
     explicit = {(t.backend, t.model, t.effort) for t in config.tiers.values()}
     found: list[Discovered] = []
     unprofiled: list[str] = []
+    # (tier, model ids, effort, profile, source): cards are built once all are known,
+    # because the line from ability to level is fitted across every one of them.
+    pending: list[tuple[str, tuple[str, ...], str | None, ModelProfile, DiscoverSource]] = []
     for name, source in caps.discover.items():
         served = report.discovered.get(name)
         if served is None:
@@ -128,7 +139,7 @@ def expand(config: Config, report: CatalogReport) -> tuple[Config, list[Discover
                     effort=effort,
                     subscription=source.subscription,
                 )
-                cards[tier_name] = card_for(caps, profile, effort, source)
+                pending.append((tier_name, (model.id, *model.aliases), effort, profile, source))
                 found.append(Discovered(tier_name, name, model.id, effort, profile.match if matched else "*fallback*"))
     # Explicit subscription/local tiers with no card of their own get one from
     # their profile too, so every served tier is weighed the same way.
@@ -140,10 +151,37 @@ def expand(config: Config, report: CatalogReport) -> tuple[Config, list[Discover
         model = served.models.get(tier.model) if served else None
         if source and model:
             profile, _ = profile_for(caps, model)
-            cards[tier_name] = card_for(caps, profile, tier.effort, source)
+            pending.append((tier_name, (model.id, *model.aliases), tier.effort, profile, source))
+    if scores is None:
+        for tier_name, _, effort, profile, source in pending:
+            cards[tier_name] = card_for(caps, profile, effort, source)
+    else:
+        keys, _ = served_keys(scores, {ids[0]: ids for _, ids, _, _, _ in pending})
+        line = line_for(caps, scores, [(keys[ids[0]], e, p) for _, ids, e, p, _ in pending])
+        for tier_name, ids, effort, profile, source in pending:
+            derived = derive(caps, scores, keys[ids[0]], effort, profile, line)
+            cards[tier_name] = card_for(caps, profile, effort, source, derived)
     new_caps = replace(caps, cards=cards)
     new_router = replace(config.router, capabilities=new_caps)
     return replace(config, tiers=tiers, router=new_router), found, unprofiled
 
 
-__all__ = ["Discovered", "card_for", "expand", "profile_for"]
+def model_ids(report: CatalogReport) -> dict[str, tuple[str, ...]]:
+    """Served model id -> every id a benchmark point may use for it."""
+    return {
+        model.id: (model.id, *model.aliases)
+        for served in report.discovered.values()
+        for model in served.models.values()
+    }
+
+
+def served_ids(found: list[Discovered], report: CatalogReport) -> dict[str, tuple[str, ...]]:
+    """`<source>:<model>` -> its ids, for every model that became a tier."""
+    out: dict[str, tuple[str, ...]] = {}
+    for f in found:
+        model = report.discovered[f.source].models[f.model]
+        out[f"{f.source}:{f.model}"] = (model.id, *model.aliases)
+    return out
+
+
+__all__ = ["Discovered", "card_for", "expand", "model_ids", "profile_for", "served_ids"]
