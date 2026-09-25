@@ -239,6 +239,8 @@ async def calibrate(
             if level is None:
                 conflicts.append(f"{where}, and even {req} at 0 does not get it there")
                 continue
+            # The value written (floored, so still under the line), checked and reported as written.
+            level = floor_cap(level)
             broken = [
                 (other, t) for other in results for t in other.sufficient
                 if router.family_key(t) == key

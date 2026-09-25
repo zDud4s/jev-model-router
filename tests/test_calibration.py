@@ -284,3 +284,12 @@ def test_a_block_form_family_scales_is_refused_not_corrupted(tmp_path):
     with pytest.raises(ConfigError, match="family_scales"):
         write_family_scales(path, {"mid": 0.4})
     assert path.read_text(encoding="utf-8") == text
+
+
+def test_a_cap_is_checked_and_reported_at_the_floored_value_that_is_written():
+    # write_level_caps floors to 3 places; protection and "routed after" must see that value, not a finer one.
+    from llm_router.calibration import floor_cap
+
+    _, _, cal = run(ANCHORS)
+    (_, _, _, _, new, _), = cal.results[1].capped
+    assert new == floor_cap(new) and cal.caps == {"mid": {"reasoning": new}}
