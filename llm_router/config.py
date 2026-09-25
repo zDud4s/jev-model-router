@@ -447,6 +447,8 @@ def _parse_level_caps(raw: Any, requirements: dict[str, str]) -> dict[str, dict[
         stray = set(ceilings) - set(requirements)
         if stray:
             raise ConfigError(f"{where}: unknown requirements {sorted(stray)}")
+        if any(isinstance(v, bool) for v in ceilings.values()):  # float(True) is 1.0: a typo, not a ceiling
+            raise ConfigError(f"{where}: ceilings must be numbers between 0 and 3")
         try:
             row = {str(k): float(v) for k, v in ceilings.items()}
         except (TypeError, ValueError):

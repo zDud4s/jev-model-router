@@ -313,8 +313,9 @@ def test_a_cap_lowers_a_hand_written_card_and_changes_the_fingerprint():
         ({"mid": {"speed": 1.0}}, "unknown requirements"),
         ({"mid": {"reasoning": 4}}, "between 0 and 3"),
         ({"*": {"reasoning": 1.0}}, "fallback profile"),
+        ({"mid": {"reasoning": True}}, "numbers"),
     ],
-    ids=["shape", "requirement", "range", "fallback"],
+    ids=["shape", "requirement", "range", "fallback", "boolean"],
 )
 def test_level_caps_that_would_mislead_are_refused(caps, message):
     with pytest.raises(ConfigError, match=message):
