@@ -187,10 +187,14 @@ def derive(
     effort: str | None,
     profile: ModelProfile,
     line: tuple[float, float],
+    weights: dict[str, dict[str, float]] | None = None,
 ) -> DerivedCard:
-    """A card's levels and output for (model, effort), from its evidence and its profile. Pure."""
+    """A card's levels and output for (model, effort), from its evidence and its profile. Pure.
+
+    `weights`: `benchmark_weights`, when the caller already has them for many cards.
+    """
     prior, fallback_output = effort_prior(caps, profile, effort)
-    ev = evidence_for(caps, scores, keys, effort)
+    ev = evidence_for(caps, scores, keys, effort, weights)
     levels = blend(ev, prior, caps.requirements, a=line[0], k=line[1], c0=scores.c0)
     return DerivedCard(
         levels=levels,

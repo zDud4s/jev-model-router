@@ -26,7 +26,7 @@ from dataclasses import dataclass, replace
 
 from .catalog import CatalogReport, Offered, _older
 from .config import EFFORTS, CapabilitiesConfig, Config, DiscoverSource, ModelCard, ModelProfile, TierConfig
-from .scores import Scores
+from .scores import Scores, benchmark_weights
 from .scores_derive import DerivedCard, derive, effort_prior, line_for, served_keys
 
 
@@ -157,9 +157,10 @@ def expand(
             cards[tier_name] = card_for(caps, profile, effort, source)
     else:
         keys, _ = served_keys(scores, {ids[0]: ids for _, ids, _, _, _ in pending})
-        line = line_for(caps, scores, [(keys[ids[0]], e, p) for _, ids, e, p, _ in pending])
+        weights = benchmark_weights(scores, caps)
+        line = line_for(caps, scores, [(keys[ids[0]], e, p) for _, ids, e, p, _ in pending], weights)
         for tier_name, ids, effort, profile, source in pending:
-            derived = derive(caps, scores, keys[ids[0]], effort, profile, line)
+            derived = derive(caps, scores, keys[ids[0]], effort, profile, line, weights)
             cards[tier_name] = card_for(caps, profile, effort, source, derived)
     new_caps = replace(caps, cards=cards)
     new_router = replace(config.router, capabilities=new_caps)

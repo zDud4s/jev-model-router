@@ -214,3 +214,24 @@ def test_a_snapshot_and_its_undated_id_served_apart_are_one_model_not_an_ambigui
     keys, ambiguous = served_keys(scores, {"cli:acme-large": ("acme-large",),
                                            "api:acme-large-20260101": ("acme-large-20260101",)})
     assert ambiguous == set() and keys["cli:acme-large"] == keys["api:acme-large-20260101"] == ("acme-large",)
+
+
+def test_expand_reads_the_benchmark_weights_once_and_derive_takes_them(monkeypatch):
+    import llm_router.discovery as discovery
+    import llm_router.scores_derive as scores_derive
+    from llm_router.scores import benchmark_weights
+    from test_scores import profile
+
+    caps, scores = scored(POINTS)
+    card = scores_derive.derive(caps, scores, ("acme-large",), "high", profile(caps), (2.0, 1.0), weights={})
+    assert card.coverage["reasoning"] == 0.0 and card.levels["reasoning"] == 2.0
+    calls = []
+
+    def counted(*args, **kwargs):
+        calls.append(1)
+        return benchmark_weights(*args, **kwargs)
+
+    monkeypatch.setattr(scores_derive, "benchmark_weights", counted)
+    monkeypatch.setattr(discovery, "benchmark_weights", counted, raising=False)
+    expand(parse_config(raw_config()), REPORT, scores)
+    assert len(calls) == 1
