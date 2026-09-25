@@ -25,7 +25,7 @@ import fnmatch
 from dataclasses import dataclass, replace
 
 from .catalog import CatalogReport, Offered, _older
-from .config import EFFORTS, CapabilitiesConfig, Config, DiscoverSource, ModelCard, ModelProfile, TierConfig
+from .config import EFFORTS, CapabilitiesConfig, Config, DiscoverSource, ModelCard, ModelProfile, TierConfig, capped
 from .scores import Scores, benchmark_weights
 from .scores_derive import DerivedCard, derive, effort_prior, line_for, served_keys
 
@@ -59,6 +59,7 @@ def card_for(
         levels, output = effort_prior(caps, profile, effort)
     else:
         levels, output = dict(derived.levels), derived.output_tokens
+    levels = capped(levels, caps.level_caps.get(profile.match))  # last: after the effort rule or the benchmark blend
     return ModelCard(
         levels=levels,
         output_tokens=output,
@@ -226,4 +227,15 @@ def served_ids(
     return out
 
 
-__all__ = ["Discovered", "card_for", "derived_tiers", "expand", "model_ids", "profile_for", "served_ids"]
+def unused_caps(config: Config) -> list[str]:
+    """`level_caps` keys no card has: not an error, since a model can leave the catalog."""
+    caps = config.router.capabilities
+    if caps is None:
+        return []
+    keys = {card.family or name for name, card in caps.cards.items()}
+    return sorted(set(caps.level_caps) - keys)
+
+
+__all__ = [
+    "Discovered", "card_for", "derived_tiers", "expand", "model_ids", "profile_for", "served_ids", "unused_caps",
+]

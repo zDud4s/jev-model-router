@@ -419,6 +419,36 @@ def _parse_levels(raw: Any, requirements: dict[str, str], where: str, default: f
     return levels
 
 
+def capped(levels: dict[str, float], ceilings: dict[str, float] | None) -> dict[str, float]:
+    """`levels` with each capped requirement lowered to its ceiling; a cap never raises a level."""
+    if not ceilings:
+        return levels
+    return {key: min(value, ceilings[key]) if key in ceilings else value for key, value in levels.items()}
+
+
+def _parse_level_caps(raw: Any, requirements: dict[str, str]) -> dict[str, dict[str, float]]:
+    if raw is None:
+        return {}
+    if not isinstance(raw, dict):
+        raise ConfigError("router.capabilities.level_caps must map a family to {requirement: ceiling}")
+    out: dict[str, dict[str, float]] = {}
+    for family, ceilings in raw.items():
+        where = f"router.capabilities.level_caps[{family!r}]"
+        if not isinstance(ceilings, dict):
+            raise ConfigError(f"{where} must map requirements to ceilings")
+        stray = set(ceilings) - set(requirements)
+        if stray:
+            raise ConfigError(f"{where}: unknown requirements {sorted(stray)}")
+        try:
+            row = {str(k): float(v) for k, v in ceilings.items()}
+        except (TypeError, ValueError):
+            raise ConfigError(f"{where}: ceilings must be numbers between 0 and 3") from None
+        if any(not 0 <= v <= 3 for v in row.values()):
+            raise ConfigError(f"{where}: ceilings must be between 0 and 3")
+        out[str(family)] = row
+    return out
+
+
 def _parse_profile(raw: Any, requirements: dict[str, str], where: str, match: str | None = None) -> ModelProfile:
     if not isinstance(raw, dict):
         raise ConfigError(f"{where} must be a mapping")
@@ -523,6 +553,10 @@ class CapabilitiesConfig:
     # Benchmark evidence that derives discovered cards' levels. None: cards are
     # the profiles and the effort rule alone.
     benchmarks: BenchmarksConfig | None = None
+    # family key (a profile's `match`, or a hand-written card's tier name) ->
+    # requirement -> the highest level any of its cards may have. Written by
+    # `calibrate --anchors` from `insufficient` anchors; applied last to every card.
+    level_caps: dict[str, dict[str, float]] = field(default_factory=dict)
 
     @classmethod
     def parse(cls, raw: Any, tiers: dict[str, "TierConfig"], must_serve: Any) -> "CapabilitiesConfig":
@@ -531,7 +565,7 @@ class CapabilitiesConfig:
         unknown = set(raw) - {
             "jev_tier", "requirements", "cards", "target", "miss", "floor", "subscriptions", "max_packet_chars",
             "discover", "profiles", "fallback_profile", "effort_rules", "thinking", "miss_scale", "max_effort",
-            "rule", "failure", "family_scales", "benchmarks",
+            "rule", "failure", "family_scales", "benchmarks", "level_caps",
         }
         if unknown:
             raise ConfigError(f"unknown router.capabilities fields: {sorted(unknown)}")
@@ -541,6 +575,7 @@ class CapabilitiesConfig:
         requirements = _jev_questions(raw, "requirements", tier="router.capabilities")
         if not requirements:
             raise ConfigError("router.capabilities.requirements is empty")
+        level_caps = _parse_level_caps(raw.get("level_caps"), requirements)
         discover = _parse_discover(raw.get("discover"))
         raw_cards = raw.get("cards") or {}
         if not isinstance(raw_cards, dict):
@@ -574,7 +609,7 @@ class CapabilitiesConfig:
                     "to weigh its quota"
                 )
             cards[name] = ModelCard(
-                levels=levels, output_tokens=output_tokens, input_overhead=input_overhead, list_prices=list_prices
+                levels=capped(levels, level_caps.get(name)), output_tokens=output_tokens, input_overhead=input_overhead, list_prices=list_prices
             )
         target = float(raw.get("target", 0.8))
         if not 0.0 < target <= 1.0:
@@ -664,6 +699,7 @@ class CapabilitiesConfig:
             failure=failure,
             family_scales=family_scales,
             benchmarks=_parse_benchmarks(raw.get("benchmarks")),
+            level_caps=level_caps,
         )
 
 

@@ -205,3 +205,20 @@ def test_an_effort_ceiling_keeps_the_levels_above_it_out_of_the_catalog():
     assert "claude:claude-haiku-4-5-20251001" in names
     with pytest.raises(ConfigError, match="max_effort"):
         parse_config(raw_config(max_effort="turbo"))
+
+
+from llm_router.discovery import unused_caps
+
+
+def test_a_cap_lowers_the_final_level_at_every_effort_and_never_raises_one():
+    config, _, _ = expanded(level_caps={"claude-opus-*": {"reasoning": 2.0, "niche": 3.0}})
+    cards = config.router.capabilities.cards
+    assert cards["claude:claude-opus-5-5@high"].levels["reasoning"] == 2.0   # 2.5 capped
+    assert cards["claude:claude-opus-5-5@max"].levels["reasoning"] == 2.0    # 2.9 capped
+    assert cards["claude:claude-opus-5-5@low"].levels["reasoning"] == pytest.approx(1.75)  # already below
+    assert cards["claude:claude-opus-5-5@high"].levels["niche"] == 2.5       # a cap of 3 raises nothing
+
+
+def test_a_cap_whose_family_has_no_card_is_reported_not_refused():
+    config, _, _ = expanded(level_caps={"retired-model": {"reasoning": 1.0}})
+    assert unused_caps(config) == ["retired-model"]

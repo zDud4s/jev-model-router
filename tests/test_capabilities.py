@@ -296,3 +296,23 @@ def test_a_tier_is_priced_at_what_it_bills_or_else_at_its_cards_list_price():
     r = router(Ask())
     assert (r.prices("mid").input, r.prices("mid").output) == (3.0, 15.0)
     assert (r.prices("sub").input, r.prices("sub").output) == (5.0, 25.0)
+
+
+def test_a_cap_lowers_a_hand_written_card_and_changes_the_fingerprint():
+    capped_router = router(Ask(), level_caps={"mid": {"reasoning": 1.0}})
+    assert capped_router._caps.cards["mid"].levels == {"reasoning": 1.0, "code": 2}
+    assert capped_router.fingerprint != router(Ask()).fingerprint
+
+
+@pytest.mark.parametrize(
+    "caps, message",
+    [
+        ("mid", "must map a family"),
+        ({"mid": {"speed": 1.0}}, "unknown requirements"),
+        ({"mid": {"reasoning": 4}}, "between 0 and 3"),
+    ],
+    ids=["shape", "requirement", "range"],
+)
+def test_level_caps_that_would_mislead_are_refused(caps, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_config(raw_config(level_caps=caps))

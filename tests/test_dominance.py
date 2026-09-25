@@ -43,7 +43,6 @@ def test_a_family_scale_can_take_dominance_away():
     assert "mid" not in found(family_scales={"cx": 3.0})
 
 
-@pytest.mark.skip(reason="level_caps: Task 3")
 def test_a_level_cap_can_take_dominance_away():
     assert found(level_caps={"sub": {"reasoning": 1.0}}) == {"mid": ["cx"]}
 

@@ -28,7 +28,7 @@ from pathlib import Path
 
 from .calibration import Outcome
 from .capabilities import CapabilityRouter
-from .config import Config
+from .config import Config, capped
 from .discovery import derived_tiers
 from .scores import Scores, base_weights, content_hash, fitted_scales, write_sidecar
 from .scores_derive import blend, combine, effort_prior, line_pairs, profile_line, readings_for
@@ -138,6 +138,7 @@ def fit(
         out = 0.0
         for t in subjects:
             levels = blend(evs[t], priors[t], caps.requirements, a=a, k=k, c0=scores.c0)
+            levels = capped(levels, caps.level_caps.get(caps.cards[t].family))  # the card the router would build
             for needs, passes, fails in trials[t]:
                 p = min(1 - _CLAMP, max(_CLAMP, router.success(needs, t, levels=levels)))
                 out += passes * math.log(p) + fails * math.log(1 - p)
