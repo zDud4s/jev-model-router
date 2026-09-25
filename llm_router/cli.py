@@ -411,7 +411,10 @@ def _benchmarks_check(config, scores) -> int:
     for key in scores.benchmarks:
         how, row = weights.get(key, ("unread", {}))
         links = scores.links.get(key, 0)
-        marker = "" if links >= 3 else (" [unlinked]" if links == 0 else " [thin]")
+        if key in scores.scale.detached:  # off the main scale: counts for nothing, however well linked
+            marker = " [detached]"
+        else:
+            marker = "" if links >= 3 else (" [unlinked]" if links == 0 else " [thin]")
         readings = [r for by_effort in scores.readings.get(key, {}).values() for r in by_effort.values()]
         models = len(scores.readings.get(key, {}))
         spread = (f"difficulty {scores.scale.beta[key] / scores.scale.alpha[key]:+.2f}, "

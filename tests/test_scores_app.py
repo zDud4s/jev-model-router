@@ -369,3 +369,18 @@ def test_benchmarks_check_prints_the_line_expand_uses_over_explicit_tiers_too(tm
     a, k = line_for(caps, scores, tiers)
     assert f"a={a:.2f} k={k:.2f}" in out
     assert "large: output_tokens" in out
+
+
+def test_benchmarks_check_marks_a_benchmark_detached_from_the_main_scale_whatever_its_links(
+        tmp_path, monkeypatch, capsys):
+    island = [pt(b, f"q{i}", "high", 30 + 10 * i, origin="independent") for b in ("far", "away") for i in range(3)]
+    main = POINTS + linked(pt("code", "extra-1", "high", 55))
+    benches = {**BENCHES, "far": {"description": "f", "requirements": {"reasoning": 1.0}},
+               "away": {"description": "a", "requirements": {"reasoning": 1.0}}}
+    path = _cli_config(tmp_path, monkeypatch, {"benchmarks": benches, "points": main + island})
+    assert cli.main(["-c", path, "benchmarks", "check"]) == 0
+    out = capsys.readouterr().out
+    lines = out.splitlines()
+    assert "far [detached]: 0 point(s), 0 model(s), 3 linking" in lines
+    assert any(line.startswith("away [detached]:") for line in lines)
+    assert any(line.startswith("code:") for line in lines)  # the main group is unmarked
