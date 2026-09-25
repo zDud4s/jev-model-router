@@ -235,3 +235,21 @@ def test_expand_reads_the_benchmark_weights_once_and_derive_takes_them(monkeypat
     monkeypatch.setattr(discovery, "benchmark_weights", counted, raising=False)
     expand(parse_config(raw_config()), REPORT, scores)
     assert len(calls) == 1
+
+
+def test_served_ids_cover_the_explicit_tiers_expand_derives_too(tmp_path, capsys, backend_factory):
+    raw = raw_config()
+    raw["tiers"]["small"] = {"backend": "claude_cli", "model": "acme-small", "base_url": "C:/bin/cli.exe"}
+    config = parse_config(raw)
+    _, found, _ = expand(config, REPORT)
+    assert "cli:acme-small" not in {f"{f.source}:{f.model}" for f in found}  # the explicit tier covers it
+    assert served_ids(found, REPORT, config)["cli:acme-small"] == ("acme-small",)
+    # At startup, a model served only through an explicit tier is named when it has no evidence.
+    body = {"benchmarks": BENCHES, "points": linked(pt("code", "acme-large", "high", 80), pt("code", "zeta-1", "high", 60))}
+    path = tmp_path / "b.yaml"
+    path.write_text(yaml.safe_dump(body), encoding="utf-8")
+    raw["router"]["capabilities"]["benchmarks"] = {"path": str(path)}
+    raw["catalog"] = {"check_on_start": True, "path": None}
+    create_app(parse_config(raw), backend_factory=backend_factory, log=RequestLog(":memory:"),
+               catalog_check=lambda c: REPORT)
+    assert "no evidence: cli:acme-small, cli:unknown-1" in capsys.readouterr().err

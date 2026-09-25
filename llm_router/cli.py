@@ -417,7 +417,7 @@ def _benchmarks_check(config, scores) -> int:
         print(f"\n{key}{marker}: {spread}{len(readings)} point(s), {models} model(s), {links} linking{info}")
         scale = f" x{scales[key]:.2f} fitted" if key in scales else ""
         print(f"  weights ({how}{scale}): " + (" ".join(f"{r}={w:.2f}" for r, w in row.items() if w > 0) or "none"))
-    served = served_ids(found, report)
+    served = served_ids(found, report, config)
     keys, _ = served_keys(scores, served)
     print("\nevidence per served model:")
     for name in sorted(served):

@@ -84,6 +84,28 @@ def _usable(source: DiscoverSource, model: Offered, matched: bool, cli_version: 
     return True
 
 
+def _explicit(
+    config: Config, report: CatalogReport
+) -> list[tuple[str, Offered, str | None, ModelProfile, DiscoverSource]]:
+    """(tier, served model, effort, profile, source) for each explicit tier whose card `expand` builds.
+
+    Explicit subscription/local tiers with no card of their own get one from
+    their profile too, so every served tier is weighed the same way.
+    """
+    caps = config.router.capabilities
+    assert caps is not None
+    out = []
+    for tier_name, tier in config.tiers.items():
+        if tier_name in caps.cards or not tier.can_serve:
+            continue
+        source = next((s for s in caps.discover.values() if s.backend == tier.backend), None)
+        served = report.discovered.get(source.name) if source else None
+        model = served.models.get(tier.model) if served else None
+        if source and model:
+            out.append((tier_name, model, tier.effort, profile_for(caps, model)[0], source))
+    return out
+
+
 def expand(
     config: Config, report: CatalogReport, scores: Scores | None = None
 ) -> tuple[Config, list[Discovered], list[str]]:
@@ -141,17 +163,7 @@ def expand(
                 )
                 pending.append((tier_name, (model.id, *model.aliases), effort, profile, source))
                 found.append(Discovered(tier_name, name, model.id, effort, profile.match if matched else "*fallback*"))
-    # Explicit subscription/local tiers with no card of their own get one from
-    # their profile too, so every served tier is weighed the same way.
-    for tier_name, tier in config.tiers.items():
-        if tier_name in cards or not tier.can_serve:
-            continue
-        source = next((s for s in caps.discover.values() if s.backend == tier.backend), None)
-        served = report.discovered.get(source.name) if source else None
-        model = served.models.get(tier.model) if served else None
-        if source and model:
-            profile, _ = profile_for(caps, model)
-            pending.append((tier_name, (model.id, *model.aliases), tier.effort, profile, source))
+    pending += [(t, (m.id, *m.aliases), e, p, s) for t, m, e, p, s in _explicit(config, report)]
     if scores is None:
         for tier_name, _, effort, profile, source in pending:
             cards[tier_name] = card_for(caps, profile, effort, source)
@@ -176,12 +188,22 @@ def model_ids(report: CatalogReport) -> dict[str, tuple[str, ...]]:
     }
 
 
-def served_ids(found: list[Discovered], report: CatalogReport) -> dict[str, tuple[str, ...]]:
-    """`<source>:<model>` -> its ids, for every model that became a tier."""
+def served_ids(
+    found: list[Discovered], report: CatalogReport, config: Config | None = None
+) -> dict[str, tuple[str, ...]]:
+    """`<source>:<model>` -> its ids, for every model that became a tier.
+
+    With `config` (the one given to `expand`, before it), the explicit tiers
+    whose cards `expand` derives count too: the same set of models it derives.
+    """
     out: dict[str, tuple[str, ...]] = {}
     for f in found:
         model = report.discovered[f.source].models[f.model]
         out[f"{f.source}:{f.model}"] = (model.id, *model.aliases)
+    caps = config.router.capabilities if config is not None else None
+    if caps is not None and caps.discover:
+        for _, model, _, _, source in _explicit(config, report):
+            out.setdefault(f"{source.name}:{model.id}", (model.id, *model.aliases))
     return out
 
 
