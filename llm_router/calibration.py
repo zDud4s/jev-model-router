@@ -145,12 +145,17 @@ def _blame(router: CapabilityRouter, result: AnchorResult, tier: str, levels: di
         return result.because, "because"
     caps = router._caps
     best, most = None, 0.0
+    needed, strongest = None, 0.0
     for req in caps.requirements:  # config order breaks ties
         strength = max(0.0, result.needs.get(req, 0.0) - caps.floor) / (1.0 - caps.floor)
         loss = strength * min(1.0, scale * router._miss(levels.get(req, 0.0)))
         if loss > most:
             best, most = req, loss
-    return best, "weakest link"
+        if strength > strongest:
+            needed, strongest = req, strength
+    # Every need on a level that misses nothing takes 0 off: blame the most needed requirement,
+    # whose cap moves it onto a level that does miss. None only when Jev read no need at all.
+    return (best or needed), "weakest link"
 
 
 def _cap_level(success_at, current: float, line: float) -> float | None:

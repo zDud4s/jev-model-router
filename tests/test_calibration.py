@@ -293,3 +293,12 @@ def test_a_cap_is_checked_and_reported_at_the_floored_value_that_is_written():
     _, _, cal = run(ANCHORS)
     (_, _, _, _, new, _), = cal.results[1].capped
     assert new == floor_cap(new) and cal.caps == {"mid": {"reasoning": new}}
+
+
+def test_a_need_on_a_level_that_misses_nothing_is_still_blamed_on_the_most_needed_requirement():
+    # At level 3 the table misses nothing, so every need takes 0 off: that is not "no need".
+    needs = {"reasoning": 0.5, "code": 0.9}
+    _, _, cal = run([{"task": "x", "insufficient": "top"}], needs=needs, miss=[0.9, 0.5, 0.2, 0.0])
+    assert not cal.conflicts
+    (_, _, req, old, new, how), = cal.results[0].capped
+    assert (req, old, how) == ("code", 3, "weakest link") and new < 3
