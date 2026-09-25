@@ -107,7 +107,9 @@ def create_app(
 
     # The catalog check runs first: discovered tiers must exist before the
     # backends, router and verifier that serve them are built.
-    catalog: dict[str, Any] = {"report": None, "unavailable": {}, "discovered": 0, "unprofiled": []}
+    # "configured" and "scores": what `expand` was given, kept for the tiers view.
+    catalog: dict[str, Any] = {"report": None, "unavailable": {}, "discovered": 0, "unprofiled": [],
+                               "configured": None, "scores": None}
     if config.catalog.check_on_start:
         from .catalog import startup_check
         from .discovery import expand
@@ -129,6 +131,7 @@ def create_app(
                     scores = None
                     config, found, unprofiled = expand(config, report, None)
                 catalog["discovered"] = len(found)
+                catalog["configured"], catalog["scores"] = configured, scores
                 catalog["unprofiled"] = unprofiled
                 print(f"catalog: {len(found)} tier(s) discovered", file=sys.stderr)
                 if unprofiled:
@@ -167,6 +170,16 @@ def create_app(
     # than a cascade of `if config.verification.enabled` checks.
     active_verifier: Verifier | None = verifier or build_verifier(config, backends, active_router)
     traces: TraceStore | None = TraceStore(config.trace.keep) if config.trace.enabled else None
+    tiers: dict[str, Any] = {"error": None, "global": None, "tiers": []}
+    if traces is not None:
+        from . import tiers_view
+
+        try:  # a report only: its failure must not change what is served
+            tiers = tiers_view.build(config, active_router, report=catalog["report"],
+                                     configured=catalog["configured"], scores=catalog["scores"])
+        except Exception as exc:  # noqa: BLE001
+            tiers["error"] = f"{type(exc).__name__}: {exc}"
+            print(f"tiers view failed: {tiers['error']}", file=sys.stderr)
 
     @asynccontextmanager
     async def lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -234,6 +247,11 @@ def create_app(
             from .routing_page import PAGE
 
             return PAGE
+
+        @app.get("/routing/tiers")
+        async def routing_tiers() -> dict[str, Any]:
+            """Every carded tier's levels, their sources and evidence, and what dominates it; built at startup."""
+            return tiers
 
         @app.get("/routing/traces")
         async def routing_traces(after: int = 0) -> dict[str, Any]:

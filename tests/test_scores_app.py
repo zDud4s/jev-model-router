@@ -485,3 +485,91 @@ def test_a_benchmarks_file_that_cannot_be_read_is_a_config_error_naming_it(tmp_p
     monkeypatch.setattr(Path, "read_text", denied)
     with pytest.raises(ConfigError, match="b.yaml.*Permission denied"):
         load_scores(config)
+
+
+# ---------------------------------------------------------------- the tiers view
+def _tiers(app) -> dict:
+    with TestClient(app) as client:
+        response = client.get("/routing/tiers")
+    assert response.status_code == 200
+    return response.json()
+
+
+def test_the_tiers_view_shows_each_level_its_source_evidence_and_the_profile_it_moved_from(tmp_path, backend_factory):
+    app = create_app(_app_config(tmp_path, CURATED), backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     catalog_check=lambda c: REPORT)
+    view = _tiers(app)
+    assert view["error"] is None
+    rows = {row["name"]: row for row in view["tiers"]}
+    assert set(rows) == set(app.state.config.router.capabilities.cards)
+    large = rows["cli:acme-large@high"]
+    assert (large["backend"], large["model"], large["effort"], large["family"]) == (
+        "claude_cli", "acme-large", "high", "acme-large")
+    assert large["prices"]["output"] == 25.0 and large["output_tokens"] > 0
+    reasoning = large["levels"]["reasoning"]
+    served = app.state.config.router.capabilities.cards["cli:acme-large@high"].levels["reasoning"]
+    assert reasoning["level"] == pytest.approx(served, abs=1e-3) and reasoning["profile_level"] == 2.0
+    assert reasoning["source"] in ("benchmark", "blended") and reasoning["evidence"] > 0
+    assert large["levels"]["niche"] == {"level": 2.0, "profile_level": 2.0, "source": "profile", "evidence": 0.0,
+                                        "cap": None, "capped": False}
+    assert rows["cli:unknown-1@high"]["levels"]["reasoning"]["source"] == "profile"
+    # Dominance, as the router computed it.
+    dominated = app.state.router.state()["dominated"]
+    assert dominated and all(rows[t]["dominated_by"] == by for t, by in dominated.items())
+    assert all(row["dominated_by"] == [] for name, row in rows.items() if name not in dominated)
+    g = view["global"]
+    assert g["requirements"] == ["reasoning", "niche"]
+    assert g["line"]["profile_weight"] == 0.25 and g["line"]["a"] is not None and g["line"]["k"] > 0
+    assert g["miss_scale"] == app.state.config.router.capabilities.miss_scale
+    assert g["evidence"]["imported_at"] is None and g["evidence"]["sources"] == []
+    assert set(g["evidence"]["benchmarks"]) == {"thin", "detached", "unlinked"}
+
+
+def test_the_tiers_view_without_benchmarks_is_the_profile_cards(tmp_path, backend_factory):
+    raw = raw_config()
+    del raw["router"]["capabilities"]["benchmarks"]
+    raw["catalog"] = {"check_on_start": True, "path": None}
+    app = create_app(parse_config(raw), backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     catalog_check=lambda c: REPORT)
+    view = _tiers(app)
+    rows = {row["name"]: row for row in view["tiers"]}
+    medium = rows["cli:acme-large@medium"]["levels"]["reasoning"]
+    assert medium["level"] == medium["profile_level"] == pytest.approx(1.7)
+    assert all(cell["source"] == "profile" and cell["evidence"] == 0.0
+               for row in rows.values() for cell in row["levels"].values())
+    assert view["global"]["line"] is None and view["global"]["evidence"] is None
+
+
+def test_the_tiers_view_marks_a_capped_requirement(tmp_path, backend_factory):
+    raw = raw_config(level_caps={"acme-large": {"reasoning": 1.2}})
+    del raw["router"]["capabilities"]["benchmarks"]
+    raw["catalog"] = {"check_on_start": True, "path": None}
+    app = create_app(parse_config(raw), backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     catalog_check=lambda c: REPORT)
+    rows = {row["name"]: row for row in _tiers(app)["tiers"]}
+    cell = rows["cli:acme-large@high"]["levels"]["reasoning"]
+    assert cell["level"] == 1.2 and cell["cap"] == 1.2 and cell["capped"] is True
+    assert rows["cli:acme-small"]["levels"]["reasoning"]["capped"] is False
+
+
+def test_a_failing_tiers_view_does_not_stop_startup(tmp_path, capsys, monkeypatch, backend_factory):
+    def broken(*args, **kwargs):
+        raise RuntimeError("bad view")
+
+    monkeypatch.setattr("llm_router.tiers_view.build", broken)
+    app = create_app(_app_config(tmp_path, CURATED), backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     catalog_check=lambda c: REPORT)
+    assert "tiers view failed: RuntimeError: bad view" in capsys.readouterr().err
+    with TestClient(app) as client:
+        view = client.get("/routing/tiers").json()
+        assert client.get("/healthz").status_code == 200
+    assert view["tiers"] == [] and "bad view" in view["error"]
+
+
+def test_the_tiers_view_is_off_with_the_traces(tmp_path, backend_factory):
+    raw = raw_config()
+    raw["trace"] = {"enabled": False}
+    app = create_app(parse_config(raw), backend_factory=backend_factory, log=RequestLog(":memory:"))
+    with TestClient(app) as client:
+        assert client.get("/routing/tiers").status_code == 404
+
