@@ -499,6 +499,33 @@ def normalised(score: float, baseline: float, ceiling: float) -> float:
     return min(1 - _EPS, max(_EPS, (score / 100 - baseline) / (ceiling - baseline)))
 
 
+def _bounds(
+    bench: Benchmark, meta: dict[str, float], where: str, errors: list[str]
+) -> tuple[float, float] | None:
+    """(baseline, ceiling): the curated value, else the imported one, else 0 and 1.
+
+    Imported bounds that are not finite or not in order (equal ones would divide
+    by zero, reversed ones would turn every score upside down) are dropped with
+    an error, and the curated values or the defaults are used instead. None only
+    if even those are out of order, and then the benchmark's points are skipped.
+    """
+    def resolve(meta: dict[str, float]) -> tuple[float, float]:
+        base = bench.baseline if bench.baseline is not None else meta.get("baseline", 0.0)
+        ceil = bench.ceiling if bench.ceiling is not None else meta.get("ceiling", 1.0)
+        return base, ceil
+
+    def valid(base: float, ceil: float) -> bool:
+        return math.isfinite(base) and math.isfinite(ceil) and base < ceil
+
+    base, ceil = resolve(meta)
+    if valid(base, ceil):
+        return base, ceil
+    fallback = resolve({})
+    errors.append(f"{where}: baseline {base} must be below ceiling {ceil}; "
+                  + ("using the curated values or 0 and 1" if valid(*fallback) else "its points are skipped"))
+    return fallback if valid(*fallback) else None
+
+
 def parse_scores(
     raw: Any,
     caps: CapabilitiesConfig,
@@ -536,7 +563,9 @@ def parse_scores(
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         from_import, meta = [], {}
         errors.append(f"{imported_path}: {type(exc).__name__}: {exc}")
-    everything = curated + from_import
+    bounds = {b: _bounds(entry, meta.get(b, {}), f"{imported_path}: benchmark {b!r}", errors)
+              for b, entry in benchmarks.items()}
+    everything = [p for p in curated + from_import if bounds[p.benchmark] is not None]
     rules = KeyRules(rules.date_suffixes, rules.aliases,
                      date_collisions(sorted({p.model for p in everything}), rules, efforts))
     key_of = {p.model: rules.key(p.model, efforts) for p in everything}
@@ -547,10 +576,7 @@ def parse_scores(
 
     obs: list[Obs] = []
     for p in kept:
-        b = benchmarks[p.benchmark]
-        base = b.baseline if b.baseline is not None else meta.get(p.benchmark, {}).get("baseline", 0.0)
-        ceil = b.ceiling if b.ceiling is not None else meta.get(p.benchmark, {}).get("ceiling", 1.0)
-        s = normalised(p.score, base, ceil)
+        s = normalised(p.score, *bounds[p.benchmark])
         q = 1.0 if p.origin == "independent" else settings.vendor_weight
         obs.append(Obs(p.benchmark, node(key_of[p.model], p.effort, p.benchmark), _logit(s), q * 4 * s * (1 - s)))
     scale = fit_scale(obs)

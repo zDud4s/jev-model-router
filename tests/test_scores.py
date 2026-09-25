@@ -448,3 +448,35 @@ def test_costs_count_for_output_tokens_even_on_a_benchmark_off_the_shared_scale(
                            pt("lore", "acme-large", "high", 55, cost_usd=4.0)])
     assert scores.links["lore"] == 0  # unlinked: no reading, but the costs are still published ratios
     assert card(caps, scores, "acme-large", "medium").output_tokens == 500  # 2000 x 0.25
+
+
+# ---------------------------------------------------------------- the imported file
+HUB = {"hub": {"format": "json", "url": "https://hub_test", "model": "name", "origin": "independent"}}
+HUBBED = {**BENCHES, "code": {**BENCHES["code"], "data": {"source": "hub"}}}
+# Every node links through `base`, so `code` is on the scale whatever the import holds.
+AROUND = linked(pt("code", "zeta-1", "high", 60, origin="independent"),
+                pt("code", "acme-small", "high", 40, origin="independent")) + [
+    pt("base", "acme-large", "high", 50, origin="independent")]
+
+
+def imported(rows: list[dict[str, Any]], bench: str = "code", **meta: Any) -> dict[str, Any]:
+    return {"imported_at": "2026-09-25T00:00:00+00:00",
+            "benchmarks": {bench: {"source": "hub", "points": rows, **meta}}}
+
+
+def from_hub(rows, benchmarks=None, **meta):
+    return scored(AROUND, benchmarks or HUBBED, imported=imported(rows, **meta), extra={"sources": HUB})
+
+
+def test_imported_bounds_that_divide_by_zero_or_invert_the_scale_are_dropped_with_an_error():
+    rows = [{"model": "acme-large", "effort": "high", "score": 62.5}]
+    _, scores = from_hub(rows, baseline=0.5, ceiling=0.5)
+    assert len(scores.errors) == 1 and "code" in scores.errors[0] and "baseline" in scores.errors[0]
+    assert scores.readings["code"]["acme-large"]["high"].u == pytest.approx(4 * 0.625 * 0.375)  # 0 and 1
+    # A curated baseline and an imported ceiling below it: the imported bounds go, the curated one stays.
+    benches = {**HUBBED, "code": {**HUBBED["code"], "baseline": 0.25}}
+    _, scores = from_hub(rows, benches, ceiling=0.2)
+    assert len(scores.errors) == 1
+    assert scores.readings["code"]["acme-large"]["high"].u == pytest.approx(1.0)  # (0.625 - 0.25) / 0.75 = 0.5
+    _, scores = from_hub(rows, baseline=float("nan"))
+    assert len(scores.errors) == 1 and scores.readings["code"]["acme-large"]["high"].u == pytest.approx(0.9375)
