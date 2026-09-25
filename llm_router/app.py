@@ -119,7 +119,15 @@ def create_app(
             if getattr(report, "discovered", None):
                 scores = _benchmark_scores(config, benchmark_fetch)
                 configured = config
-                config, found, unprofiled = expand(config, report, scores)
+                try:
+                    config, found, unprofiled = expand(config, report, scores)
+                except Exception as exc:  # noqa: BLE001 - the evidence broke: the profiles alone still route
+                    if scores is None:
+                        raise
+                    print(f"benchmarks: deriving cards failed, cards are the profiles alone: "
+                          f"{type(exc).__name__}: {exc}", file=sys.stderr)
+                    scores = None
+                    config, found, unprofiled = expand(config, report, None)
                 catalog["discovered"] = len(found)
                 catalog["unprofiled"] = unprofiled
                 print(f"catalog: {len(found)} tier(s) discovered", file=sys.stderr)
@@ -134,7 +142,11 @@ def create_app(
                     from .discovery import served_ids
                     from .scores_derive import startup_lines
 
-                    for line in startup_lines(scores, config.router.capabilities, served_ids(found, report, configured)):
+                    try:  # a report only: its failure must not change what is served
+                        lines = startup_lines(scores, config.router.capabilities, served_ids(found, report, configured))
+                    except Exception as exc:  # noqa: BLE001
+                        lines = [f"benchmarks: startup report failed: {type(exc).__name__}: {exc}"]
+                    for line in lines:
                         print(line, file=sys.stderr)
         except Exception as exc:  # noqa: BLE001 - a broken check must not stop the proxy
             print(f"catalog check failed, serving the configured tiers: {type(exc).__name__}: {exc}", file=sys.stderr)

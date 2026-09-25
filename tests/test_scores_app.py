@@ -146,6 +146,41 @@ def test_a_broken_benchmarks_file_does_not_stop_startup(tmp_path, capsys, backen
     assert app.state.config.router.capabilities.cards["cli:acme-large@high"].levels["reasoning"] == 2.0
 
 
+def test_expand_failing_on_the_evidence_falls_back_to_profile_only_cards(tmp_path, capsys, monkeypatch, backend_factory):
+    import llm_router.discovery as discovery
+
+    real = discovery.expand
+
+    def broken(config, report, scores=None):
+        if scores is not None:
+            raise RuntimeError("bad evidence")
+        return real(config, report)
+
+    monkeypatch.setattr(discovery, "expand", broken)
+    app = create_app(_app_config(tmp_path, CURATED), backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     catalog_check=lambda c: REPORT)
+    err = capsys.readouterr().err
+    assert "benchmarks: deriving cards failed, cards are the profiles alone: RuntimeError: bad evidence" in err
+    assert "catalog check failed" not in err
+    assert app.state.config.router.capabilities.cards["cli:acme-large@high"].levels["reasoning"] == 2.0
+
+
+def test_a_failing_startup_report_does_not_change_what_is_served(tmp_path, capsys, monkeypatch, backend_factory):
+    def broken(*args, **kwargs):
+        raise RuntimeError("bad report")
+
+    monkeypatch.setattr("llm_router.scores_derive.startup_lines", broken)
+    app = create_app(_app_config(tmp_path, CURATED), backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     catalog_check=lambda c: REPORT)
+    err = capsys.readouterr().err
+    assert "benchmarks: startup report failed: RuntimeError: bad report" in err
+    assert "catalog check failed" not in err
+    cards = app.state.config.router.capabilities.cards
+    assert cards["cli:acme-large@high"].levels["reasoning"] > cards["cli:acme-small"].levels["reasoning"]
+    with TestClient(app) as client:
+        assert client.get("/healthz").json()["catalog"]["discovered_tiers"] > 0
+
+
 # ---------------------------------------------------------------- command line
 from llm_router import cli  # noqa: E402
 
