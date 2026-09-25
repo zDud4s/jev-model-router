@@ -445,25 +445,49 @@ def _point(entry: Any, benchmarks: dict[str, Benchmark], efforts: EffortRules, w
     )
 
 
+def _finite(value: Any) -> float | None:
+    """The value as a number, or None when it is absent, NaN or infinite."""
+    if value is None:
+        return None
+    number = float(value)
+    return number if math.isfinite(number) else None
+
+
 def _imported_points(
-    imported: dict[str, Any], benchmarks: dict[str, Benchmark], sources: dict[str, Source]
+    imported: dict[str, Any], benchmarks: dict[str, Benchmark], sources: dict[str, Source], where: str,
+    errors: list[str],
 ) -> tuple[list[Point], dict[str, dict[str, float]]]:
-    """Points from the imported file, for benchmarks the curated file still maps; and each one's metadata."""
+    """Points from the imported file, for benchmarks the curated file still maps; and each one's metadata.
+
+    A benchmark whose block cannot be read loses its imported points, with an
+    error; the others are kept. A row with no finite score is skipped, and a
+    cost that is not finite is treated as unpublished.
+    """
     points: list[Point] = []
     meta: dict[str, dict[str, float]] = {}
     for bench, block in (imported.get("benchmarks") or {}).items():
-        entry = benchmarks.get(bench)
-        if entry is None or entry.data is None or entry.data.source != block.get("source"):
-            continue  # the curated file no longer asks for it
-        source = sources[entry.data.source]
-        meta[bench] = {k: float(block[k]) for k in ("baseline", "ceiling") if block.get(k) is not None}
-        for i, row in enumerate(block.get("points") or []):
-            points.append(Point(
-                benchmark=bench, model=str(row["model"]), effort=row.get("effort"), score=float(row["score"]),
-                cost_usd=_optional(row.get("cost_usd")), date=str(row.get("date") or ""),
-                source=source.cite or source.url, origin=source.origin, upstream=str(row.get("upstream") or ""),
-                imported=True, order=i,
-            ))
+        try:
+            entry = benchmarks.get(bench)
+            if entry is None or entry.data is None or entry.data.source != block.get("source"):
+                continue  # the curated file no longer asks for it
+            source = sources[entry.data.source]
+            found = {k: float(block[k]) for k in ("baseline", "ceiling") if block.get(k) is not None}
+            rows: list[Point] = []
+            for i, row in enumerate(block.get("points") or []):
+                score = _finite(row["score"])
+                if score is None:
+                    continue
+                rows.append(Point(
+                    benchmark=bench, model=str(row["model"]), effort=row.get("effort"), score=score,
+                    cost_usd=_finite(row.get("cost_usd")), date=str(row.get("date") or ""),
+                    source=source.cite or source.url, origin=source.origin, upstream=str(row.get("upstream") or ""),
+                    imported=True, order=i,
+                ))
+        except (AttributeError, KeyError, TypeError, ValueError) as exc:
+            errors.append(f"{where}: benchmark {bench!r}, its imported points are ignored: {type(exc).__name__}: {exc}")
+            continue
+        meta[bench] = found
+        points += rows
     return points, meta
 
 
@@ -561,7 +585,7 @@ def parse_scores(
         raise ConfigError("benchmarks file: 'points' must be a list")
     curated = [_point(e, benchmarks, efforts, f"points[{i}]", i) for i, e in enumerate(raw_points)]
     try:
-        from_import, meta = _imported_points(imported or {}, benchmarks, sources)
+        from_import, meta = _imported_points(imported or {}, benchmarks, sources, imported_path, errors)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         from_import, meta = [], {}
         errors.append(f"{imported_path}: {type(exc).__name__}: {exc}")

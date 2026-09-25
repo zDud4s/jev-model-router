@@ -509,3 +509,20 @@ def test_an_unreadable_source_status_in_the_imported_file_is_an_error_about_that
     scores = parse_scores(raw, caps, imported=body, imported_path="b.imported.json")
     assert len(scores.errors) == 1 and scores.errors[0].startswith("b.imported.json: ")
     assert scores.imported_status == {} and len(scores.points) == len(AROUND) + 1
+
+
+def test_a_bad_imported_row_drops_its_benchmarks_import_only_and_non_finite_numbers_are_skipped():
+    caps = caps_with()
+    benches = {**HUBBED, "lore": {**BENCHES["lore"], "data": {"source": "hub"}}}
+    raw = {"sources": HUB, "benchmarks": benches, "points": AROUND}
+    body = {"benchmarks": {
+        "code": {"source": "hub", "points": [{"model": "acme-large", "effort": "high", "score": 50},
+                                             {"model": "zeta-1", "effort": "high"}]},
+        "lore": {"source": "hub", "points": [
+            {"model": "acme-large", "effort": "high", "score": 50, "cost_usd": float("inf")},
+            {"model": "zeta-1", "effort": "high", "score": float("nan")},
+            {"model": "acme-small", "effort": "high", "score": 40, "cost_usd": 2.0}]}}}
+    scores = parse_scores(raw, caps, imported=body, imported_path="b.imported.json")
+    assert len(scores.errors) == 1 and "'code'" in scores.errors[0]
+    held = {(p.benchmark, p.model): p.cost_usd for p in scores.points if p.imported}
+    assert held == {("lore", "acme-large"): None, ("lore", "acme-small"): 2.0}
