@@ -386,3 +386,25 @@ def test_a_response_or_a_zip_member_over_the_size_cap_fails_with_an_error(tmp_pa
     report = import_sources(config, load_scores(config),
                             Fetch(**{"https://hub_test": zipped(code__csv=big, meta__csv=META)}), now=NOW)
     assert "1000" in report.errors["code"]
+
+
+def test_an_import_time_without_a_zone_or_not_a_string_is_stale_not_an_error():
+    from llm_router.scores_import import stale
+
+    assert stale("2026-09-25T11:00:00", 24, now=NOW)
+    assert stale(12345, 24, now=NOW)  # type: ignore[arg-type]
+    assert not stale("2026-09-25T11:00:00+00:00", 24, now=NOW)
+
+
+def test_where_compares_numbers_as_numbers_and_words_without_case(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_BENCH_KEY", "k")
+    doc = json.dumps({"data": [
+        {"name": "acme-large (high)", "i": 50.0, "v": 1.0, "ok": True},
+        {"name": "acme-small (high)", "i": 30.0, "v": 2, "ok": True},
+        {"name": "zeta-1 (high)", "i": 20.0, "v": 1, "ok": False},
+    ], "more": False}).encode()
+    bench = {"description": "i", "requirements": {"reasoning": 1.0}, "scale": 0.01,
+             "data": {"source": "api", "score": "i", "where": {"v": 1, "ok": True}}}
+    config, _ = setup(tmp_path, {"index": bench})
+    import_sources(config, load_scores(config), Fetch(**{"https://api_test": doc}), now=NOW)
+    assert [p["model"] for p in imported(tmp_path)["benchmarks"]["index"]["points"]] == ["acme-large (high)"]

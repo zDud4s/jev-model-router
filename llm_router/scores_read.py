@@ -52,12 +52,13 @@ async def read(config: Config, scores: Scores, ask: Ask) -> ReadReport:
         texts = list(bench.example_tasks[:MAX_EXAMPLES]) or [bench.description]
         try:
             readings = [await ask(_packet(text, caps), caps.requirements) for text in texts]
+            needs = {r: sum(float(x[r]) for x in readings) / len(readings) for r in caps.requirements}
         except Exception as exc:  # noqa: BLE001 - one benchmark's failure must not lose the others
             report.errors[key] = f"{type(exc).__name__}: {exc}"[:300]
             continue
         jev[key] = {
             "hash": digest,
-            "needs": {r: sum(x[r] for x in readings) / len(readings) for r in caps.requirements},
+            "needs": needs,
             "read_at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "jev_model": config.tier(caps.jev_tier).model,
         }

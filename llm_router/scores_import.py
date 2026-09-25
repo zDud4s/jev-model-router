@@ -172,6 +172,17 @@ def _field(meta_row: dict[str, str] | None, source: Source, name: str) -> float 
     return _number(meta_row.get(column)) if meta_row and column else None
 
 
+def _matches(value: Any, wanted: str) -> bool:
+    """A `where` test: numbers compare as numbers (YAML `1` is JSON `1.0`), anything else as text without case."""
+    if value is _MISSING:
+        return False
+    if not isinstance(value, bool):
+        a, b = _number(value), _number(wanted)
+        if a is not None and b is not None:
+            return a == b
+    return str(value).strip().lower() == wanted.strip().lower()
+
+
 def _date(value: Any, today: str) -> str:
     text = str(value or "")
     return text[:10] if re.match(r"\d{4}-\d{2}-\d{2}", text) else today
@@ -211,7 +222,7 @@ def _rows_for(bench: Benchmark, source: Source, payload: Any, today: str, scores
     scale = bench.scale if bench.scale is not None else meta.get("scale", 1.0)
     points, skipped = [], 0
     for row in rows:
-        if any(str(get(row, column)) != value for column, value in data.where.items()):
+        if not all(_matches(get(row, column), value) for column, value in data.where.items()):
             skipped += 1
             continue
         model = get(row, source.model)
@@ -350,8 +361,10 @@ def stale(imported_at: str | None, hours: float, now: datetime | None = None) ->
         return True
     try:
         then = datetime.fromisoformat(imported_at)
-    except ValueError:
+    except (TypeError, ValueError):
         return True
+    if then.tzinfo is None:
+        return True  # not written by the importer: import again rather than guess its zone
     return ((now or datetime.now(timezone.utc)) - then).total_seconds() > hours * 3600
 
 

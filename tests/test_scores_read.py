@@ -74,3 +74,10 @@ def test_a_jev_error_keeps_the_old_reading_and_the_others_are_still_written(tmp_
     side = json.loads((tmp_path / "b.derived.json").read_text(encoding="utf-8"))["jev"]
     assert side["code"]["needs"] == {"reasoning": 0.9, "niche": 0.1}  # the old one
     assert side["lore"]["needs"] == {"reasoning": 0.3, "niche": 0.3}
+
+
+def test_an_answer_missing_a_requirement_fails_only_its_benchmark(tmp_path):
+    config, _ = setup(tmp_path, "  code: {description: fix code}\n  lore: {description: know things}\n")
+    ask = Ask(answers=lambda i: {"reasoning": 0.5} if i == 0 else {"reasoning": 0.3, "niche": 0.3})
+    report = run(config, ask)
+    assert list(report.errors) == ["code"] and report.asked == ["lore"]
