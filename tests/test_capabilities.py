@@ -275,3 +275,10 @@ def test_a_backends_own_prompt_is_part_of_what_a_call_costs():
     cards = {**CAPS["cards"], "cx": {**CAPS["cards"]["cx"], "input_overhead": 4000}}
     r = router(Ask(EASY), cards=cards)
     assert r.cost("cx", 1000) == pytest.approx(((1000 + 4000) * 2.0 + 1500 * 10.0) / 1e6)
+
+
+def test_success_can_be_asked_about_levels_other_than_the_cards():
+    r = router(Ask())
+    needs = {"reasoning": 0.9, "code": 0.9}
+    assert r.success(needs, "mid", levels={"reasoning": 3, "code": 3}) == pytest.approx(r.success(needs, "top"))
+    assert r._caps.cards["mid"].levels == {"reasoning": 2, "code": 2}  # the card is untouched

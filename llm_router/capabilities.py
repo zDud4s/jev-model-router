@@ -281,15 +281,19 @@ class CapabilityRouter:
             json.dumps(spec, sort_keys=True).encode()
         ).hexdigest()[:12]
 
-    def success(self, needs: dict[str, float], tier: str, *, scale: float | None = None) -> float:
+    def success(
+        self, needs: dict[str, float], tier: str, *, scale: float | None = None, levels: dict[str, float] | None = None
+    ) -> float:
+        """Estimated success on `tier`. `scale` and `levels` stand in for the configured ones, for one answer."""
         card = self._caps.cards[tier]
         floor = self._caps.floor
         if scale is None:
             scale = self._caps.family_scales.get(card.family or "", self._caps.miss_scale)
+        table = card.levels if levels is None else levels
         p = 1.0
         for key, need in needs.items():
             strength = max(0.0, need - floor) / (1.0 - floor)
-            p *= 1.0 - strength * min(1.0, scale * self._miss(card.levels.get(key, 0.0)))
+            p *= 1.0 - strength * min(1.0, scale * self._miss(table.get(key, 0.0)))
         return p
 
     def _miss(self, level: float) -> float:
