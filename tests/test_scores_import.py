@@ -192,17 +192,23 @@ def test_an_alias_maps_a_display_name_and_two_rows_on_one_key_collapse(tmp_path,
     assert load_scores(config).key("zeta:4b") == "zeta-4b"
 
 
-def test_paging_stops_at_the_cap(tmp_path, monkeypatch):
+def test_paging_stops_at_the_cap_and_a_truncated_page_set_is_an_error_that_keeps_the_previous_points(
+        tmp_path, monkeypatch):
     from llm_router.scores_import import MAX_PAGES
 
     monkeypatch.setenv("TEST_BENCH_KEY", "k")
+    one = json.dumps({"data": [{"name": "acme-small (high)", "i": 40.0}], "more": False}).encode()
     endless = json.dumps({"data": [{"name": "acme-large (high)", "i": 50.0}], "more": True}).encode()
     bench = {"description": "i", "requirements": {"reasoning": 1.0}, "scale": 0.01,
              "data": {"source": "api", "score": "i"}}
     config, _ = setup(tmp_path, {"index": bench})
+    import_sources(config, load_scores(config), Fetch(**{"https://api_test": one}), now=NOW)
+    before = imported(tmp_path)["benchmarks"]["index"]
     fetch = Fetch(**{"https://api_test": [endless] * (MAX_PAGES + 5)})
-    import_sources(config, load_scores(config), fetch, now=NOW)
+    report = import_sources(config, load_scores(config), fetch, now=NOW)
     assert len(fetch.calls) == MAX_PAGES
+    assert str(MAX_PAGES) in report.errors["api"]
+    assert imported(tmp_path)["benchmarks"]["index"] == before
 
 
 def test_a_csv_zip_and_a_json_document_yield_the_same_points_for_the_same_data(tmp_path, monkeypatch):

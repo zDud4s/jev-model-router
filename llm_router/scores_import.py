@@ -144,8 +144,9 @@ def _pages(source: Source, fetch: Fetch, headers: dict[str, str], deadline: floa
         rows += items
         more = _dotted(document, source.paging[1]) if source.paging else _MISSING
         if more is _MISSING or not more:
-            break
-    return rows
+            return rows
+    # Some pages were never read: a partial set must not replace a full one.
+    raise ImportFailure(f"still more pages after {MAX_PAGES}; nothing from this source is used")
 
 
 def _table(archive: zipfile.ZipFile, name: str) -> list[dict[str, str]]:
