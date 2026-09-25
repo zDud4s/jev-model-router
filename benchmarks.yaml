@@ -21,6 +21,8 @@ sources:
     cite: "Epoch AI, Capabilities & Benchmarking, https://epoch.ai/benchmarks (CC BY 4.0)"
     metadata: {file: benchmark_metadata.csv, join: source_file, score: score_column, scale: scale,
                baseline: random_baseline, ceiling: score_ceiling}
+  # Needs an API key in the environment variable AA_API_KEY; without it this
+  # source is skipped with a warning and keeps its previous points.
   artificial-analysis:
     format: json
     url: https://artificialanalysis.ai/api/v2/language/models/free

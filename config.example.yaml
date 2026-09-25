@@ -94,6 +94,8 @@ router:
   #   # read onto one ability scale, and blended with the profile by the
   #   # evidence C behind each requirement: C/(C + profile_weight) measured.
   #   # a/k null: the line through the profiles' own levels.
+  #   # A source in benchmarks.yaml that needs a key names its environment
+  #   # variable with `api_key_env`; unset, that source is skipped with a warning.
   #   benchmarks: {path: benchmarks.yaml, profile_weight: 0.25, vendor_weight: 0.5, refresh_hours: 24}
   #   subscriptions:
   #     claude: {window_hours: 5}   # after a 429, off the table for this long

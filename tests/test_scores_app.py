@@ -266,3 +266,19 @@ def test_benchmarks_fit_write_with_no_outcome_on_a_derived_tier_writes_nothing(t
     assert cli.main(["-c", path, "benchmarks", "fit", "--db", str(db), "--write"]) == 0
     assert "nothing to fit" in capsys.readouterr().out
     assert not (tmp_path / "b.derived.json").exists()
+
+
+def test_a_source_without_its_key_is_skipped_with_a_warning_and_the_import_still_succeeds(tmp_path, monkeypatch, capsys):
+    monkeypatch.delenv("TEST_BENCH_KEY", raising=False)
+    table = [{"Model version": "acme-large_high", "Score": "0.8"}]
+    body = {"sources": SOURCES, "benchmarks": {
+        "hubbed": {"description": "d", "requirements": {"reasoning": 1.0},
+                   "data": {"source": "hub", "table": "t.csv", "score": "Score"}},
+        "keyed": {"description": "k", "requirements": {"reasoning": 1.0}, "data": {"source": "api", "score": "i"}}},
+        "points": []}
+    path = _cli_config(tmp_path, monkeypatch, body)
+    fetch = Fetch(**{"https://hub_test": zipped(t__csv=table, meta__csv=META)})
+    monkeypatch.setattr("llm_router.scores_import.http_fetch", lambda timeout: fetch)
+    assert cli.main(["-c", path, "benchmarks", "import"]) == 0
+    err = capsys.readouterr().err
+    assert "skipped: api" in err and "TEST_BENCH_KEY" in err and "failed" not in err

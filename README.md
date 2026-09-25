@@ -699,6 +699,13 @@ it gives. A new model needs no edit: it arrives with the next import. `benchmark
 learns from judged outcomes what each benchmark is worth; run it before
 `calibrate --from-log`, which runs before `calibrate --anchors`.
 
+A source that needs an API key names the environment variable that holds it with
+`api_key_env` (and the header with `api_key_header`, default `x-api-key`); the key is read
+from the environment and never written to any file. A source whose variable is not set is
+skipped with a warning, keeping its previous points, and the import still succeeds for the
+others. A keyed source must use `https`, and the key is not sent on a redirect to another
+host or scheme. In the shipped `benchmarks.yaml`, `artificial-analysis` needs `AA_API_KEY`.
+
 ## Read the log back
 
 ```bash

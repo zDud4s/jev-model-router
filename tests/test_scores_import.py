@@ -155,7 +155,8 @@ def test_a_missing_key_skips_only_its_source_and_a_missing_column_fails_only_its
     config, _ = setup(tmp_path, {"code": broken, "index": index, "lore": lore})
     report = import_sources(config, load_scores(config),
                             Fetch(**{"https://hub_test": zipped(code__csv=HUB_TABLE, meta__csv=META)}), now=NOW)
-    assert "TEST_BENCH_KEY" in report.errors["api"] and "Price" in report.errors["code"]
+    assert "TEST_BENCH_KEY" in report.skipped["api"] and "api" not in report.errors
+    assert "Price" in report.errors["code"]
     assert set(imported(tmp_path)["benchmarks"]) == {"lore"}
 
 

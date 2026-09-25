@@ -360,6 +360,8 @@ def _benchmarks_import(config, scores, args) -> int:
     for name, summary in sorted(report.sources.items()):
         print(f"{name}: {summary.rows} row(s) read, {summary.skipped} skipped, {summary.points} point(s) "
               f"in {len(summary.benchmarks)} benchmark(s)")
+    for name, why in sorted(report.skipped.items()):
+        print(f"skipped: {name}: {why} (its previous points are kept)", file=sys.stderr)
     for name, error in sorted(report.errors.items()):
         print(f"failed: {name}: {error} (its previous points are kept)", file=sys.stderr)
     print(f"written to {scores.imported_path}")

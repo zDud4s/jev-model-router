@@ -108,6 +108,8 @@ class SourceReport:
 class ImportReport:
     sources: dict[str, SourceReport] = field(default_factory=dict)
     errors: dict[str, str] = field(default_factory=dict)  # a source or a benchmark -> what went wrong
+    # A source whose key variable is not set: skipped, not failed (the operator may not use it).
+    skipped: dict[str, str] = field(default_factory=dict)
 
 
 def _dotted(row: Any, path: str) -> Any:
@@ -304,7 +306,7 @@ def import_sources(
         if source.api_key_env:
             key = os.environ.get(source.api_key_env)
             if not key:
-                report.errors[name] = f"environment variable {source.api_key_env} is not set; source skipped"
+                report.skipped[name] = f"environment variable {source.api_key_env} is not set"
                 out["sources"][name] = {**out["sources"].get(name, {}), "status": "no key"}
                 continue
             if urllib.parse.urlsplit(source.url).scheme.lower() != "https":
@@ -387,6 +389,8 @@ def refresh(config: Config, scores: Scores, fetch: Fetch | None = None, now: dat
             f"{name}: {s.points} point(s)" for name, s in sorted(report.sources.items())) + ")")
     for name, error in sorted(report.errors.items()):
         lines.append(f"benchmarks: import failed for {name}, keeping its previous points: {error}")
+    for name, why in sorted(report.skipped.items()):
+        lines.append(f"benchmarks: import skipped {name}, keeping its previous points: {why}")
     return True, lines
 
 
