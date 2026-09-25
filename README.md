@@ -688,6 +688,17 @@ scale from; `error` means the run broke for a reason that says nothing about the
 is not learnt from. `rate_limited` takes that subscription off the table until its window
 turns -- the router cannot see a 429 on a call it did not make.
 
+### Levels from benchmark evidence
+
+A profile is a guess at effort `high`. With `router.capabilities.benchmarks` set, each
+discovered card's levels come from measured results instead, per model and per effort:
+`llm-router benchmarks import` fetches the sources in `benchmarks.yaml` (sources that run the
+same benchmark on every vendor's models), `benchmarks read` asks Jev once what each benchmark
+measures, and `benchmarks check` shows the evidence behind every served model and the levels
+it gives. A new model needs no edit: it arrives with the next import. `benchmarks fit` then
+learns from judged outcomes what each benchmark is worth; run it before
+`calibrate --from-log`, which runs before `calibrate --anchors`.
+
 ## Read the log back
 
 ```bash

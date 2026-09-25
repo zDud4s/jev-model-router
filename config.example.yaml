@@ -89,6 +89,12 @@ router:
   #   # tiers a client resent as `failed_tiers`).
   #   miss_scale: 1.0
   #   family_scales: {}
+  #   # Benchmark evidence that derives discovered cards (see benchmarks.yaml):
+  #   # imported from sources that measure every vendor (`benchmarks import`),
+  #   # read onto one ability scale, and blended with the profile by the
+  #   # evidence C behind each requirement: C/(C + profile_weight) measured.
+  #   # a/k null: the line through the profiles' own levels.
+  #   benchmarks: {path: benchmarks.yaml, profile_weight: 0.25, vendor_weight: 0.5, refresh_hours: 24}
   #   subscriptions:
   #     claude: {window_hours: 5}   # after a 429, off the table for this long
   #   requirements:

@@ -17,3 +17,6 @@ llm-router.catalog.json
 .env
 classifier.json
 anchors.capabilities.yaml
+# Written by `benchmarks import|read|fit`; regenerable from benchmarks.yaml, the sources and the log.
+*.imported.json
+*.derived.json
