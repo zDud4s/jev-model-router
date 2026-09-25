@@ -109,7 +109,7 @@ def _build_parser() -> argparse.ArgumentParser:
         "calibrate",
         help="set miss_scale from anchors: tasks with a tier known to be (or not be) enough; asks Jev only",
     )
-    calibrate.add_argument("--anchors", help="YAML list of {task, packet?, sufficient?, insufficient?}")
+    calibrate.add_argument("--anchors", help="YAML list of {task, packet?, sufficient?, insufficient?, because?}")
     calibrate.add_argument(
         "--from-log", action="store_true",
         help="fit one scale per model family from judged outcomes in the request log (no calls at all)",
@@ -228,7 +228,7 @@ def _expanded(config):
 def _calibrate(config, args) -> int:
     import asyncio
 
-    from .calibration import calibrate, load_anchors, with_scale, write_scale
+    from .calibration import calibrate, load_anchors, with_caps, with_scale, write_level_caps, write_scale
     from .capabilities import CapabilityRouter
     from .schemas import ChatCompletionRequest
 
@@ -241,7 +241,7 @@ def _calibrate(config, args) -> int:
         print("calibrate needs --anchors or --from-log", file=sys.stderr)
         return 2
     try:
-        anchors = load_anchors(args.anchors)
+        anchors = load_anchors(args.anchors, config.router.capabilities.requirements)
     except ConfigError as exc:
         print(f"anchors: {exc}", file=sys.stderr)
         return 2
@@ -254,10 +254,10 @@ def _calibrate(config, args) -> int:
     async def run():
         router = CapabilityRouter(config)
         try:
-            scale, results, conflicts = await calibrate(config, anchors, router, margin=args.margin)
-            after = CapabilityRouter(with_scale(config, scale), ask=router._ask)
+            cal = await calibrate(config, anchors, router, margin=args.margin)
+            after = CapabilityRouter(with_caps(with_scale(config, cal.scale), cal.caps), ask=router._ask)
             candidates = [n for n, t in config.tiers.items() if t.can_serve]
-            for anchor, result in zip(anchors, results):
+            for anchor, result in zip(anchors, cal.results):
                 request = ChatCompletionRequest.model_validate({
                     "model": "auto", "messages": [{"role": "user", "content": anchor["task"]}],
                     **({"packet": anchor["packet"]} if anchor.get("packet") else {}),
@@ -266,28 +266,34 @@ def _calibrate(config, args) -> int:
                     return needs
                 after._ask = fixed
                 result.picked_after = (await after.decide(request, candidates)).tier
-            return scale, results, conflicts
+            return cal
         finally:
             await router.aclose()
 
     try:
-        scale, results, conflicts = asyncio.run(run())
+        cal = asyncio.run(run())
     except ConfigError as exc:
         print(f"anchors: {exc}", file=sys.stderr)
         return 2
-    for result in results:
+    for result in cal.results:
         print(f"\n{result.task[:90]}")
         print("  need: " + " ".join(f"{k}={v:.2f}" for k, v in result.needs.items()))
         for tier, (op, bound) in result.bounds.items():
             print(f"  {'enough' if op == '<=' else 'not enough'}: {tier}  -> scale {op} {bound:.3f}")
+        for _, family, req, old, new, how in result.capped:
+            print(f"  capped: {family} {req} {old:.2f} -> {new:.2f} ({how})")
         print(f"  routed after calibration: {result.picked_after}")
-    print(f"\nmiss_scale: {scale:.3f} (was {config.router.capabilities.miss_scale:.3f})")
-    for conflict in conflicts:
+    print(f"\nmiss_scale: {cal.scale:.3f} (was {config.router.capabilities.miss_scale:.3f})")
+    if cal.caps:
+        print("level_caps: " + json.dumps({f: {r: round(v, 3) for r, v in row.items()} for f, row in cal.caps.items()}))
+    for conflict in cal.conflicts:
         print(f"  conflict: {conflict}")
     if args.write:
-        write_scale(args.config, scale)
+        write_scale(args.config, cal.scale)
+        if cal.caps:
+            write_level_caps(args.config, cal.caps)  # a cap refused for breaking an anchor never got here
         print(f"written to {args.config}")
-    return 1 if conflicts else 0
+    return 1 if cal.conflicts else 0
 
 
 def _calibrate_from_log(config, args) -> int:

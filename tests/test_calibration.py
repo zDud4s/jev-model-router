@@ -158,3 +158,18 @@ def test_because_must_name_a_requirement_and_sit_on_an_insufficient_anchor(tmp_p
         load_anchors(path, {"reasoning": "?", "code": "?"})
     path.write_text("- task: x\n  insufficient: mid\n  because: code\n", encoding="utf-8")
     assert load_anchors(path, {"reasoning": "?", "code": "?"})[0]["because"] == "code"
+
+
+from llm_router.calibration import write_level_caps
+
+
+def test_level_caps_are_written_beside_family_scales_merged_lower_wins_and_comments_kept(tmp_path):
+    path = tmp_path / "c.yaml"
+    path.write_text("router:\n  capabilities:\n    # the table\n    miss: [0.9, 0.5, 0.2, 0.05]\n"
+                    "    family_scales: {}\n", encoding="utf-8")
+    write_level_caps(path, {"mid": {"reasoning": 0.3456}})
+    write_level_caps(path, {"mid": {"reasoning": 0.5, "code": 1.0}})
+    text = path.read_text(encoding="utf-8")
+    assert text.count("level_caps:") == 1 and "# the table" in text
+    assert '    level_caps: {"mid": {"code": 1.0, "reasoning": 0.345}}' in text  # floored, never rounded up
+    assert parse_config(raw_config(level_caps={"mid": {"reasoning": 0.345}})).router.capabilities.level_caps

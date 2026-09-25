@@ -396,7 +396,38 @@ def write_family_scales(path: str | Path, scales: dict[str, float]) -> None:
     target.write_text(text, encoding="utf-8")
 
 
+def write_level_caps(path: str | Path, level_caps: dict[str, dict[str, float]]) -> None:
+    """Merge `level_caps` into the config file (the lower ceiling wins), as one line beside `family_scales`.
+
+    Only the one-line flow form this writes is merged: a hand-written multi-line
+    `level_caps:` block is not read (`write_family_scales` has the same limit).
+    """
+    target = Path(path)
+    text = target.read_text(encoding="utf-8")
+    pattern = r"^(\s*)level_caps:(.*)$"
+    match = re.search(pattern, text, flags=re.M)
+    merged = merge_caps((yaml.safe_load(match.group(2)) or {}) if match else {}, level_caps)
+    # Floored, not rounded: a ceiling rounded up could put the tier back over the line.
+    # (+1e-9: 1.001 * 1000 is 1000.9999999999999 in floating point.)
+    row = {f: {r: math.floor(v * 1000 + 1e-9) / 1000 for r, v in sorted(reqs.items())} for f, reqs in sorted(merged.items())}
+    line = "level_caps: " + json.dumps(row)
+    if match:
+        text = text[: match.start()] + match.group(1) + line + text[match.end():]
+    else:
+        anchor = (re.search(r"^(\s*)family_scales:.*$", text, flags=re.M)
+                  or re.search(r"^(\s*)miss_scale:.*$", text, flags=re.M)
+                  or re.search(r"^(\s*)miss:\s*\[.*\]\s*$", text, flags=re.M))
+        if not anchor:
+            raise ConfigError(f"{path}: no `miss:` line under router.capabilities to put level_caps beside")
+        indent = anchor.group(1)
+        insert = (f"\n{indent}# Set by `llm-router calibrate --anchors` from insufficient anchors: a family's"
+                  f"\n{indent}# ceiling on one requirement, applied last to every card.\n{indent}{line}")
+        text = text[: anchor.end()] + insert + text[anchor.end():]
+    target.write_text(text, encoding="utf-8")
+
+
 __all__ = [
     "AnchorResult", "Calibration", "FamilyFit", "Outcome", "calibrate", "fit_family_scales", "load_anchors",
-    "log_outcomes", "merge_caps", "with_caps", "with_scale", "write_family_scales", "write_scale",
+    "log_outcomes", "merge_caps", "with_caps", "with_scale", "write_family_scales", "write_level_caps",
+    "write_scale",
 ]
