@@ -103,9 +103,11 @@ def test_the_kind_is_built_from_config():
         ({"cards": {"judge": {"levels": {"code": 3}}}}, "cannot answer"),
         ({"target": 0}, "target"),
         ({"miss": [0.9, 0.5]}, "four probabilities"),
+        ({"miss": [0.9, 0.2, 0.5, 0.05]}, "never rise"),
         ({"floor": 1.0}, "floor"),
     ],
-    ids=["jev-tier", "stray-level", "level-range", "no-list-prices", "judge-card", "target", "miss", "floor"],
+    ids=["jev-tier", "stray-level", "level-range", "no-list-prices", "judge-card", "target", "miss", "miss-order",
+         "floor"],
 )
 def test_a_card_or_setting_that_would_mislead_is_refused(change, message):
     with pytest.raises(ConfigError, match=message):

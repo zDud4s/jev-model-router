@@ -625,6 +625,9 @@ class CapabilitiesConfig:
         miss = tuple(float(v) for v in raw.get("miss", _DEFAULT_MISS))
         if len(miss) != 4 or any(not 0.0 <= v <= 1.0 for v in miss):
             raise ConfigError("router.capabilities.miss must be four probabilities, for levels 0..3")
+        if any(hi < lo for hi, lo in zip(miss, miss[1:])):
+            # A higher level must never miss more: the cap search in calibration assumes success rises with level.
+            raise ConfigError(f"router.capabilities.miss must never rise from level 0 to 3, got {list(miss)}")
         floor = float(raw.get("floor", 0.2))
         if not 0.0 <= floor < 1.0:
             raise ConfigError(f"router.capabilities.floor must be in [0, 1), got {floor}")
