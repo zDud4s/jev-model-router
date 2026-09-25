@@ -9,7 +9,7 @@ import asyncio
 
 import pytest
 
-from llm_router.calibration import calibrate, load_anchors, with_scale, write_scale
+from llm_router.calibration import Calibration, calibrate, load_anchors, with_caps, with_scale, write_scale
 from llm_router.config import ConfigError, parse_config
 from llm_router.capabilities import CapabilityRouter
 
@@ -18,9 +18,9 @@ from test_capabilities import Ask, raw_config
 HARD = {"reasoning": 0.9, "code": 0.9}
 
 
-def run(anchors, needs=HARD, margin=0.0, **caps):
+def run(anchors, needs=HARD, margin=0.0, ask=None, **caps) -> tuple:
     config = parse_config(raw_config(**caps))
-    router = CapabilityRouter(config, ask=Ask(needs))
+    router = CapabilityRouter(config, ask=ask or Ask(needs))
     return config, router, asyncio.run(calibrate(config, anchors, router, margin=margin))
 
 
@@ -34,29 +34,86 @@ def test_a_scale_below_one_makes_every_tier_more_likely():
 
 
 def test_a_sufficient_anchor_lowers_the_scale_until_that_tier_reaches_the_target():
-    config, router, (scale, results, conflicts) = run([{"task": "fix the bug", "sufficient": "mid"}])
+    config, router, cal = run([{"task": "fix the bug", "sufficient": "mid"}])
     assert router.success(HARD, "mid") < 0.8  # the priors alone say no
-    assert scale < 1.0 and not conflicts
-    assert router.success(HARD, "mid", scale=scale) == pytest.approx(0.8, abs=1e-6)
-    assert results[0].bounds["mid"][0] == "<="
+    assert cal.scale < 1.0 and not cal.conflicts
+    assert router.success(HARD, "mid", scale=cal.scale) == pytest.approx(0.8, abs=1e-6)
+    assert cal.results[0].bounds["mid"][0] == "<="
 
 
 def test_a_sufficient_tier_is_left_room_above_the_target():
-    _, router, (scale, _, _) = run([{"task": "fix the bug", "sufficient": "mid"}], margin=0.05)
-    assert router.success(HARD, "mid", scale=scale) == pytest.approx(0.85, abs=1e-6)
+    _, router, cal = run([{"task": "fix the bug", "sufficient": "mid"}], margin=0.05)
+    assert router.success(HARD, "mid", scale=cal.scale) == pytest.approx(0.85, abs=1e-6)
 
 
 def test_anchors_never_make_the_router_trust_models_less_than_the_priors():
-    _, _, (scale, _, _) = run([{"task": "trivial", "sufficient": "top"}], needs={"reasoning": 0.3, "code": 0.3})
-    assert scale == 1.0
+    _, _, cal = run([{"task": "trivial", "sufficient": "top"}], needs={"reasoning": 0.3, "code": 0.3})
+    assert cal.scale == 1.0
 
 
-def test_an_insufficient_anchor_the_scale_breaks_is_reported_not_hidden():
-    _, _, (scale, _, conflicts) = run([
-        {"task": "fix the bug", "sufficient": "cheap"},
-        {"task": "fix the bug", "insufficient": "mid"},
-    ])
-    assert conflicts and "mid" in conflicts[0]
+ANCHORS = [{"task": "fix the bug", "sufficient": "cheap"}, {"task": "fix it again", "insufficient": "mid"}]
+
+
+def after(config, cal):
+    return CapabilityRouter(with_caps(with_scale(config, cal.scale), cal.caps), ask=Ask(HARD))
+
+
+def test_a_violated_insufficient_anchor_is_fixed_by_capping_the_weakest_link():
+    config, router, cal = run(ANCHORS)
+    assert not cal.conflicts
+    (tier, family, req, old, new, how), = cal.results[1].capped
+    assert (tier, family, req, old, how) == ("mid", "mid", "reasoning", 2.0, "weakest link")  # a tie: config order
+    assert cal.caps == {"mid": {"reasoning": new}} and new < old
+    fixed = after(config, cal)
+    assert fixed.success(HARD, "mid") <= 0.8 and fixed.success(HARD, "cheap") >= 0.8 - 1e-9
+
+
+def test_because_overrides_the_weakest_link():
+    _, _, cal = run([ANCHORS[0], {**ANCHORS[1], "because": "code"}])
+    assert cal.results[1].capped[0][2] == "code" and cal.results[1].capped[0][5] == "because"
+
+
+def test_an_insufficient_tier_within_the_margin_of_the_target_is_a_violation():
+    needs = {"reasoning": 0.69, "code": 0.69}  # mid lands near 0.77: short of 0.8, not of 0.75
+    _, router, loose = run([{"task": "x", "insufficient": "mid"}], needs=needs, margin=0.0)
+    assert 0.75 < router.success(needs, "mid") < 0.8
+    assert not loose.results[0].capped
+    _, _, strict = run([{"task": "x", "insufficient": "mid"}], needs=needs, margin=0.05)
+    assert strict.results[0].capped and not strict.conflicts
+
+
+class ByTask:
+    """Answers with the needs of whichever task the packet carries."""
+
+    def __init__(self, table: dict[str, dict[str, float]]) -> None:
+        self.table = table
+
+    async def __call__(self, packet: str, questions: dict[str, str]) -> dict[str, float]:
+        needs = next(n for task, n in self.table.items() if task in packet)
+        return {k: needs.get(k, 0.0) for k in questions}
+
+
+def test_a_cap_that_would_break_a_sufficient_anchor_is_reported_and_not_kept():
+    # mid is enough for the harder ALPHA and not for the easier BETA, on the same
+    # requirement: only a cap on reasoning could satisfy BETA, and it breaks ALPHA.
+    ask = ByTask({"ALPHA": {"reasoning": 0.9, "code": 0.2}, "BETA": {"reasoning": 0.6, "code": 0.2}})
+    _, _, cal = run([{"task": "ALPHA job", "sufficient": "mid"}, {"task": "BETA job", "insufficient": "mid"}], ask=ask)
+    assert cal.caps == {} and not cal.results[1].capped
+    assert len(cal.conflicts) == 1 and "'ALPHA job'" in cal.conflicts[0] and "not capped" in cal.conflicts[0]
+
+
+def test_a_task_jev_read_no_need_in_stays_a_conflict():
+    _, _, cal = run([{"task": "x", "insufficient": "mid"}], needs={"reasoning": 0.1, "code": 0.1})
+    assert cal.caps == {} and "no need" in cal.conflicts[0]
+
+
+def test_a_second_run_over_the_same_anchors_changes_nothing():
+    config, _, first = run(ANCHORS)
+    capped_config = with_caps(with_scale(config, first.scale), first.caps)
+    router = CapabilityRouter(capped_config, ask=Ask(HARD))
+    second = asyncio.run(calibrate(capped_config, ANCHORS, router, margin=0.0))
+    assert second.scale == pytest.approx(first.scale) and second.caps == first.caps
+    assert not any(r.capped for r in second.results) and not second.conflicts
 
 
 def test_an_anchor_naming_an_unknown_tier_is_refused():

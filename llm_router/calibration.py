@@ -19,8 +19,17 @@ makes every tier more likely to succeed -- so each anchor bounds it:
 
 The scale kept is the largest one every `sufficient` anchor allows, capped at 1
 (anchors can make the router trust models more, never less than the priors on
-their own say). An `insufficient` anchor that this violates is reported as a
-conflict rather than silently won.
+their own say).
+
+An `insufficient` anchor that tier still reaches (above `target - margin`) is
+then enforced on ONE requirement. No scale can do it: the `sufficient` anchors
+often name the same family, and a scale moves every requirement at once. The
+requirement is the anchor's `because:`, or else the weakest link: the need
+that takes the most off the product. Its level is capped for the whole family
+at the highest value that brings the tier under the line. A cap that would
+break a `sufficient` anchor is not kept, and is reported instead. The scale
+comes first and the caps second. The scale only raises trust and a cap only
+lowers one level, so a second run over the same anchors changes nothing.
 
 Each anchor costs one Jev call; no destination model runs.
 """
@@ -37,7 +46,7 @@ from typing import Any
 import yaml
 
 from .capabilities import CapabilityRouter
-from .config import Config, ConfigError
+from .config import Config, ConfigError, capped
 from .schemas import ChatCompletionRequest
 
 
@@ -95,13 +104,79 @@ def _scale_bound(router: CapabilityRouter, needs: dict[str, float], tier: str, t
     return lo
 
 
+@dataclass
+class Calibration:
+    scale: float
+    caps: dict[str, dict[str, float]]  # every level cap: the config's, merged with the new ones (lower wins)
+    results: list[AnchorResult]
+    conflicts: list[str]
+
+
+def merge_caps(*layers: dict[str, dict[str, float]]) -> dict[str, dict[str, float]]:
+    out: dict[str, dict[str, float]] = {}
+    for layer in layers:
+        for family, row in layer.items():
+            for req, value in row.items():
+                held = out.setdefault(family, {}).get(req)
+                out[family][req] = value if held is None else min(held, value)
+    return out
+
+
+def with_caps(config: Config, level_caps: dict[str, dict[str, float]]) -> Config:
+    """The config with `level_caps` set and applied to every card, as parsing and discovery apply them."""
+    caps = config.router.capabilities
+    assert caps is not None
+    cards = {
+        name: replace(card, levels=capped(card.levels, level_caps.get(card.family or name)))
+        for name, card in caps.cards.items()
+    }
+    return replace(config, router=replace(config.router, capabilities=replace(caps, level_caps=level_caps, cards=cards)))
+
+
+def _blame(router: CapabilityRouter, result: AnchorResult, tier: str, levels: dict[str, float], scale: float):
+    """(requirement, how): the anchor's `because`, or the need that takes the most off the product."""
+    if result.because:
+        return result.because, "because"
+    caps = router._caps
+    best, most = None, 0.0
+    for req in caps.requirements:  # config order breaks ties
+        strength = max(0.0, result.needs.get(req, 0.0) - caps.floor) / (1.0 - caps.floor)
+        loss = strength * min(1.0, scale * router._miss(levels.get(req, 0.0)))
+        if loss > most:
+            best, most = req, loss
+    return best, "weakest link"
+
+
+def _cap_level(success_at, current: float, line: float) -> float | None:
+    """The highest level in [0, current] at which success is at or under `line`; None if even 0 is above it."""
+    if success_at(0.0) > line:
+        return None
+    lo, hi = 0.0, current
+    for _ in range(60):
+        mid = (lo + hi) / 2
+        if success_at(mid) <= line:
+            lo = mid
+        else:
+            hi = mid
+    return lo
+
+
 async def calibrate(
     config: Config, anchors: list[dict[str, Any]], router: CapabilityRouter, margin: float = 0.03
-) -> tuple[float, list[AnchorResult], list[str]]:
+) -> Calibration:
+    """Fit `miss_scale` from the `sufficient` anchors, then cap one requirement per violated `insufficient` one.
+
+    A known asymmetry: the `bounds` line (`_scale_bound`) is about the global
+    scale, while the capping uses the tier's fitted family scale when it has
+    one. For such a family the "not enough: ... scale >= s" line can disagree
+    with the capping verdict; the capping verdict is the one that holds.
+    """
     from .capabilities import build_packet
 
     caps = config.router.capabilities
     assert caps is not None
+    enough = min(0.999, caps.target + margin)
+    short = caps.target - margin
     results: list[AnchorResult] = []
     for anchor in anchors:
         request = ChatCompletionRequest.model_validate({
@@ -111,24 +186,58 @@ async def calibrate(
         })
         packet = build_packet(request, max_chars=caps.max_packet_chars)
         needs = await router._ask(packet, caps.requirements)
-        result = AnchorResult(anchor["task"], _tiers(anchor.get("sufficient")), _tiers(anchor.get("insufficient")), needs, {})
+        result = AnchorResult(anchor["task"], _tiers(anchor.get("sufficient")), _tiers(anchor.get("insufficient")),
+                              needs, {}, because=anchor.get("because"))
         for tier in result.sufficient + result.insufficient:
             if tier not in caps.cards:
                 raise ConfigError(f"anchor names {tier!r}, which is not a carded tier (is it discovered?)")
-            op = "<=" if tier in result.sufficient else ">="
-            target = min(0.999, caps.target + margin) if op == "<=" else caps.target
-            result.bounds[tier] = (op, _scale_bound(router, needs, tier, target))
+            if tier in result.sufficient:
+                result.bounds[tier] = ("<=", _scale_bound(router, needs, tier, enough))
+            else:
+                result.bounds[tier] = (">=", _scale_bound(router, needs, tier, short))
         results.append(result)
 
     uppers = [s for r in results for op, s in r.bounds.values() if op == "<="]
     scale = min([1.0, *uppers])
-    conflicts = [
-        f"{tier} should fall short on {r.task[:60]!r}, but reaches the target at scale {scale:.3f}"
-        for r in results
-        for tier, (op, s) in r.bounds.items()
-        if op == ">=" and scale <= s
-    ]
-    return scale, results, conflicts
+
+    new: dict[str, dict[str, float]] = {}
+
+    def levels(tier: str, trial: dict[str, float] | None = None) -> dict[str, float]:
+        row = {**new.get(router.family_key(tier), {}), **(trial or {})}
+        return capped(caps.cards[tier].levels, row)
+
+    def p(needs: dict[str, float], tier: str, trial: dict[str, float] | None = None) -> float:
+        return router.success(needs, tier, scale=router.scale_for(tier, scale), levels=levels(tier, trial))
+
+    conflicts: list[str] = []
+    for result in results:
+        for tier in result.insufficient:
+            if p(result.needs, tier) <= short:
+                continue
+            where = f"{tier} should fall short on {result.task[:60]!r}"
+            key = router.family_key(tier)
+            req, how = _blame(router, result, tier, levels(tier), router.scale_for(tier, scale))
+            if req is None:
+                conflicts.append(f"{where}, but Jev read no need in it to cap")
+                continue
+            now = levels(tier).get(req, 0.0)
+            level = _cap_level(lambda v: p(result.needs, tier, {req: v}), now, short)
+            if level is None:
+                conflicts.append(f"{where}, and even {req} at 0 does not get it there")
+                continue
+            broken = [
+                (other, t) for other in results for t in other.sufficient
+                if router.family_key(t) == key
+                and p(other.needs, t) >= enough - 1e-9 > p(other.needs, t, {req: level})
+            ]
+            if broken:
+                other, t = broken[0]
+                conflicts.append(f"{where}, but capping {key} {req} at {level:.2f} would break {t} on "
+                                 f"{other.task[:60]!r}, which is enough; not capped")
+                continue
+            new.setdefault(key, {})[req] = level
+            result.capped.append((tier, key, req, now, level, how))
+    return Calibration(scale, merge_caps(caps.level_caps, new), results, conflicts)
 
 
 def with_scale(config: Config, scale: float) -> Config:
@@ -288,6 +397,6 @@ def write_family_scales(path: str | Path, scales: dict[str, float]) -> None:
 
 
 __all__ = [
-    "AnchorResult", "FamilyFit", "Outcome", "calibrate", "fit_family_scales", "load_anchors", "log_outcomes",
-    "with_scale", "write_family_scales", "write_scale",
+    "AnchorResult", "Calibration", "FamilyFit", "Outcome", "calibrate", "fit_family_scales", "load_anchors",
+    "log_outcomes", "merge_caps", "with_caps", "with_scale", "write_family_scales", "write_scale",
 ]
