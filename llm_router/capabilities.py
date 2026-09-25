@@ -30,6 +30,12 @@ A local model's list price is a shadow price for the machine and the wait, so
 
 A subscription is still watched, for availability only: one that has answered
 429 is off the table until its window turns.
+
+A tier's family scale (`family_scales`) and level caps (`level_caps`) are kept
+under its family key: the profile glob for a discovered card, or the tier name
+for a hand-written one. `state()` reports the tiers no need vector can ever
+send work to: those another tier beats on every requirement at no more cost
+(see `dominance.py`).
 """
 
 from __future__ import annotations

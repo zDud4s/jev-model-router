@@ -688,6 +688,14 @@ scale from; `error` means the run broke for a reason that says nothing about the
 is not learnt from. `rate_limited` takes that subscription off the table until its window
 turns -- the router cannot see a 429 on a call it did not make.
 
+`llm-router calibrate --anchors FILE` takes tasks with a tier known to be (or not be) enough.
+An `insufficient` anchor whose tier still reaches the target caps one requirement for that
+tier's whole family, written as `level_caps`: the anchor's `because: <requirement>`, or else
+the need that takes the most off its estimate. A cap that would break a `sufficient` anchor
+is reported, not kept. Startup, `/healthz` (`routing.dominated`) and `check --catalog` also
+name every carded tier another one beats on every requirement at no more cost at any prompt
+size: such a tier can never be picked, which usually means its card is wrong.
+
 ### Levels from benchmark evidence
 
 A profile is a guess at effort `high`. With `router.capabilities.benchmarks` set, each

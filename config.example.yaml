@@ -89,6 +89,9 @@ router:
   #   # tiers a client resent as `failed_tiers`).
   #   miss_scale: 1.0
   #   family_scales: {}
+  #   # A family's ceiling on one requirement, written by `calibrate --anchors`
+  #   # when an `insufficient` anchor names a tier that still reaches the target.
+  #   level_caps: {}
   #   # Benchmark evidence that derives discovered cards (see benchmarks.yaml):
   #   # imported from sources that measure every vendor (`benchmarks import`),
   #   # read onto one ability scale, and blended with the profile by the
