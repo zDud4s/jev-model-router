@@ -206,3 +206,18 @@ def test_a_run_with_family_scales_is_idempotent_through_the_written_config(tmp_p
     assert not second.conflicts
     written = load_config(path).router.capabilities
     assert written.miss_scale == pytest.approx(round(first.scale, 3)) and set(written.level_caps) == {"mid"}
+
+
+def test_a_tier_on_the_fallback_profile_is_never_capped_the_operator_is_told_to_profile_it():
+    # A cap under "*" would cap every unprofiled model, future ones included.
+    from test_discovery import expanded
+
+    config, _, _ = expanded()
+    tier = "codex:gpt-7-nova@medium"
+    assert config.router.capabilities.cards[tier].family == "*"
+    needs = {"reasoning": 0.44, "code": 0.0, "niche": 0.0}
+    router = CapabilityRouter(config, ask=Ask(needs))
+    assert router.success(needs, tier) > 0.8
+    cal = asyncio.run(calibrate(config, [{"task": "x", "insufficient": tier}], router, margin=0.0))
+    assert cal.caps == {} and not cal.results[0].capped
+    assert len(cal.conflicts) == 1 and "fallback profile" in cal.conflicts[0] and "write a profile" in cal.conflicts[0]

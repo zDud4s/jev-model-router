@@ -47,7 +47,7 @@ from typing import Any
 import yaml
 
 from .capabilities import CapabilityRouter
-from .config import Config, ConfigError, capped
+from .config import FALLBACK_KEY, Config, ConfigError, capped
 from .schemas import ChatCompletionRequest
 
 
@@ -222,6 +222,11 @@ async def calibrate(
                 continue
             where = f"{tier} should fall short on {result.task[:60]!r}"
             key = router.family_key(tier)
+            if key == FALLBACK_KEY:
+                # A cap under the fallback's key would cap every unprofiled model, future ones too.
+                conflicts.append(f"{where}, but its model is on the fallback profile: write a profile for it, "
+                                 f"so a cap names that model alone")
+                continue
             req, how = _blame(router, result, tier, levels(tier), router.scale_for(tier, scale))
             if req is None:
                 conflicts.append(f"{where}, but Jev read no need in it to cap")

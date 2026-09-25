@@ -426,6 +426,10 @@ def capped(levels: dict[str, float], ceilings: dict[str, float] | None) -> dict[
     return {key: min(value, ceilings[key]) if key in ceilings else value for key, value in levels.items()}
 
 
+# The fallback profile's `match`, and so the family key of every model no profile names.
+FALLBACK_KEY = "*"
+
+
 def _parse_level_caps(raw: Any, requirements: dict[str, str]) -> dict[str, dict[str, float]]:
     if raw is None:
         return {}
@@ -434,6 +438,10 @@ def _parse_level_caps(raw: Any, requirements: dict[str, str]) -> dict[str, dict[
     out: dict[str, dict[str, float]] = {}
     for family, ceilings in raw.items():
         where = f"router.capabilities.level_caps[{family!r}]"
+        if family == FALLBACK_KEY:
+            # The fallback profile's key: it would cap every model no profile names, future ones too.
+            raise ConfigError(f"{where}: '*' is the fallback profile, the family of every unprofiled model; "
+                              "write a profile for the model and cap that")
         if not isinstance(ceilings, dict):
             raise ConfigError(f"{where} must map requirements to ceilings")
         stray = set(ceilings) - set(requirements)
@@ -643,7 +651,7 @@ class CapabilitiesConfig:
         )
         fallback = raw.get("fallback_profile")
         fallback_profile = (
-            _parse_profile(fallback, requirements, "router.capabilities.fallback_profile", match="*")
+            _parse_profile(fallback, requirements, "router.capabilities.fallback_profile", match=FALLBACK_KEY)
             if fallback is not None
             else None
         )
