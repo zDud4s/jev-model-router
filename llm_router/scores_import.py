@@ -319,6 +319,9 @@ def import_sources(
         _unstated(found, scores)
         for key, rows in found.items():
             points = _collapse(rows, scores)
+            if not points:  # an empty table or a `where` that matches nothing: not a reason to lose the points
+                report.errors[key] = "no point in the data (no row with a model and a score passed `where`)"
+                continue
             summary.points += len(points)
             summary.benchmarks.append(key)
             out["benchmarks"][key] = {"source": name, "fetched_at": stamp, **metas[key], "points": points}
