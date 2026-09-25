@@ -416,9 +416,9 @@ def _benchmarks_read(config, scores) -> int:
 
 def _benchmarks_check(config, scores) -> int:
     from .catalog import check_catalog
-    from .discovery import derived_tiers, expand, model_ids, served_ids
-    from .scores import base_weights, benchmark_weights, fitted_scales
-    from .scores_derive import derive, evidence_summary, line_for, served_keys, startup_lines
+    from .discovery import derived_cards, expand, model_ids, served_ids
+    from .scores import base_weights, fitted_scales
+    from .scores_derive import evidence_summary, link_state, served_keys, startup_lines
 
     caps = config.router.capabilities
     report = check_catalog(config)
@@ -431,10 +431,8 @@ def _benchmarks_check(config, scores) -> int:
     for key in scores.benchmarks:
         how, row = weights.get(key, ("unread", {}))
         links = scores.links.get(key, 0)
-        if key in scores.scale.detached:  # off the main scale: counts for nothing, however well linked
-            marker = " [detached]"
-        else:
-            marker = "" if links >= 3 else (" [unlinked]" if links == 0 else " [thin]")
+        state = link_state(scores, key)  # detached: off the main scale, counts for nothing however well linked
+        marker = f" [{state}]" if state else ""
         readings = [r for by_effort in scores.readings.get(key, {}).values() for r in by_effort.values()]
         models = len(scores.readings.get(key, {}))
         spread = (f"difficulty {scores.scale.beta[key] / scores.scale.alpha[key]:+.2f}, "
@@ -456,13 +454,10 @@ def _benchmarks_check(config, scores) -> int:
         print(f"  {name}{tag}: " + "; ".join(
             f"{b} ({', '.join(sorted(str(e) for e in efforts))})" for b, (efforts, _) in sorted(summary.items())))
     # Every card `expand` derived, explicit tiers included: the line printed is the one serving uses.
-    tiers = derived_tiers(expanded, scores, model_ids(report))
-    bench_weights = benchmark_weights(scores, caps)
-    line = line_for(caps, scores, list(tiers.values()), bench_weights)
+    line, derivations = derived_cards(expanded, scores, model_ids(report))
     print(f"\nline over the derived tiers: a={line[0]:.2f} k={line[1]:.2f} profile_weight={scores.c0:.2f}\n")
     cards = expanded.router.capabilities.cards
-    for tier, (k, effort, profile) in tiers.items():
-        derived = derive(caps, scores, k, effort, profile, line, bench_weights)
+    for tier, derived in derivations.items():
         # A tier no benchmark covers is its profile, and is named by the no-evidence line below.
         if not any(derived.coverage[r] > 0 for r in caps.requirements):
             continue

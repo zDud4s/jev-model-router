@@ -208,6 +208,22 @@ def derived_tiers(
     }
 
 
+def derived_cards(
+    config: Config, scores: Scores, ids_by_model: dict[str, tuple[str, ...]]
+) -> tuple[tuple[float, float], dict[str, DerivedCard]]:
+    """(line, tier -> its derivation) for every card `expand` derived in this expanded config.
+
+    The derivation carries each requirement's source and evidence C; the levels
+    served are the expanded config's cards, which have the level caps applied.
+    """
+    caps = config.router.capabilities
+    assert caps is not None
+    tiers = derived_tiers(config, scores, ids_by_model)
+    weights = benchmark_weights(scores, caps)
+    line = line_for(caps, scores, list(tiers.values()), weights)
+    return line, {t: derive(caps, scores, k, e, p, line, weights) for t, (k, e, p) in tiers.items()}
+
+
 def served_ids(
     found: list[Discovered], report: CatalogReport, config: Config | None = None
 ) -> dict[str, tuple[str, ...]]:
@@ -237,5 +253,5 @@ def unused_caps(config: Config) -> list[str]:
 
 
 __all__ = [
-    "Discovered", "card_for", "derived_tiers", "expand", "model_ids", "profile_for", "served_ids", "unused_caps",
+    "Discovered", "card_for", "derived_cards", "derived_tiers", "expand", "model_ids", "profile_for", "served_ids", "unused_caps",
 ]

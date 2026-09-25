@@ -220,6 +220,14 @@ def derive(
     )
 
 
+def link_state(scores: Scores, bench: str) -> str | None:
+    """"detached" (off the main scale: counts for nothing), "unlinked", "thin", or None when well linked."""
+    if bench in scores.scale.detached:
+        return "detached"
+    links = scores.links.get(bench, 0)
+    return None if links >= 3 else ("unlinked" if links == 0 else "thin")
+
+
 def served_keys(scores: Scores, served: dict[str, tuple[str, ...]]) -> tuple[dict[str, tuple[str, ...]], set[str]]:
     """(served name -> its model keys, ambiguous keys). A key two different models share is used for neither.
 
@@ -288,5 +296,5 @@ def startup_lines(scores: Scores, caps: CapabilitiesConfig, served: dict[str, tu
 
 __all__ = [
     "DerivedCard", "Evidence", "blend", "combine", "derive", "effort_prior", "evidence_for", "evidence_summary",
-    "line_for", "line_pairs", "profile_line", "reading_at", "readings_for", "served_keys", "startup_lines",
+    "line_for", "line_pairs", "link_state", "profile_line", "reading_at", "readings_for", "served_keys", "startup_lines",
 ]
