@@ -3,6 +3,10 @@
 It polls /routing/traces for requests that moved and /healthz for the catalog
 and the subscriptions, and draws each request end to end: what arrived, which
 tiers could take it, what Jev read in it, every option weighed, what answered.
+
+The Tiers tab reads /routing/tiers (built at startup) and draws every carded
+tier's levels: where each came from (benchmark, blended, profile), how far the
+evidence moved it from the profile, and which tiers dominate it.
 """
 
 PAGE = r"""<!doctype html>
@@ -105,16 +109,57 @@ tr.pick td { font-weight: 650; background: color-mix(in srgb, var(--accent) 9%, 
 .kv .v { font-weight: 600; font-family: var(--mono); font-size: 13px; overflow: hidden; text-overflow: ellipsis; }
 .why { font-size: 13px; margin-bottom: 8px; }
 .rej { font-size: 12px; color: var(--muted); }
+.tabs { display: inline-flex; background: var(--soft); border: 1px solid var(--line); border-radius: 8px; padding: 2px; }
+.tabs button { border: 0; background: transparent; padding: 4px 12px; font-weight: 600; color: var(--muted); border-radius: 6px; }
+.tabs button.on { background: var(--panel); color: var(--ink); box-shadow: 0 1px 2px color-mix(in srgb, var(--ink) 15%, transparent); }
+[hidden] { display: none !important; }
+.tiers { padding: 16px 20px; display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.tiers > * { min-width: 0; }
+.tt th.num { text-align: right; }
+.strip { display: flex; flex-wrap: wrap; gap: 8px 18px; font-size: 12px; color: var(--muted); align-items: baseline; }
+.strip b { color: var(--ink); font-family: var(--mono); font-weight: 600; }
+.strip .grp { display: inline-flex; gap: 6px; align-items: baseline; flex-wrap: wrap; min-width: 0; overflow-wrap: anywhere; }
+.filters { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+.filters input[type=search], .filters select { border: 1px solid var(--line); border-radius: 7px; background: var(--bg); color: var(--ink);
+  padding: 5px 9px; font: 13px var(--sans); }
+.filters input[type=search] { min-width: 0; flex: 1 1 200px; max-width: 360px; }
+.table-wrap { overflow-x: auto; max-width: 100%; }
+.tt { width: auto; min-width: 100%; margin-top: 0; }
+.tt th { position: sticky; top: 0; background: var(--panel); cursor: pointer; user-select: none; white-space: nowrap; }
+.tt th[aria-sort="ascending"]::after { content: " \2191"; }
+.tt th[aria-sort="descending"]::after { content: " \2193"; }
+.tt td { white-space: nowrap; vertical-align: top; background: var(--panel); }
+.tt td.name, .tt th.name { position: sticky; left: 0; z-index: 1; }
+.tt tr.dom td > * { opacity: .45; }
+.tt tr.dom:hover td > * { opacity: .85; }
+.tt tr:hover td { background: color-mix(in srgb, var(--soft) 70%, var(--panel)); }
+.lvl { display: inline-block; min-width: 44px; padding: 1px 6px; border-radius: 5px; font: 12px var(--mono); text-align: right; border: 1px solid var(--line); }
+.lvl.benchmark { background: color-mix(in srgb, var(--accent) 24%, var(--panel)); border-color: var(--accent); color: var(--ink); }
+.lvl.blended { background: linear-gradient(90deg, color-mix(in srgb, var(--accent) 24%, var(--panel)) 50%, var(--panel) 50%);
+  border: 1px dashed var(--accent); color: var(--ink); }
+.lvl.profile { color: var(--muted); background: transparent; }
+.delta { font: 11px var(--mono); margin-left: 4px; color: var(--muted); display: inline-block; min-width: 40px; }
+.delta.up { color: var(--ok); }
+.delta.down { color: var(--bad); }
+.capm { font-size: 10px; color: var(--warn); margin-left: 2px; }
+.sub { font-size: 11px; color: var(--muted); }
+.tt details summary { cursor: pointer; color: var(--warn); font-size: 12px; }
+.tt details div { font-size: 12px; color: var(--muted); }
+.key { display: inline-flex; gap: 6px; align-items: center; }
 </style>
 </head>
 <body>
 <header>
   <h1>Routing</h1>
+  <nav class="tabs" role="tablist" aria-label="View">
+    <button role="tab" data-view="requests" class="on" aria-selected="true">Requests</button>
+    <button role="tab" data-view="tiers" aria-selected="false">Tiers</button>
+  </nav>
   <span class="live"><span class="dot" id="dot"></span><span id="live">live</span></span>
   <span class="stat" id="stat"></span>
   <div class="meters" id="meters"></div>
 </header>
-<main>
+<main id="view-requests">
   <aside>
     <div class="panel compose">
       <textarea id="msg" placeholder="Write a task and route it"></textarea>
@@ -133,6 +178,28 @@ tr.pick td { font-weight: 650; background: color-mix(in srgb, var(--accent) 9%, 
   </aside>
   <section class="detail" id="detail"><div class="panel empty">Select a request, or route one.</div></section>
 </main>
+<section class="tiers" id="view-tiers" hidden>
+  <div class="panel card"><h2>Cards and their evidence</h2><div class="strip" id="tstrip"><span>Loading…</span></div></div>
+  <div class="panel card">
+    <div class="filters">
+      <input type="search" id="tq" placeholder="Filter tiers, models, families" aria-label="Filter tiers">
+      <select id="teffort" aria-label="Effort"><option value="*">every effort</option></select>
+      <label class="hint"><input type="checkbox" id="tdom"> hide dominated</label>
+      <span class="hint" id="tcount"></span>
+      <button id="treload" title="The view is built at startup; this re-reads it">Reload</button>
+    </div>
+    <div class="legend" style="margin:10px 0 4px">
+      <span class="key"><span class="lvl benchmark">2.00</span> benchmark</span>
+      <span class="key"><span class="lvl blended">2.00</span> blended with the profile</span>
+      <span class="key"><span class="lvl profile">2.00</span> profile</span>
+      <span class="key"><span class="delta up">+0.30</span> vs the profile</span>
+      <span class="key"><span class="capm">▲cap</span> held at its level cap</span>
+      <span class="key" style="opacity:.5">dimmed = dominated</span>
+    </div>
+    <div class="table-wrap" id="twrap"></div>
+    <div class="hint status-error" id="terr"></div>
+  </div>
+</section>
 <script>
 "use strict";
 const $ = (s) => document.querySelector(s);
@@ -385,6 +452,136 @@ async function submit(kind) {
   } catch (e) { $("#err").textContent = String(e); }
   finally { for (const b of [$("#dry"), $("#send")]) b.disabled = false; }
 }
+
+// ------------------------------------------------------------------ tiers
+let tierData = null, tierSort = { key: "name", dir: 1 };
+const fmt = (v, d = 2) => v == null ? "–" : Number(v).toFixed(d);
+
+async function loadTiers() {
+  $("#terr").textContent = "";
+  try {
+    const r = await fetch("/routing/tiers");
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    tierData = await r.json();
+    if (tierData.error) $("#terr").textContent = `The view failed at startup: ${tierData.error}`;
+    fillEfforts(); renderStrip(); renderTiers();
+  } catch (e) { $("#terr").textContent = `Could not load /routing/tiers: ${e.message || e}`; }
+}
+
+function effortOrder(e) {
+  const order = ((tierData && tierData.global) || {}).efforts || [];
+  return e == null ? -1 : order.includes(e) ? order.indexOf(e) : order.length;
+}
+
+function fillEfforts() {
+  const sel = $("#teffort"), keep = sel.value;
+  const efforts = [...new Set(tierData.tiers.map((t) => t.effort == null ? "" : t.effort))]
+    .sort((a, b) => effortOrder(a || null) - effortOrder(b || null) || a.localeCompare(b));
+  sel.replaceChildren(el("option", { value: "*" }, "every effort"),
+    ...efforts.map((e) => el("option", { value: e }, e || "no effort")));
+  sel.value = [...sel.options].some((o) => o.value === keep) ? keep : "*";
+}
+
+function renderStrip() {
+  const g = tierData.global;
+  if (!g) { $("#tstrip").replaceChildren(el("span", {}, "No capabilities router: no cards to show.")); return; }
+  const item = (label, ...v) => el("span", { class: "grp" }, label, ...v);
+  const parts = [
+    item("cards", el("b", {}, tierData.tiers.length)),
+    item("dominated", el("b", {}, tierData.tiers.filter((t) => t.dominated_by.length).length)),
+    g.line ? item("line", el("b", {}, `a ${fmt(g.line.a)}`), el("b", {}, `k ${fmt(g.line.k)}`),
+      el("b", { title: "profile_weight: the evidence C at which a level is half measurement, half profile" }, `profile_weight ${fmt(g.line.profile_weight)}`))
+      : item("line", el("b", {}, "none"), "(no benchmark evidence: every card is its profile)"),
+    item("miss_scale", el("b", {}, fmt(g.miss_scale))),
+    g.rule === "expected_cost" ? item("rule", el("b", {}, "expected cost")) : item("target", el("b", {}, pct(g.target))),
+  ];
+  const ev = g.evidence;
+  if (ev) {
+    parts.push(item("imported", el("b", {}, ev.imported_at ? new Date(ev.imported_at).toLocaleString() : "never")));
+    parts.push(item("evidence", el("b", {}, ev.benchmarks_count), "benchmarks ·", el("b", {}, ev.points), "points"));
+    for (const s of ev.sources) {
+      const bad = /fail|skip|error/i.test(s.status);
+      parts.push(item(`source ${s.name}`, el("b", { class: bad ? "status-error" : "", title: `${s.origin}: ${s.status}` },
+        s.status.length > 60 ? s.status.slice(0, 57) + "…" : s.status)));
+    }
+    for (const [k, names] of Object.entries(ev.benchmarks)) {
+      if (names.length) parts.push(item(`${k}:`, el("b", { class: k === "thin" ? "" : "status-error", title: names.join("\n") }, names.join(", "))));
+    }
+  }
+  if (g.dominance_error) parts.push(item("dominance", el("b", { class: "status-error" }, g.dominance_error)));
+  $("#tstrip").replaceChildren(...parts);
+}
+
+function sortValue(t, key) {
+  if (key === "name") return t.name;
+  if (key === "effort") return effortOrder(t.effort);
+  if (key === "price") return t.prices.output;
+  if (key === "output") return t.output_tokens;
+  if (key === "beaten") return t.dominated_by.length;
+  const c = t.levels[key.slice(2)];
+  return c ? c.level : -1;
+}
+
+function renderTiers() {
+  if (!tierData) return;
+  const reqs = (tierData.global || {}).requirements || [];
+  const q = $("#tq").value.trim().toLowerCase(), eff = $("#teffort").value, hide = $("#tdom").checked;
+  const rows = tierData.tiers.filter((t) =>
+    (!q || [t.name, t.model, t.family, t.backend].some((v) => v && v.toLowerCase().includes(q)))
+    && (eff === "*" || (t.effort == null ? "" : t.effort) === eff)
+    && !(hide && t.dominated_by.length));
+  const { key, dir } = tierSort;
+  rows.sort((a, b) => { const x = sortValue(a, key), y = sortValue(b, key);
+    return (typeof x === "string" ? x.localeCompare(y) : x - y) * dir || a.name.localeCompare(b.name); });
+  $("#tcount").textContent = `${rows.length} of ${tierData.tiers.length}`;
+  const th = (k, label, cls) => el("th", { class: cls || "", scope: "col",
+    "aria-sort": key === k ? (dir > 0 ? "ascending" : "descending") : "none",
+    onclick: () => { tierSort = { key: k, dir: tierSort.key === k ? -tierSort.dir : (k === "name" || k === "effort" ? 1 : -1) }; renderTiers(); } }, label);
+  const head = el("tr", {}, th("name", "tier", "name"), th("effort", "effort"), th("price", "$/M in · out", "num"), th("output", "out tok", "num"),
+    ...reqs.map((r) => th("r:" + r, r.replace(/_/g, " "))), th("beaten", "dominated"));
+  const body = rows.map((t) => {
+    const beaten = t.dominated_by.length;
+    return el("tr", { class: beaten ? "dom" : "", title: beaten ? `beaten by ${t.dominated_by.join(", ")}` : "" },
+      el("td", { class: "name" }, tierChip(t.name),
+        el("div", { class: "sub" }, [t.model, t.family ? `family ${t.family}` : null, t.card].filter(Boolean).join(" · "))),
+      el("td", {}, t.effort || "—"),
+      el("td", { class: "num" }, `${fmt(t.prices.input)} · ${fmt(t.prices.output)}`),
+      el("td", { class: "num" }, t.output_tokens),
+      ...reqs.map((r) => levelCell(t.levels[r])),
+      el("td", {}, beaten ? el("details", {}, el("summary", {}, `beaten by ${beaten}`),
+        ...t.dominated_by.map((d) => el("div", {}, d))) : el("span", { class: "hint" }, "—")));
+  });
+  $("#twrap").replaceChildren(rows.length ? el("table", { class: "tt" }, el("thead", {}, head), el("tbody", {}, ...body))
+    : el("div", { class: "empty" }, tierData.tiers.length ? "No tier matches the filters." : "No carded tiers."));
+}
+
+function levelCell(c) {
+  if (!c) return el("td", {}, "–");
+  const d = c.level - c.profile_level;
+  const tip = [c.source, `C = ${fmt(c.evidence)}`, `profile ${fmt(c.profile_level)}`,
+    c.cap != null ? `cap ${fmt(c.cap)}${c.capped ? " (held there)" : ""}` : null].filter(Boolean).join(" · ");
+  return el("td", { title: tip },
+    el("span", { class: `lvl ${c.source}` }, fmt(c.level)),
+    el("span", { class: "delta" + (d > 0.005 ? " up" : d < -0.005 ? " down" : "") },
+      Math.abs(d) < 0.005 ? "" : `${d > 0 ? "+" : "−"}${Math.abs(d).toFixed(2)}`),
+    c.capped ? el("span", { class: "capm" }, "▲cap") : null);
+}
+
+function showView(name) {
+  for (const b of document.querySelectorAll(".tabs button")) {
+    const on = b.dataset.view === name; b.classList.toggle("on", on); b.setAttribute("aria-selected", String(on));
+  }
+  $("#view-requests").hidden = name !== "requests";
+  $("#view-tiers").hidden = name !== "tiers";
+  if (name === "tiers" && !tierData) loadTiers();
+  const hash = name === "tiers" ? "#tiers" : "";
+  if (location.hash !== hash) history.replaceState(null, "", location.pathname + location.search + hash);
+}
+
+for (const b of document.querySelectorAll(".tabs button")) b.addEventListener("click", () => showView(b.dataset.view));
+for (const id of ["#tq", "#teffort", "#tdom"]) $(id).addEventListener("input", renderTiers);
+$("#treload").addEventListener("click", loadTiers);
+showView(location.hash === "#tiers" ? "tiers" : "requests");
 
 $("#dry").addEventListener("click", () => submit("dry"));
 $("#send").addEventListener("click", () => submit("send"));

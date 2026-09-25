@@ -16,7 +16,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from .config import Config
+from .config import EFFORTS, Config
 
 _EPS = 1e-9
 
@@ -116,6 +116,7 @@ def build(
         "error": None,
         "global": {
             "requirements": list(caps.requirements),
+            "efforts": list(EFFORTS),  # their order, for sorting
             "miss_scale": caps.miss_scale,
             "target": caps.target,
             "rule": caps.rule,

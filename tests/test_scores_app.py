@@ -573,3 +573,10 @@ def test_the_tiers_view_is_off_with_the_traces(tmp_path, backend_factory):
     with TestClient(app) as client:
         assert client.get("/routing/tiers").status_code == 404
 
+
+def test_the_routing_page_has_a_tiers_tab(tmp_path, backend_factory):
+    app = create_app(parse_config(raw_config()), backend_factory=backend_factory, log=RequestLog(":memory:"))
+    with TestClient(app) as client:
+        page = client.get("/routing").text
+    assert 'data-view="tiers"' in page and 'data-view="requests"' in page and "/routing/tiers" in page
+    assert "<script src" not in page and "http://" not in page.replace("http://www.w3.org/2000/svg", "")
