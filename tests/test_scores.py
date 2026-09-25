@@ -562,3 +562,10 @@ def test_a_models_curve_merges_its_keys_efforts_and_the_first_key_wins_where_bot
     assert reading_at(scores, "code", keys, "low") == reading_at(scores, "code", ("acme-large-alias",), "low")
     assert reading_at(scores, "code", keys, "high") == reading_at(scores, "code", ("acme-large",), "high")
     assert reading_at(scores, "code", keys, "medium") is not None  # between the two keys' points
+
+
+def test_a_published_cost_of_zero_says_nothing_about_output():
+    caps, scores = scored(linked(
+        pt("code", "acme-large", "medium", 50, cost_usd=0.0), pt("code", "acme-large", "high", 55, cost_usd=2.0),
+        pt("code", "zeta-1", "high", 50)))
+    assert card(caps, scores, "acme-large", "medium").output_tokens == 900  # the rule's x0.45, not 1

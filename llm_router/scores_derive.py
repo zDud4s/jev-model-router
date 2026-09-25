@@ -172,7 +172,7 @@ def _output_tokens(scores: Scores, keys: tuple[str, ...], effort: str | None, pr
     for bench in scores.benchmarks:
         for key in keys:
             at, ref = scores.point_at(bench, key, effort), scores.point_at(bench, key, "high")
-            if at and ref and at.cost_usd is not None and ref.cost_usd:
+            if at and ref and (at.cost_usd or 0) > 0 and (ref.cost_usd or 0) > 0:  # 0: not a published cost
                 ratios.append(at.cost_usd / ref.cost_usd)
                 break
     if not ratios:
