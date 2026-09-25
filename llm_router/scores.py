@@ -26,7 +26,7 @@ import math
 import os
 import re
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -164,14 +164,28 @@ class KeyRules:
                 return stripped
         return text
 
-    def key(self, text: str, efforts: EffortRules) -> str:
+    def _resolve(self, text: str, efforts: EffortRules) -> tuple[str, str | None]:
+        """(the key, the effort the matching alias names, if any).
+
+        An alias's value is written like a source's model string, so it may end
+        in an effort (`x_none`, `x (none)`): two display names for one model
+        run two ways then land on one key at two efforts.
+        """
         alias = self.aliases.get(text.strip().lower())
-        if alias is not None:
-            return _norm(alias)
-        dated, undated = self._parts(text, efforts)
-        key = dated if undated in self.keep_dates else undated
-        alias = self.aliases.get(key)
-        return _norm(alias) if alias is not None else key
+        if alias is None:
+            dated, undated = self._parts(text, efforts)
+            key = dated if undated in self.keep_dates else undated
+            alias = self.aliases.get(key)
+            if alias is None:
+                return key, None
+        target, effort = split_model(alias, efforts)
+        return _norm(target), effort
+
+    def key(self, text: str, efforts: EffortRules) -> str:
+        return self._resolve(text, efforts)[0]
+
+    def alias_effort(self, text: str, efforts: EffortRules) -> str | None:
+        return self._resolve(text, efforts)[1]
 
 
 def date_collisions(strings: list[str], rules: KeyRules, efforts: EffortRules) -> frozenset[str]:
@@ -257,6 +271,10 @@ class Scores:
 
     def key(self, text: str) -> str:
         return self.keys.key(text, self.efforts)
+
+    def effort_of(self, model: str, effort: str | None) -> str | None:
+        """A point's effort: the one it states, else the one its alias names."""
+        return effort if effort is not None else self.keys.alias_effort(model, self.efforts)
 
     def point_at(self, bench: str, key: str, effort: str | None) -> Point | None:
         return self.slots.get((bench, key, effort))
@@ -604,6 +622,8 @@ def parse_scores(
     everything = [p for p in curated + from_import if bounds[p.benchmark] is not None]
     rules = KeyRules(rules.date_suffixes, rules.aliases,
                      date_collisions(sorted({p.model for p in everything}), rules, efforts))
+    everything = [p if p.effort is not None else replace(p, effort=rules.alias_effort(p.model, efforts))
+                  for p in everything]
     key_of = {p.model: rules.key(p.model, efforts) for p in everything}
     kept, superseded = pool(everything, efforts, key_of)
 

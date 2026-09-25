@@ -229,3 +229,18 @@ def test_a_json_path_that_is_in_no_row_fails_its_benchmark(tmp_path, monkeypatch
     config, _ = setup(tmp_path, {"index": bench})
     report = import_sources(config, load_scores(config), Fetch(**{"https://api_test": doc}), now=NOW)
     assert "price.per_task" in report.errors["index"]
+
+
+def test_an_alias_can_carry_the_effort_its_display_name_means_so_two_variants_stay_apart(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_BENCH_KEY", "k")
+    doc = json.dumps({"data": [{"name": "Zeta 4B (Reasoning)", "i": 20.0},
+                               {"name": "Zeta 4B (Non-reasoning)", "i": 10.0}], "more": False}).encode()
+    bench = {"description": "i", "requirements": {"reasoning": 1.0}, "scale": 0.01,
+             "data": {"source": "api", "score": "i"}}
+    config, _ = setup(tmp_path, {"index": bench}, efforts={"labels": {"none": "none"}},
+                      aliases={"Zeta 4B (Reasoning)": "zeta:4b", "Zeta 4B (Non-reasoning)": "zeta:4b (none)"})
+    import_sources(config, load_scores(config), Fetch(**{"https://api_test": doc}), now=NOW)
+    points = {p["effort"]: p["score"] for p in imported(tmp_path)["benchmarks"]["index"]["points"]}
+    assert points == {None: pytest.approx(20.0), "none": pytest.approx(10.0)}
+    scores = load_scores(config)
+    assert {(scores.key(p.model), p.effort) for p in scores.points} == {("zeta-4b", None), ("zeta-4b", "none")}

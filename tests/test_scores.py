@@ -569,3 +569,14 @@ def test_a_published_cost_of_zero_says_nothing_about_output():
         pt("code", "acme-large", "medium", 50, cost_usd=0.0), pt("code", "acme-large", "high", 55, cost_usd=2.0),
         pt("code", "zeta-1", "high", 50)))
     assert card(caps, scores, "acme-large", "medium").output_tokens == 900  # the rule's x0.45, not 1
+
+
+def test_an_alias_with_an_effort_places_a_curated_points_variant_at_that_effort():
+    _, scores = scored(
+        [pt("code", "Zeta 4B (Thinking)", None, 50), pt("code", "Zeta 4B (Plain)", None, 30),
+         pt("code", "Zeta 4B (Plain)", "high", 40)],
+        extra={"efforts": {"labels": {"none": "none"}},
+               "aliases": {"Zeta 4B (Thinking)": "zeta-4b", "Zeta 4B (Plain)": "zeta-4b_none"}})
+    held = {(scores.key(p.model), p.effort): p.score for p in scores.points}
+    # A stated effort stands; the alias's effort fills an unstated one.
+    assert held == {("zeta-4b", None): 50, ("zeta-4b", "none"): 30, ("zeta-4b", "high"): 40}

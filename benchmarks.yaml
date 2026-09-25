@@ -39,11 +39,13 @@ efforts:
 model_keys:
   date_suffixes: ['[-_]\d{8}$', '-\d{4}-\d{2}-\d{2}$']
 
-# Source strings whose words do not match the served id. Both of the local
-# model's variants map to it: it runs with and without thinking.
+# Source strings whose words do not match the served id. A value may end in an
+# effort, written as a source writes one. Both of the local model's variants
+# map to it at two efforts: served by Ollama as it is, it thinks, which is the
+# tier without an effort; with thinking off it is effort `none`.
 aliases:
   "Qwen3.5 4B (Reasoning)": "qwen3.5:4b"
-  "Qwen3.5 4B (Non-reasoning)": "qwen3.5:4b"
+  "Qwen3.5 4B (Non-reasoning)": "qwen3.5:4b (none)"
 
 benchmarks:
   # ---- agentic coding

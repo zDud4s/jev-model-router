@@ -186,6 +186,8 @@ def _collapse(points: list[dict[str, Any]], scores: Scores) -> list[dict[str, An
     """One point per (model key, effort): the median score and cost of its rows."""
     groups: dict[tuple[str, str | None], list[dict[str, Any]]] = {}
     for p in points:
+        # After `_unstated`: an alias's effort is the operator's, not a label this source writes.
+        p["effort"] = scores.effort_of(p["model"], p["effort"])
         groups.setdefault((scores.key(p["model"]), p["effort"]), []).append(p)
     out = []
     for (_, effort), rows in sorted(groups.items(), key=lambda kv: (kv[0][0], str(kv[0][1]))):
