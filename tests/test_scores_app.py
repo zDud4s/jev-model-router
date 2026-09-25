@@ -200,6 +200,7 @@ def test_benchmarks_import_fetches_and_reports(tmp_path, monkeypatch, capsys):
 
 def test_benchmarks_fit_with_no_outcomes_says_so_and_exits_zero(tmp_path, monkeypatch, capsys):
     path = _cli_config(tmp_path, monkeypatch, CURATED)
+    RequestLog(str(tmp_path / "empty.db")).close()
     assert cli.main(["-c", path, "benchmarks", "fit", "--db", str(tmp_path / "empty.db")]) == 0
     assert "nothing to fit" in capsys.readouterr().out
     assert not (tmp_path / "b.derived.json").exists()
@@ -282,3 +283,89 @@ def test_a_source_without_its_key_is_skipped_with_a_warning_and_the_import_still
     assert cli.main(["-c", path, "benchmarks", "import"]) == 0
     err = capsys.readouterr().err
     assert "skipped: api" in err and "TEST_BENCH_KEY" in err and "failed" not in err
+
+
+def test_benchmarks_fit_on_a_database_that_does_not_exist_is_an_error_and_creates_nothing(tmp_path, monkeypatch):
+    path = _cli_config(tmp_path, monkeypatch, CURATED)
+    missing = tmp_path / "typo.db"
+    assert cli.main(["-c", path, "benchmarks", "fit", "--db", str(missing)]) == 2
+    assert not missing.exists()
+
+
+def _fit_cli(tmp_path, monkeypatch, capsys, settings: dict, passed: bool) -> str:
+    from llm_router.calibration import Outcome
+
+    bench = tmp_path / "b.yaml"
+    bench.write_text(yaml.safe_dump(CURATED), encoding="utf-8")
+    raw = raw_config(benchmarks={"path": str(bench), **settings})
+    raw["catalog"] = {"check_on_start": False, "path": None}
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    monkeypatch.setattr("llm_router.catalog.check_catalog", lambda config: REPORT)
+    data = [Outcome(t, {"reasoning": 1.0}, passed, "verdict")
+            for t in ("cli:acme-large@high", "cli:acme-small") for _ in range(400)]
+    monkeypatch.setattr("llm_router.calibration.log_outcomes", lambda log, config: data)
+    db = tmp_path / "log.db"
+    RequestLog(str(db)).close()
+    assert cli.main(["-c", str(path), "benchmarks", "fit", "--db", str(db)]) == 0
+    return capsys.readouterr().out
+
+
+def test_benchmarks_fit_shows_the_line_served_now_and_warns_at_a_box_edge(tmp_path, monkeypatch, capsys):
+    from llm_router.discovery import expand
+    from llm_router.scores import load_scores
+    from llm_router.scores_fit import BOX_SCALE
+
+    out = _fit_cli(tmp_path, monkeypatch, capsys, {}, passed=False)
+    config = parse_config(yaml.safe_load((tmp_path / "c.yaml").read_text(encoding="utf-8")))
+    scores = load_scores(config)
+    from llm_router.discovery import model_ids
+    from llm_router.scores_fit import fit
+
+    expanded, _, _ = expand(config, REPORT, scores)
+    result = fit(expanded, scores, [], model_ids=model_ids(REPORT))
+    assert f"a {result.a:.2f} served now" in out  # nothing fitted: the served line
+    # Every answer failed: the benchmark's worth drops to the bottom of its box.
+    assert any("box edge" in line and "code" in line and f"{BOX_SCALE[0]}" in line for line in out.splitlines())
+
+
+def test_benchmarks_fit_says_a_pinned_a_or_k_is_the_configs(tmp_path, monkeypatch, capsys):
+    out = _fit_cli(tmp_path, monkeypatch, capsys, {"a": 1.5, "k": 0.8}, passed=True)
+    assert "a 1.50, set in the config" in out and "k 0.80, set in the config" in out
+
+
+def test_benchmarks_check_exits_one_when_a_file_is_unreadable(tmp_path, monkeypatch, capsys):
+    path = _cli_config(tmp_path, monkeypatch, CURATED)
+    (tmp_path / "b.derived.json").write_text("{not json", encoding="utf-8")
+    assert cli.main(["-c", path, "benchmarks", "check"]) == 1
+    assert "unreadable" in capsys.readouterr().out
+
+
+def test_benchmarks_check_prints_the_line_expand_uses_over_explicit_tiers_too(tmp_path, monkeypatch, capsys):
+    from llm_router.discovery import profile_for
+    from llm_router.scores import load_scores
+    from llm_router.scores_derive import line_for, served_keys
+
+    bench = tmp_path / "b.yaml"
+    bench.write_text(yaml.safe_dump(CURATED), encoding="utf-8")
+    raw = raw_config(benchmarks={"path": str(bench)})
+    raw["tiers"]["large"] = {"backend": "claude_cli", "model": "acme-large", "effort": "high",
+                             "base_url": "C:/bin/cli.exe"}
+    raw["catalog"] = {"check_on_start": False, "path": None}
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    monkeypatch.setattr("llm_router.catalog.check_catalog", lambda config: REPORT)
+    assert cli.main(["-c", str(path), "benchmarks", "check"]) == 0
+    out = capsys.readouterr().out
+    config = parse_config(raw)
+    caps, scores = config.router.capabilities, load_scores(config)
+    models = REPORT.discovered["cli"].models
+    served = {m: (o.id, *o.aliases) for m, o in models.items()}
+    keys, _ = served_keys(scores, served)
+    tiers = [(keys["acme-large"], "medium", profile_for(caps, models["acme-large"])[0]),
+             (keys["acme-large"], "high", profile_for(caps, models["acme-large"])[0]),
+             (keys["acme-small"], None, profile_for(caps, models["acme-small"])[0]),
+             (keys["unknown-1"], "high", profile_for(caps, models["unknown-1"])[0])]
+    a, k = line_for(caps, scores, tiers)
+    assert f"a={a:.2f} k={k:.2f}" in out
+    assert "large: output_tokens" in out

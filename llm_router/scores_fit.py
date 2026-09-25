@@ -28,11 +28,10 @@ from pathlib import Path
 
 from .calibration import Outcome
 from .capabilities import CapabilityRouter
-from .catalog import Offered
 from .config import Config
-from .discovery import profile_for
+from .discovery import derived_tiers
 from .scores import Scores, base_weights, content_hash, fitted_scales, write_sidecar
-from .scores_derive import blend, combine, effort_prior, line_pairs, profile_line, readings_for, served_keys
+from .scores_derive import blend, combine, effort_prior, line_pairs, profile_line, readings_for
 
 SIGMA_SCALE, SIGMA_DA, SIGMA_KR = 0.5, 0.5, 0.5
 BOX_SCALE, BOX_DA, BOX_KR = (0.0, 3.0), (-2.0, 2.0), (0.1, 4.0)
@@ -46,23 +45,20 @@ class FitResult:
     scales: dict[str, float]  # every fitted benchmark
     delta_a: float
     k_ratio: float
-    a_line: float
+    a_line: float  # the profile line at the fitted scales
     k_line: float
+    a: float  # what serving uses once the fit is written: the config's value where it sets one
+    k: float
+    a_before: float  # what serving uses now
+    k_before: float
     outcomes: int
     tiers: list[str]
     loglik_prior: float
     loglik: float
     moved: list[tuple[str, float]] = field(default_factory=list)  # (benchmark, fitted scale), moved by > 0.1
     unlinked: list[str] = field(default_factory=list)
+    at_edge: list[tuple[str, float]] = field(default_factory=list)  # (parameter, the box edge it ended on)
     fitted_at: str = ""
-
-    @property
-    def a(self) -> float:
-        return self.a_line + self.delta_a
-
-    @property
-    def k(self) -> float:
-        return self.k_line * self.k_ratio
 
 
 async def _never(packet: str, questions: dict[str, str]) -> dict[str, float]:
@@ -92,15 +88,12 @@ def fit(
     assert caps is not None
     router = CapabilityRouter(config, ask=_never)
     w0 = {b: row for b, (_, row) in base_weights(scores, caps).items()}
-    # Every derived tier (the cards `expand` built, the only ones with a family): its keys, effort and profile.
-    # The line is the profile line through all of them, as serving computes it.
-    derived = {n: t for n, t in config.tiers.items() if n in caps.cards and caps.cards[n].family is not None}
-    ids = {n: (model_ids or {}).get(t.model, (t.model,)) for n, t in derived.items()}
-    keys, _ = served_keys(scores, {n: i for n, i in ids.items()})
-    profiles = {n: profile_for(caps, Offered(i[0], aliases=tuple(i[1:])))[0] for n, i in ids.items()}
-    priors = {n: effort_prior(caps, profiles[n], derived[n].effort)[0] for n in derived}
+    # Every derived tier: its keys, effort and profile. The line is the profile line through all
+    # of them, as serving computes it.
+    derived = derived_tiers(config, scores, model_ids or {})
+    priors = {n: effort_prior(caps, profile, effort)[0] for n, (_, effort, profile) in derived.items()}
     # A tier's readings do not depend on the weights: read once, reweighed per trial.
-    reads = {n: readings_for(scores, keys[n], derived[n].effort, w0) for n in derived}
+    reads = {n: readings_for(scores, keys, effort, w0) for n, (keys, effort, _) in derived.items()}
     saved = scores.settings
     served_scales = fitted_scales(scores, caps)
     subjects = sorted({o.tier for o in outcomes if o.tier in derived})
@@ -135,9 +128,13 @@ def fit(
             evs[n] = combine(caps.requirements, reads[n], weights)
         relink()
 
-    def total() -> float:
+    def served() -> tuple[float, float]:
         a = saved.a if saved.a is not None else line[0] + offsets["delta_a"]
         k = saved.k if saved.k is not None else line[1] * offsets["k_ratio"]
+        return a, k
+
+    def total() -> float:
+        a, k = served()
         out = 0.0
         for t in subjects:
             levels = blend(evs[t], priors[t], caps.requirements, a=a, k=k, c0=scores.c0)
@@ -152,6 +149,7 @@ def fit(
         return lp - (offsets["k_ratio"] - 1.0) ** 2 / (2 * SIGMA_KR**2)
 
     relink()
+    before = served()
     loglik_prior = total()
     params: list[tuple[str, str, tuple[float, float], float, float]] = [
         ("scale", b, BOX_SCALE, 1.0, SIGMA_SCALE) for b in fitted
@@ -188,18 +186,31 @@ def fit(
             if score - best < TOLERANCE:
                 break
             best = score
+    at_edge = []
+    if subjects:
+        for kind, name, (lo, hi), _, _ in params:
+            value = (scale if kind == "scale" else offsets)[name]
+            for edge in (lo, hi):
+                if abs(value - edge) <= 1e-3 * (hi - lo):
+                    at_edge.append((name, edge))
+    after = served()
     return FitResult(
         scales=scale,
         delta_a=offsets["delta_a"],
         k_ratio=offsets["k_ratio"],
         a_line=line[0],
         k_line=line[1],
+        a=after[0],
+        k=after[1],
+        a_before=before[0],
+        k_before=before[1],
         outcomes=sum(p + f for rows in trials.values() for _, p, f in rows),
         tiers=subjects,
         loglik_prior=loglik_prior,
         loglik=total(),
         moved=[(b, s) for b, s in scale.items() if abs(s - 1.0) > 0.1],
         unlinked=unlinked,
+        at_edge=at_edge,
         fitted_at=fitted_at or datetime.now(timezone.utc).isoformat(timespec="seconds"),
     )
 

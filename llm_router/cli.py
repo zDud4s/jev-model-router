@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 
 from .config import ConfigError, load_config
@@ -395,8 +396,8 @@ def _benchmarks_read(config, scores) -> int:
 
 def _benchmarks_check(config, scores) -> int:
     from .catalog import check_catalog
-    from .discovery import expand, profile_for, served_ids
-    from .scores import base_weights, fitted_scales
+    from .discovery import derived_tiers, expand, model_ids, served_ids
+    from .scores import base_weights, benchmark_weights, fitted_scales
     from .scores_derive import derive, evidence_summary, line_for, served_keys, startup_lines
 
     caps = config.router.capabilities
@@ -431,15 +432,14 @@ def _benchmarks_check(config, scores) -> int:
         tag = " [vendor-only]" if origins == {"vendor"} else ""
         print(f"  {name}{tag}: " + "; ".join(
             f"{b} ({', '.join(sorted(str(e) for e in efforts))})" for b, (efforts, _) in sorted(summary.items())))
-    tiers = []
-    for f in found:
-        offered = report.discovered[f.source].models[f.model]
-        tiers.append((f.tier, keys[f"{f.source}:{f.model}"], f.effort, profile_for(caps, offered)[0]))
-    line = line_for(caps, scores, [(k, e, p) for _, k, e, p in tiers])
-    print(f"\nline over the discovered tiers: a={line[0]:.2f} k={line[1]:.2f} profile_weight={scores.c0:.2f}\n")
+    # Every card `expand` derived, explicit tiers included: the line printed is the one serving uses.
+    tiers = derived_tiers(expanded, scores, model_ids(report))
+    bench_weights = benchmark_weights(scores, caps)
+    line = line_for(caps, scores, list(tiers.values()), bench_weights)
+    print(f"\nline over the derived tiers: a={line[0]:.2f} k={line[1]:.2f} profile_weight={scores.c0:.2f}\n")
     cards = expanded.router.capabilities.cards
-    for tier, k, effort, profile in tiers:
-        derived = derive(caps, scores, k, effort, profile, line)
+    for tier, (k, effort, profile) in tiers.items():
+        derived = derive(caps, scores, k, effort, profile, line, bench_weights)
         # A tier no benchmark covers is its profile, and is named by the no-evidence line below.
         if not any(derived.coverage[r] > 0 for r in caps.requirements):
             continue
@@ -464,7 +464,7 @@ def _benchmarks_check(config, scores) -> int:
             near = difflib.get_close_matches(scores.key(text), served_keys_all, n=1, cutoff=0.8)
             if near:
                 print(f"  {text!r} is near served key {near[0]!r}: add an alias if it is the same model")
-    return 0
+    return 1 if scores.errors else 0
 
 
 def _benchmarks_fit(config, scores, args) -> int:
@@ -473,6 +473,9 @@ def _benchmarks_fit(config, scores, args) -> int:
     from .discovery import expand, model_ids
     from .scores_fit import fit, write_fit
 
+    if args.db is not None and not os.path.isfile(args.db):
+        print(f"no database at {args.db}", file=sys.stderr)  # opening it would create an empty one
+        return 2
     report = check_catalog(config)
     expanded, _, _ = expand(config, report, scores)
     source = args.db or config.log.path
@@ -490,16 +493,26 @@ def _benchmarks_fit(config, scores, args) -> int:
         return 0
     print(f"{result.outcomes} outcome(s) on {len(result.tiers)} derived tier(s)")
     print(f"log L: {result.loglik_prior:.2f} at the prior, {result.loglik:.2f} fitted")
-    print(f"line: a {result.a_line:.2f} -> {result.a:.2f} (delta {result.delta_a:+.2f}), "
-          f"k {result.k_line:.2f} -> {result.k:.2f} (x{result.k_ratio:.2f})")
+    settings = scores.settings
+    if settings.a is not None:
+        print(f"line: a {settings.a:.2f}, set in the config (not fitted)")
+    else:
+        print(f"line: a {result.a_before:.2f} served now -> {result.a:.2f} "
+              f"(delta_a {scores.fit.delta_a:+.2f} -> {result.delta_a:+.2f})")
+    if settings.k is not None:
+        print(f"line: k {settings.k:.2f}, set in the config (not fitted)")
+    else:
+        print(f"line: k {result.k_before:.2f} served now -> {result.k:.2f} "
+              f"(k_ratio x{scores.fit.k_ratio:.2f} -> x{result.k_ratio:.2f})")
     for bench, value in result.moved:
         print(f"  {bench}: worth 1.00 -> {value:.2f}")
+    for name, edge in result.at_edge:
+        print(f"  {name} ended on its box edge {edge}: the outcomes push it further than the fit allows")
     for bench in result.unlinked:
         print(f"  {bench}: unlinked, never enters a level; its worth stays at the prior")
     if args.write:
         write_fit(scores.sidecar_path, result, scores, config)
         print(f"written to {scores.sidecar_path}")
-        print("serving recomputes the profile line with the new scales, so its a and k can differ slightly")
         print("next: `calibrate --from-log`, then `calibrate --anchors`; both fit on these levels")
     return 0
 

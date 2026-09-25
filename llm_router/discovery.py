@@ -188,6 +188,25 @@ def model_ids(report: CatalogReport) -> dict[str, tuple[str, ...]]:
     }
 
 
+def derived_tiers(
+    config: Config, scores: Scores, ids_by_model: dict[str, tuple[str, ...]]
+) -> dict[str, tuple[tuple[str, ...], str | None, ModelProfile]]:
+    """tier -> (model keys, effort, profile), for every card `expand` derived in this expanded config.
+
+    Those are the cards with a family: a card written in the config has none.
+    The same set `expand` fits its line over, so a caller's line is serving's.
+    """
+    caps = config.router.capabilities
+    assert caps is not None
+    tiers = {n: t for n, t in config.tiers.items() if n in caps.cards and caps.cards[n].family is not None}
+    ids = {n: ids_by_model.get(t.model, (t.model,)) for n, t in tiers.items()}
+    keys, _ = served_keys(scores, ids)
+    return {
+        n: (keys[n], tiers[n].effort, profile_for(caps, Offered(i[0], aliases=tuple(i[1:])))[0])
+        for n, i in ids.items()
+    }
+
+
 def served_ids(
     found: list[Discovered], report: CatalogReport, config: Config | None = None
 ) -> dict[str, tuple[str, ...]]:
@@ -207,4 +226,4 @@ def served_ids(
     return out
 
 
-__all__ = ["Discovered", "card_for", "expand", "model_ids", "profile_for", "served_ids"]
+__all__ = ["Discovered", "card_for", "derived_tiers", "expand", "model_ids", "profile_for", "served_ids"]
