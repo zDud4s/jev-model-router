@@ -36,6 +36,8 @@ from .scores import Benchmark, Scores, Source, split_model, write_json
 # fetch(url, headers, deadline): the body, or an exception once `_clock()` passes `deadline`.
 Fetch = Callable[[str, dict[str, str], float], bytes]
 MAX_PAGES = 50
+# Far above any benchmark table or archive; a response or a zip member past it is refused, not read.
+MAX_BYTES = 200 * 1024 * 1024
 _CHUNK = 1 << 16
 _clock = time.monotonic
 _MISSING = object()
@@ -67,6 +69,7 @@ class _PrivateHeaders(urllib.request.HTTPRedirectHandler):
 def _read(response: Any, deadline: float) -> bytes:
     """The body, read in chunks so a server that trickles is cut at the deadline, not per socket read."""
     chunks: list[bytes] = []
+    size = 0
     while True:
         if _clock() > deadline:
             raise TimeoutError("timed out")
@@ -74,6 +77,9 @@ def _read(response: Any, deadline: float) -> bytes:
         if not chunk:
             return b"".join(chunks)
         chunks.append(chunk)
+        size += len(chunk)
+        if size > MAX_BYTES:
+            raise ImportFailure(f"the response is over {MAX_BYTES} bytes")
 
 
 def http_fetch(timeout: float) -> Fetch:
@@ -144,6 +150,8 @@ def _pages(source: Source, fetch: Fetch, headers: dict[str, str], deadline: floa
 
 def _table(archive: zipfile.ZipFile, name: str) -> list[dict[str, str]]:
     try:
+        if archive.getinfo(name).file_size > MAX_BYTES:
+            raise ImportFailure(f"table {name!r} is over {MAX_BYTES} bytes")
         with archive.open(name) as handle:
             return list(csv.DictReader(io.TextIOWrapper(handle, encoding="utf-8-sig")))
     except KeyError:

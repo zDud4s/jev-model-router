@@ -362,3 +362,21 @@ def test_a_refresh_where_every_source_failed_is_retried_at_the_next_start(tmp_pa
     assert imported(tmp_path)["imported_at"] == NOW.isoformat(timespec="seconds")  # not advanced
     refresh(config, load_scores(config), failing, now=later + timedelta(minutes=1))
     assert len(failing.calls) == 2  # still stale: tried again
+
+
+def test_a_response_or_a_zip_member_over_the_size_cap_fails_with_an_error(tmp_path, monkeypatch):
+    import llm_router.scores_import as scores_import
+
+    monkeypatch.setattr(scores_import, "MAX_BYTES", 1000)
+
+    class Endless:
+        def read(self, n=-1):
+            return b"x" * 300
+
+    with pytest.raises(scores_import.ImportFailure, match="1000"):
+        scores_import._read(Endless(), deadline=float("inf"))
+    config, _ = setup(tmp_path, {"code": CODE})
+    big = [{**HUB_TABLE[0], "Harness": "h" * 2000}]
+    report = import_sources(config, load_scores(config),
+                            Fetch(**{"https://hub_test": zipped(code__csv=big, meta__csv=META)}), now=NOW)
+    assert "1000" in report.errors["code"]
