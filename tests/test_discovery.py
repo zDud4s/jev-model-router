@@ -222,3 +222,15 @@ def test_a_cap_lowers_the_final_level_at_every_effort_and_never_raises_one():
 def test_a_cap_whose_family_has_no_card_is_reported_not_refused():
     config, _, _ = expanded(level_caps={"retired-model": {"reasoning": 1.0}})
     assert unused_caps(config) == ["retired-model"]
+
+
+def test_with_the_catalog_check_healthz_reports_dominance_and_startup_names_unused_caps(backend_factory, capsys):
+    raw = raw_config(level_caps={"retired-model": {"reasoning": 1.0}})
+    raw["catalog"] = {"check_on_start": True, "path": None}
+    app = create_app(parse_config(raw), backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     catalog_check=lambda config: REPORT)
+    with TestClient(app) as client:
+        dominated = client.get("/healthz").json()["routing"]["dominated"]
+    assert isinstance(dominated, dict) and dominated  # 30-odd discovered tiers: some are always beaten
+    err = capsys.readouterr().err
+    assert "level_caps for no card" in err and "retired-model" in err

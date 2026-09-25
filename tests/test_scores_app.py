@@ -384,3 +384,12 @@ def test_benchmarks_check_marks_a_benchmark_detached_from_the_main_scale_whateve
     assert "far [detached]: 0 point(s), 0 model(s), 3 linking" in lines
     assert any(line.startswith("away [detached]:") for line in lines)
     assert any(line.startswith("code:") for line in lines)  # the main group is unmarked
+
+
+def test_check_catalog_reports_dominance_as_text_and_json(tmp_path, monkeypatch, capsys):
+    path = _cli_config(tmp_path, monkeypatch, CURATED)
+    assert cli.main(["-c", path, "check", "--catalog"]) == 0
+    assert "carded tier(s) can never be picked" in capsys.readouterr().out
+    cli.main(["-c", path, "check", "--catalog", "--json"])
+    body = json.loads(capsys.readouterr().out)
+    assert "dominated" in body and body["unused_level_caps"] == []

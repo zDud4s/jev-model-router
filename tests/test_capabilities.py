@@ -316,3 +316,15 @@ def test_a_cap_lowers_a_hand_written_card_and_changes_the_fingerprint():
 def test_level_caps_that_would_mislead_are_refused(caps, message):
     with pytest.raises(ConfigError, match=message):
         parse_config(raw_config(level_caps=caps))
+
+
+def test_state_reports_the_dominated_tiers():
+    assert router(Ask()).state()["dominated"] == {"mid": ["cx"], "top": ["sub"]}
+
+
+def test_healthz_reports_dominance_without_the_catalog_check(backend_factory, capsys):
+    app = create_app(parse_config(raw_config()), backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     router=router(Ask()))
+    with TestClient(app) as client:
+        assert client.get("/healthz").json()["routing"]["dominated"] == {"mid": ["cx"], "top": ["sub"]}
+    assert "dominance: 2 of 5 carded tier(s) can never be picked" in capsys.readouterr().err

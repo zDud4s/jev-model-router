@@ -225,6 +225,11 @@ def _expanded(config):
     return expanded, found, report, scores
 
 
+async def _never_ask(packet, questions):
+    """For a router built to be read, never to decide: nothing here asks Jev."""
+    raise RuntimeError("this command asks nobody")
+
+
 def _calibrate(config, args) -> int:
     import asyncio
 
@@ -306,10 +311,7 @@ def _calibrate_from_log(config, args) -> int:
         print(f"benchmarks: {exc}", file=sys.stderr)
         return 2
 
-    async def never(packet, questions):  # the log already holds what Jev read
-        raise RuntimeError("calibrate --from-log asks nobody")
-
-    router = CapabilityRouter(config, ask=never)
+    router = CapabilityRouter(config, ask=_never_ask)  # the log already holds what Jev read
     log = RequestLog(config.log.path)
     try:
         outcomes = log_outcomes(log, config)
@@ -559,16 +561,33 @@ def main(argv: list[str] | None = None) -> int:
             except ConfigError as exc:
                 scores = None
                 print(f"benchmarks failed to load: {exc}", file=sys.stderr)
-            _, found, unprofiled = expand(config, report, scores)
+            expanded, found, unprofiled = expand(config, report, scores)
+            extra: dict = {}
+            lines: list[str] = []
+            if config.router.kind == "capabilities":
+                from .capabilities import CapabilityRouter
+                from .discovery import unused_caps
+                from .dominance import summary
+
+                routed = CapabilityRouter(expanded, ask=_never_ask)
+                unused = unused_caps(expanded)
+                extra = {"dominated": routed.dominated, "unused_level_caps": unused}
+                if routed.dominance_error:
+                    lines.append(f"dominance check failed: {routed.dominance_error}")
+                lines += summary(routed.dominated, len(expanded.router.capabilities.cards))
+                if unused:
+                    lines.append(f"  level_caps for no card (a model left the catalog?): {', '.join(unused)}")
             if args.json:
                 print(json.dumps({**report.to_dict(), "discovered_tiers": [f.tier for f in found],
-                                  "unprofiled": unprofiled}, indent=2))
+                                  "unprofiled": unprofiled, **extra}, indent=2))
             else:
                 print(report.summary())
                 if found:
                     print(f"catalog: {len(found)} tier(s) discovered")
                 if unprofiled:
                     print(f"  on the fallback profile (write a profile): {', '.join(unprofiled)}")
+                for line in lines:
+                    print(line)
             if not args.prices:
                 return 1 if report.unavailable else 0
         if not args.prices:

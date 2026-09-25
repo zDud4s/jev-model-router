@@ -125,6 +125,11 @@ def create_app(
                 print(f"catalog: {len(found)} tier(s) discovered", file=sys.stderr)
                 if unprofiled:
                     print(f"  on the fallback profile (write a profile): {', '.join(unprofiled)}", file=sys.stderr)
+                from .discovery import unused_caps
+
+                unused = unused_caps(config)
+                if unused:
+                    print(f"  level_caps for no card (a model left the catalog?): {', '.join(unused)}", file=sys.stderr)
                 if scores is not None:
                     from .discovery import served_ids
                     from .scores_derive import startup_lines
@@ -137,6 +142,13 @@ def create_app(
     request_log = log or RequestLog(config.log.path, store_prompts=config.log.store_prompts)
     backends: dict[str, Backend] = build_backends(config, backend_factory)
     active_router: Router = router or build_router(config)
+    if getattr(active_router, "dominance_error", None):
+        print(f"dominance check failed: {active_router.dominance_error}", file=sys.stderr)
+    elif getattr(active_router, "dominated", None):
+        from .dominance import summary
+
+        for line in summary(active_router.dominated, len(config.router.capabilities.cards)):
+            print(line, file=sys.stderr)
     # None when verification is off, so the request path has one branch rather
     # than a cascade of `if config.verification.enabled` checks.
     active_verifier: Verifier | None = verifier or build_verifier(config, backends, active_router)

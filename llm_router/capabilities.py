@@ -280,6 +280,14 @@ class CapabilityRouter:
         self.fingerprint = "capabilities:" + hashlib.sha256(
             json.dumps(spec, sort_keys=True).encode()
         ).hexdigest()[:12]
+        # Cards do not change after construction, so neither does which of them can never win.
+        from .dominance import dominated  # local: dominance imports this module's types
+
+        try:
+            self.dominated = dominated(self)
+            self.dominance_error: str | None = None
+        except Exception as exc:  # noqa: BLE001 - a report must not stop the router
+            self.dominated, self.dominance_error = {}, f"{type(exc).__name__}: {exc}"
 
     def success(
         self, needs: dict[str, float], tier: str, *, scale: float | None = None, levels: dict[str, float] | None = None
@@ -517,6 +525,7 @@ class CapabilityRouter:
             "miss_scale": self._caps.miss_scale,
             "family_scales": self._caps.family_scales,
             "cards": sorted(self._caps.cards),
+            "dominated": self.dominated,
             "subscriptions": self.ledger.state(),
         }
 
