@@ -7,6 +7,7 @@ The outcomes are generated from known parameters with exact pass fractions
 from __future__ import annotations
 
 import json
+import math
 
 import pytest
 
@@ -27,7 +28,25 @@ NEEDS = {"reasoning": 1.0, "niche": 0.0}
 PRIOR = 0.7
 
 
-def world():
+# A second benchmark on the same requirement, which orders the models differently.
+CODE2 = {"m-hi": 50, "m-lo": 80, "m-a": 45, "m-b": 65}
+
+
+def curated(two: bool = False) -> dict:
+    points = [{"benchmark": "code", "model": m, "effort": "high", "score": c, "origin": "independent"}
+              for m, (c, _, _) in MODELS.items()]
+    points += [{"benchmark": "base", "model": m, "effort": "high", "score": b, "origin": "independent"}
+               for m, (_, b, _) in MODELS.items()]
+    benches = {"code": {"description": "d", "requirements": {"reasoning": PRIOR}},
+               "base": {"description": "b", "requirements": {}}}
+    if two:
+        benches["code2"] = {"description": "d2", "requirements": {"reasoning": 0.5}}
+        points += [{"benchmark": "code2", "model": m, "effort": "high", "score": c, "origin": "independent"}
+                   for m, c in CODE2.items()]
+    return {"benchmarks": benches, "points": points}
+
+
+def world(two: bool = False, sidecar: dict | None = None, full: bool = False):
     raw = raw_config(benchmarks={"path": "b.yaml"}, profiles=[
         {"match": m, "level": level, "list_prices": {"input": 1.0, "output": 5.0}}
         for m, (_, _, level) in MODELS.items()
@@ -35,16 +54,9 @@ def world():
     config = parse_config(raw)
     source = Source(name="cli", models={m: Offered(m, efforts=("high",)) for m in MODELS}, cli_version="9")
     report = CatalogReport(checked_at="now", tiers={}, sources={}, unconfigured={}, discovered={"cli": source})
-    caps = config.router.capabilities
-    points = [{"benchmark": "code", "model": m, "effort": "high", "score": c, "origin": "independent"}
-              for m, (c, _, _) in MODELS.items()]
-    points += [{"benchmark": "base", "model": m, "effort": "high", "score": b, "origin": "independent"}
-               for m, (_, b, _) in MODELS.items()]
-    scores = parse_scores({"benchmarks": {"code": {"description": "d", "requirements": {"reasoning": PRIOR}},
-                                          "base": {"description": "b", "requirements": {}}},
-                           "points": points}, caps)
+    scores = parse_scores(curated(two), config.router.capabilities, sidecar=sidecar)
     expanded, _, _ = expand(config, report, scores)
-    return expanded, scores
+    return (expanded, scores, config, report) if full else (expanded, scores)
 
 
 def outcomes(expanded, scores, n: int, *, scale: float = 0.2 / PRIOR) -> list[Outcome]:
@@ -111,3 +123,32 @@ def test_write_fit_touches_only_the_sidecars_fit_block_and_keeps_earlier_scales(
     assert data["fit"]["outcomes"] == 80
     assert set(data["fit"]["scales"]) == {"old", "code"} and data["fit"]["scales"]["old"]["scale"] == 0.4
     assert set(data["fit"]) == {"scales", "delta_a", "k_ratio", "outcomes", "fitted_at", "loglik"}
+
+
+def served_loglik(expanded, data) -> float:
+    """log L of the outcomes on the cards serving builds, clamped as the fit clamps."""
+    router = CapabilityRouter(expanded, ask=None)
+    total = 0.0
+    for o in data:
+        p = min(1 - 1e-4, max(1e-4, router.success(o.needs, o.tier)))
+        total += math.log(p if o.passed else 1 - p)
+    return total
+
+
+def test_the_fitted_log_l_is_the_log_l_of_the_cards_serving_builds_and_a_refit_stays_put(tmp_path):
+    expanded, scores = world(two=True)
+    data = outcomes(expanded, scores, 300)
+    first = fit(expanded, scores, data)
+    assert set(first.scales) == {"code", "code2"}
+    assert first.loglik_prior == pytest.approx(served_loglik(expanded, data), abs=1e-6)
+    side = tmp_path / "b.derived.json"
+    write_fit(side, first, scores, expanded)
+    served, rescored = world(two=True, sidecar=json.loads(side.read_text(encoding="utf-8")))
+    assert first.loglik == pytest.approx(served_loglik(served, data), abs=1e-6)
+    again = fit(served, rescored, data)
+    assert again.loglik_prior == pytest.approx(first.loglik, abs=1e-6)
+    assert again.loglik >= first.loglik - 1e-6
+    for b in first.scales:
+        assert again.scales[b] == pytest.approx(first.scales[b], abs=0.02)
+    assert again.delta_a == pytest.approx(first.delta_a, abs=0.02)
+    assert again.k_ratio == pytest.approx(first.k_ratio, abs=0.02)

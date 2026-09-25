@@ -81,6 +81,33 @@ def reading_at(scores: Scores, bench: str, keys: tuple[str, ...], effort: str | 
     return r0.t + (r1.t - r0.t) * f, r0.u + (r1.u - r0.u) * f
 
 
+def readings_for(
+    scores: Scores, keys: tuple[str, ...], effort: str | None, benches
+) -> dict[str, tuple[float, float]]:
+    """benchmark -> (ability, evidence x rho) of the tier, for each of `benches` that is linked and has a reading."""
+    readings: dict[str, tuple[float, float]] = {}
+    for bench in benches:
+        rho = scores.rho.get(bench, 0.0)
+        if rho <= 0:
+            continue
+        at = reading_at(scores, bench, keys, effort)
+        if at is not None:
+            readings[bench] = (at[0], at[1] * rho)
+    return readings
+
+
+def combine(requirements, readings: dict[str, tuple[float, float]], weights: dict[str, dict[str, float]]) -> Evidence:
+    """The evidence behind each requirement, from a tier's readings and the benchmarks' weights."""
+    ability: dict[str, float] = {}
+    coverage: dict[str, float] = {}
+    for r in requirements:
+        c = sum(weights[b].get(r, 0.0) * v for b, (_, v) in readings.items())
+        coverage[r] = c
+        if c > 0:
+            ability[r] = sum(weights[b].get(r, 0.0) * v * t for b, (t, v) in readings.items()) / c
+    return Evidence(ability, coverage)
+
+
 def evidence_for(
     caps: CapabilitiesConfig,
     scores: Scores,
@@ -90,22 +117,7 @@ def evidence_for(
 ) -> Evidence:
     """Per requirement, the tier's ability and the evidence behind it. Independent of `a` and `k`."""
     weights = benchmark_weights(scores, caps) if weights is None else weights
-    readings: dict[str, tuple[float, float]] = {}
-    for bench in weights:
-        rho = scores.rho.get(bench, 0.0)
-        if rho <= 0:
-            continue
-        at = reading_at(scores, bench, keys, effort)
-        if at is not None:
-            readings[bench] = (at[0], at[1] * rho)
-    ability: dict[str, float] = {}
-    coverage: dict[str, float] = {}
-    for r in caps.requirements:
-        c = sum(weights[b].get(r, 0.0) * v for b, (_, v) in readings.items())
-        coverage[r] = c
-        if c > 0:
-            ability[r] = sum(weights[b].get(r, 0.0) * v * t for b, (t, v) in readings.items()) / c
-    return Evidence(ability, coverage)
+    return combine(caps.requirements, readings_for(scores, keys, effort, weights), weights)
 
 
 def profile_line(pairs: list[tuple[float, float, float]]) -> tuple[float, float]:
@@ -124,6 +136,11 @@ def profile_line(pairs: list[tuple[float, float, float]]) -> tuple[float, float]
     return mean_p - k * mean_x, k
 
 
+def line_pairs(prior: dict[str, float], ev: Evidence) -> list[tuple[float, float, float]]:
+    """A tier's (profile level, ability, evidence) pairs, one per covered requirement, for `profile_line`."""
+    return [(prior.get(r, 0.0), ev.ability[r], ev.coverage[r]) for r in ev.ability]
+
+
 def line_for(
     caps: CapabilitiesConfig,
     scores: Scores,
@@ -134,8 +151,7 @@ def line_for(
     pairs = []
     for keys, effort, profile in tiers:
         prior, _ = effort_prior(caps, profile, effort)
-        ev = evidence_for(caps, scores, keys, effort, weights)
-        pairs += [(prior.get(r, 0.0), ev.ability[r], ev.coverage[r]) for r in ev.ability]
+        pairs += line_pairs(prior, evidence_for(caps, scores, keys, effort, weights))
     a_line, k_line = profile_line(pairs)
     a = scores.settings.a if scores.settings.a is not None else a_line + scores.fit.delta_a
     k = scores.settings.k if scores.settings.k is not None else k_line * scores.fit.k_ratio
@@ -271,6 +287,6 @@ def startup_lines(scores: Scores, caps: CapabilitiesConfig, served: dict[str, tu
 
 
 __all__ = [
-    "DerivedCard", "Evidence", "blend", "derive", "effort_prior", "evidence_for", "evidence_summary", "line_for",
-    "profile_line", "reading_at", "served_keys", "startup_lines",
+    "DerivedCard", "Evidence", "blend", "combine", "derive", "effort_prior", "evidence_for", "evidence_summary",
+    "line_for", "line_pairs", "profile_line", "reading_at", "readings_for", "served_keys", "startup_lines",
 ]
