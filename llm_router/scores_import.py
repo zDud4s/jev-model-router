@@ -21,6 +21,7 @@ import json
 import os
 import re
 import statistics
+import urllib.parse
 import urllib.request
 import zipfile
 from dataclasses import dataclass, field
@@ -40,10 +41,30 @@ class ImportFailure(Exception):
     """A mapped column or field the data does not have, or data that cannot be read."""
 
 
+def _origin(url: str) -> tuple[str, str]:
+    parts = urllib.parse.urlsplit(url)
+    return parts.scheme.lower(), parts.netloc.lower()
+
+
+class _PrivateHeaders(urllib.request.HTTPRedirectHandler):
+    """Follows a redirect, but sends the caller's own headers (the API key) only to the same scheme and host."""
+
+    def __init__(self, private: set[str]) -> None:
+        self.private = {name.lower() for name in private}
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        new = super().redirect_request(req, fp, code, msg, headers, newurl)
+        if new is not None and _origin(req.full_url) != _origin(newurl):
+            for name in [n for n in new.headers if n.lower() in self.private]:
+                del new.headers[name]
+        return new
+
+
 def http_fetch(timeout: float) -> Fetch:
     def fetch(url: str, headers: dict[str, str]) -> bytes:
         request = urllib.request.Request(url, headers={"User-Agent": "llm-router", **headers})
-        with urllib.request.urlopen(request, timeout=timeout) as response:  # noqa: S310 - URLs come from the operator's file
+        opener = urllib.request.build_opener(_PrivateHeaders(set(headers)))
+        with opener.open(request, timeout=timeout) as response:  # noqa: S310 - URLs come from the operator's file
             return response.read()
 
     return fetch
@@ -243,6 +264,10 @@ def import_sources(
             if not key:
                 report.errors[name] = f"environment variable {source.api_key_env} is not set; source skipped"
                 out["sources"][name] = {**out["sources"].get(name, {}), "status": "no key"}
+                continue
+            if urllib.parse.urlsplit(source.url).scheme.lower() != "https":
+                report.errors[name] = "a source with an API key must use https; source skipped"
+                out["sources"][name] = {**out["sources"].get(name, {}), "status": "failed"}
                 continue
             headers[source.api_key_header] = key
         try:

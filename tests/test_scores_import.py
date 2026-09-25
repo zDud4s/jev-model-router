@@ -244,3 +244,26 @@ def test_an_alias_can_carry_the_effort_its_display_name_means_so_two_variants_st
     assert points == {None: pytest.approx(20.0), "none": pytest.approx(10.0)}
     scores = load_scores(config)
     assert {(scores.key(p.model), p.effort) for p in scores.points} == {("zeta-4b", None), ("zeta-4b", "none")}
+
+
+def test_the_api_key_never_follows_a_redirect_to_another_host_or_to_http():
+    import urllib.request
+
+    from llm_router.scores_import import _PrivateHeaders
+
+    handler = _PrivateHeaders({"x-api-key"})
+    request = urllib.request.Request("https://api.test/models", headers={"x-api-key": "k", "User-Agent": "r"})
+    same = handler.redirect_request(request, None, 302, "Found", {}, "https://API.test/v2/models")
+    assert same.get_header("X-api-key") == "k"
+    for url in ("https://other.test/models", "http://api.test/models", "https://api.test:8443/models"):
+        moved = handler.redirect_request(request, None, 302, "Found", {}, url)
+        assert moved.get_header("X-api-key") is None and moved.get_header("User-agent") == "r"
+
+
+def test_a_keyed_source_over_plain_http_is_refused_before_any_fetch(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_BENCH_KEY", "k")
+    bench = {"description": "i", "requirements": {"reasoning": 1.0}, "data": {"source": "api", "score": "i"}}
+    config, _ = setup(tmp_path, {"index": bench}, sources={**SOURCES, "api": {**SOURCES["api"], "url": "http://api.test/m"}})
+    fetch = Fetch()
+    report = import_sources(config, load_scores(config), fetch, now=NOW)
+    assert "https" in report.errors["api"] and fetch.calls == []
