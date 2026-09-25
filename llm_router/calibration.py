@@ -265,20 +265,30 @@ def with_scale(config: Config, scale: float) -> Config:
     return replace(config, router=replace(config.router, capabilities=replace(caps, miss_scale=scale)))
 
 
+def _set_scale(text: str, scale: float, path: str | Path) -> str:
+    line = f"miss_scale: {scale:.3f}"
+    if re.search(r"^(\s*)miss_scale:.*$", text, flags=re.M):
+        return re.sub(r"^(\s*)miss_scale:.*$", lambda m: m.group(1) + line, text, count=1, flags=re.M)
+    match = re.search(r"^(\s*)miss:\s*\[.*\]\s*$", text, flags=re.M)
+    if not match:
+        raise ConfigError(f"{path}: no `miss:` line under router.capabilities to put miss_scale beside")
+    indent = match.group(1)
+    insert = f"\n{indent}# Set by `llm-router calibrate`: every miss entry is multiplied by it.\n{indent}{line}"
+    return text[: match.end()] + insert + text[match.end():]
+
+
 def write_scale(path: str | Path, scale: float) -> None:
     """Set `miss_scale` in the config file, keeping every comment around it."""
     target = Path(path)
-    text = target.read_text(encoding="utf-8")
-    line = f"miss_scale: {scale:.3f}"
-    if re.search(r"^(\s*)miss_scale:.*$", text, flags=re.M):
-        text = re.sub(r"^(\s*)miss_scale:.*$", lambda m: m.group(1) + line, text, count=1, flags=re.M)
-    else:
-        match = re.search(r"^(\s*)miss:\s*\[.*\]\s*$", text, flags=re.M)
-        if not match:
-            raise ConfigError(f"{path}: no `miss:` line under router.capabilities to put miss_scale beside")
-        indent = match.group(1)
-        insert = f"\n{indent}# Set by `llm-router calibrate`: every miss entry is multiplied by it.\n{indent}{line}"
-        text = text[: match.end()] + insert + text[match.end():]
+    target.write_text(_set_scale(target.read_text(encoding="utf-8"), scale, path), encoding="utf-8")
+
+
+def write_calibration(path: str | Path, scale: float, level_caps: dict[str, dict[str, float]]) -> None:
+    """Write `miss_scale` and merge `level_caps` in one write: either both land or, on a ConfigError, neither."""
+    target = Path(path)
+    text = _set_scale(target.read_text(encoding="utf-8"), scale, path)
+    if level_caps:
+        text = _set_level_caps(text, level_caps, path)
     target.write_text(text, encoding="utf-8")
 
 
@@ -400,8 +410,9 @@ def write_family_scales(path: str | Path, scales: dict[str, float]) -> None:
     target = Path(path)
     text = target.read_text(encoding="utf-8")
     line = "family_scales: " + json.dumps({k: round(v, 3) for k, v in sorted(scales.items())})
-    if re.search(r"^(\s*)family_scales:.*$", text, flags=re.M):
-        text = re.sub(r"^(\s*)family_scales:.*$", lambda m: m.group(1) + line, text, count=1, flags=re.M)
+    held = _flow_line(text, "family_scales", path)
+    if held:
+        text = text[: held.start()] + held.group(1) + line + text[held.end():]
     else:
         match = re.search(r"^(\s*)miss_scale:.*$", text, flags=re.M) or re.search(
             r"^(\s*)miss:\s*\[.*\]\s*$", text, flags=re.M
@@ -415,38 +426,67 @@ def write_family_scales(path: str | Path, scales: dict[str, float]) -> None:
     target.write_text(text, encoding="utf-8")
 
 
+def _flow_line(text: str, key: str, path: str | Path) -> re.Match[str] | None:
+    """The `key:` line, which must hold its whole value on that line (the flow form these writers write).
+
+    A block-form value, on the lines below, would be left behind under the new
+    line and corrupt the file, so it is refused instead.
+    """
+    match = re.search(rf"^([ \t]*){key}:(.*)$", text, flags=re.M)
+    if match is None:
+        return None
+    value = match.group(2).split("#", 1)[0].strip()
+    below = text[match.end():].splitlines()
+    nxt = next((ln for ln in below if ln.strip() and not ln.strip().startswith("#")), "")
+    deeper = len(nxt) - len(nxt.lstrip()) > len(match.group(1))
+    if not value and deeper:
+        raise ConfigError(f"{path}: `{key}:` is written as a block over several lines; write it as one flow "
+                          f"mapping on one line (e.g. {key}: {{\"family\": {{\"requirement\": 1.0}}}}) and rerun")
+    return match
+
+
+def _set_level_caps(text: str, level_caps: dict[str, dict[str, float]], path: str | Path) -> str:
+    match = _flow_line(text, "level_caps", path)
+    try:
+        held = (yaml.safe_load(match.group(2)) or {}) if match else {}
+    except yaml.YAMLError as exc:
+        raise ConfigError(f"{path}: the `level_caps:` line is not one flow mapping: {exc}") from None
+    if not isinstance(held, dict):
+        raise ConfigError(f"{path}: the `level_caps:` line is not a mapping")
+    merged = merge_caps(held, level_caps)
+    row = {f: {r: floor_cap(v) for r, v in sorted(reqs.items())} for f, reqs in sorted(merged.items())}
+    line = "level_caps: " + json.dumps(row)
+    if match:
+        return text[: match.start()] + match.group(1) + line + text[match.end():]
+    anchor = (re.search(r"^(\s*)family_scales:.*$", text, flags=re.M)
+              or re.search(r"^(\s*)miss_scale:.*$", text, flags=re.M)
+              or re.search(r"^(\s*)miss:\s*\[.*\]\s*$", text, flags=re.M))
+    if not anchor:
+        raise ConfigError(f"{path}: no `miss:` line under router.capabilities to put level_caps beside")
+    indent = anchor.group(1)
+    insert = (f"\n{indent}# Set by `llm-router calibrate --anchors` from insufficient anchors: a family's"
+              f"\n{indent}# ceiling on one requirement, applied last to every card.\n{indent}{line}")
+    return text[: anchor.end()] + insert + text[anchor.end():]
+
+
+def floor_cap(value: float) -> float:
+    """A ceiling as written: floored to 3 places, never rounded up over the line it keeps the tier under."""
+    # +1e-9: 1.001 * 1000 is 1000.9999999999999 in floating point.
+    return math.floor(value * 1000 + 1e-9) / 1000
+
+
 def write_level_caps(path: str | Path, level_caps: dict[str, dict[str, float]]) -> None:
     """Merge `level_caps` into the config file (the lower ceiling wins), as one line beside `family_scales`.
 
-    Only the one-line flow form this writes is merged: a hand-written multi-line
-    `level_caps:` block is not read (`write_family_scales` has the same limit).
+    Only the one-line flow form this writes is merged; a multi-line block
+    `level_caps:` is refused with a ConfigError rather than corrupted.
     """
     target = Path(path)
-    text = target.read_text(encoding="utf-8")
-    pattern = r"^(\s*)level_caps:(.*)$"
-    match = re.search(pattern, text, flags=re.M)
-    merged = merge_caps((yaml.safe_load(match.group(2)) or {}) if match else {}, level_caps)
-    # Floored, not rounded: a ceiling rounded up could put the tier back over the line.
-    # (+1e-9: 1.001 * 1000 is 1000.9999999999999 in floating point.)
-    row = {f: {r: math.floor(v * 1000 + 1e-9) / 1000 for r, v in sorted(reqs.items())} for f, reqs in sorted(merged.items())}
-    line = "level_caps: " + json.dumps(row)
-    if match:
-        text = text[: match.start()] + match.group(1) + line + text[match.end():]
-    else:
-        anchor = (re.search(r"^(\s*)family_scales:.*$", text, flags=re.M)
-                  or re.search(r"^(\s*)miss_scale:.*$", text, flags=re.M)
-                  or re.search(r"^(\s*)miss:\s*\[.*\]\s*$", text, flags=re.M))
-        if not anchor:
-            raise ConfigError(f"{path}: no `miss:` line under router.capabilities to put level_caps beside")
-        indent = anchor.group(1)
-        insert = (f"\n{indent}# Set by `llm-router calibrate --anchors` from insufficient anchors: a family's"
-                  f"\n{indent}# ceiling on one requirement, applied last to every card.\n{indent}{line}")
-        text = text[: anchor.end()] + insert + text[anchor.end():]
-    target.write_text(text, encoding="utf-8")
+    target.write_text(_set_level_caps(target.read_text(encoding="utf-8"), level_caps, path), encoding="utf-8")
 
 
 __all__ = [
     "AnchorResult", "Calibration", "FamilyFit", "Outcome", "calibrate", "fit_family_scales", "load_anchors",
-    "log_outcomes", "merge_caps", "with_caps", "with_scale", "write_family_scales", "write_level_caps",
-    "write_scale",
+    "floor_cap", "log_outcomes", "merge_caps", "with_caps", "with_scale", "write_calibration",
+    "write_family_scales", "write_level_caps", "write_scale",
 ]

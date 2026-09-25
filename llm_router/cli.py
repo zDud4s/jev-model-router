@@ -233,7 +233,7 @@ async def _never_ask(packet, questions):
 def _calibrate(config, args) -> int:
     import asyncio
 
-    from .calibration import calibrate, load_anchors, with_caps, with_scale, write_level_caps, write_scale
+    from .calibration import calibrate, load_anchors, with_caps, with_scale, write_calibration
     from .capabilities import CapabilityRouter
     from .schemas import ChatCompletionRequest
 
@@ -299,9 +299,12 @@ def _calibrate(config, args) -> int:
     for conflict in cal.conflicts:
         print(f"  conflict: {conflict}")
     if args.write:
-        write_scale(args.config, cal.scale)
-        if cal.caps:
-            write_level_caps(args.config, cal.caps)  # a cap refused for breaking an anchor never got here
+        try:
+            # One write: a level_caps the file cannot take leaves miss_scale unwritten too.
+            write_calibration(args.config, cal.scale, cal.caps)  # a cap refused for breaking an anchor is not here
+        except (ConfigError, OSError) as exc:
+            print(f"not written: {exc}", file=sys.stderr)
+            return 2
         print(f"written to {args.config}")
     return 1 if cal.conflicts else 0
 
@@ -336,7 +339,11 @@ def _calibrate_from_log(config, args) -> int:
         print(f"{fit.family:24} {fit.n:5d} {fit.passes / fit.n:7.0%} {fit.predicted:9.0%}  {scale}")
     scales = {f.family: f.scale for f in fits if f.scale is not None}
     if args.write and scales:
-        write_family_scales(args.config, {**config.router.capabilities.family_scales, **scales})
+        try:
+            write_family_scales(args.config, {**config.router.capabilities.family_scales, **scales})
+        except (ConfigError, OSError) as exc:
+            print(f"not written: {exc}", file=sys.stderr)
+            return 2
         print(f"written to {args.config}")
     return 0
 

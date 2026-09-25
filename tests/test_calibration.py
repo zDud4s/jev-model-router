@@ -240,3 +240,47 @@ def test_a_family_cap_names_every_other_tier_of_the_family_it_lowers():
     assert lowered["claude:claude-opus-5-5@high"] == ("reasoning", 2.5, new)
     cards = config.router.capabilities.cards
     assert all(cards[t].levels["reasoning"] > new for t in lowered)
+
+
+BLOCK = ("router:\n  capabilities:\n    miss: [0.9, 0.5, 0.2, 0.05]\n    miss_scale: 1.0\n"
+         "    level_caps:\n      top:\n        code: 3.0\n    floor: 0.2\n")
+
+
+def test_a_block_form_level_caps_is_refused_not_corrupted(tmp_path):
+    path = tmp_path / "c.yaml"
+    path.write_text(BLOCK, encoding="utf-8")
+    with pytest.raises(ConfigError, match="level_caps"):
+        write_level_caps(path, {"mid": {"reasoning": 1.0}})
+    assert path.read_text(encoding="utf-8") == BLOCK
+
+
+def test_calibrate_write_refuses_a_block_form_level_caps_and_writes_nothing(tmp_path, monkeypatch, capsys):
+    import yaml
+
+    from llm_router import cli
+    from test_discovery import report
+
+    raw = raw_config(miss_scale=1.0, level_caps={"top": {"code": 3.0}})
+    raw["catalog"] = {"check_on_start": False, "path": None}
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(raw, default_flow_style=False), encoding="utf-8")
+    before = path.read_text(encoding="utf-8")
+    assert "level_caps:\n" in before  # block form
+    anchors = tmp_path / "a.yaml"
+    anchors.write_text(yaml.safe_dump(ANCHORS), encoding="utf-8")
+    monkeypatch.setattr("llm_router.catalog.check_catalog", lambda config: report())
+    monkeypatch.setattr("llm_router.capabilities.jev_asker", lambda tier: Ask(HARD))
+    assert cli.main(["-c", str(path), "calibrate", "--anchors", str(anchors), "--write"]) == 2
+    assert "level_caps" in capsys.readouterr().err
+    assert path.read_text(encoding="utf-8") == before  # neither miss_scale nor level_caps written
+
+
+def test_a_block_form_family_scales_is_refused_not_corrupted(tmp_path):
+    from llm_router.calibration import write_family_scales
+
+    path = tmp_path / "c.yaml"
+    text = BLOCK.replace("level_caps:\n      top:\n        code: 3.0\n", "family_scales:\n      top: 0.5\n")
+    path.write_text(text, encoding="utf-8")
+    with pytest.raises(ConfigError, match="family_scales"):
+        write_family_scales(path, {"mid": 0.4})
+    assert path.read_text(encoding="utf-8") == text
