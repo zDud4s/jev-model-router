@@ -251,3 +251,200 @@ def test_unknown_and_budget_points_never_link_benchmarks():
     _, scores = scored([pt("code", "m", "unknown", 50), pt("base", "m", "unknown", 50),
                         pt("code", "m", "32k", 50), pt("base", "m", "32k", 50)])
     assert scores.links["code"] == 0
+
+
+# ---------------------------------------------------------------- derivation
+from llm_router.scores_derive import derive, effort_prior, evidence_for, line_for, profile_line, reading_at  # noqa: E402
+
+
+def profile(caps, match: str = "acme-large"):
+    return next(p for p in caps.profiles if p.match == match)
+
+
+def card(caps, scores, model: str, effort: str | None, line=(2.0, 1.0), prof: str | None = None):
+    return derive(caps, scores, (model,), effort, profile(caps, prof or model), line)
+
+
+def test_effort_prior_is_todays_card_rule():
+    caps = caps_with()
+    levels, output = effort_prior(caps, profile(caps), "medium")
+    assert levels == {"reasoning": pytest.approx(1.7), "niche": 2.0}  # only thinking requirements move
+    assert output == 900  # 2000 x 0.45
+    assert effort_prior(caps, profile(caps), None) == ({"reasoning": 2.0, "niche": 2.0}, 2000)
+
+
+THREE = linked(pt("code", "acme-large", "high", 80), pt("code", "acme-small", "high", 40),
+               pt("code", "zeta-1", "high", 60))
+
+
+def test_a_model_above_average_ability_is_rated_above_a_and_one_below_it_below():
+    caps, scores = scored(THREE)
+    large, small = card(caps, scores, "acme-large", "high"), card(caps, scores, "acme-small", "high")
+    assert large.levels["reasoning"] > 2.0 > small.levels["reasoning"]
+    # A requirement no benchmark covers stays on the profile.
+    assert large.levels["niche"] == 2.0 and large.source["niche"] == "profile" and large.coverage["niche"] == 0.0
+    assert large.coverage["reasoning"] > 0
+
+
+def test_the_level_is_the_blend_of_the_line_and_the_profile_by_coverage():
+    caps, scores = scored(THREE)
+    ev = evidence_for(caps, scores, ("acme-large",), "high")
+    c, t = ev.coverage["reasoning"], ev.ability["reasoning"]
+    lam = c / (c + 0.25)
+    expected = lam * min(3.0, max(0.0, 2.3 + 0.6 * t)) + (1 - lam) * 2.0
+    assert card(caps, scores, "acme-large", "high", line=(2.3, 0.6)).levels["reasoning"] == pytest.approx(expected)
+
+
+def test_effort_value_depends_on_the_requirement():
+    # Medium beats high where the work is `reasoning`; high beats medium on `niche`.
+    caps, scores = scored(linked(
+        pt("code", "acme-large", "medium", 70), pt("code", "acme-large", "high", 60), pt("code", "zeta-1", "high", 50),
+        pt("code", "acme-small", "high", 40),
+        pt("lore", "acme-large", "medium", 40), pt("lore", "acme-large", "high", 60), pt("lore", "zeta-1", "high", 50),
+        pt("lore", "acme-small", "high", 40),
+    ))
+    medium, high = card(caps, scores, "acme-large", "medium"), card(caps, scores, "acme-large", "high")
+    assert medium.levels["reasoning"] > high.levels["reasoning"]
+    assert high.levels["niche"] > medium.levels["niche"]
+
+
+def test_an_unmeasured_effort_is_interpolated_between_measured_ones_and_never_extrapolated():
+    caps, scores = scored(linked(pt("code", "acme-large", "low", 50), pt("code", "acme-large", "high", 70),
+                                 pt("code", "zeta-1", "high", 60), pt("code", "acme-small", "high", 40)))
+    low = reading_at(scores, "code", ("acme-large",), "low")
+    high = reading_at(scores, "code", ("acme-large",), "high")
+    medium = reading_at(scores, "code", ("acme-large",), "medium")
+    assert medium == pytest.approx(((low[0] + high[0]) / 2, (low[1] + high[1]) / 2))
+    assert reading_at(scores, "code", ("acme-large",), "xhigh") is None
+    assert card(caps, scores, "acme-large", "xhigh").coverage["reasoning"] == 0.0
+
+
+def test_a_tier_without_efforts_matches_only_null_points_and_unknown_matches_no_tier():
+    caps, scores = scored(linked(pt("code", "acme-small", None, 80), pt("code", "acme-small", "high", 20),
+                                 pt("code", "zeta-1", "high", 50), pt("code", "acme-large", "high", 60))
+                          + [pt("code", "zeta-1", "unknown", 70)])
+    assert reading_at(scores, "code", ("acme-small",), None) is not None
+    assert reading_at(scores, "code", ("zeta-1",), None) is None
+    assert reading_at(scores, "code", ("zeta-1",), "unknown") is not None  # it is read, but no tier asks for it
+
+
+def test_a_vendor_only_model_counts_vendor_weight_times_an_independent_one():
+    rows = lambda origin: linked(
+        pt("code", "acme-large", "high", 70, origin=origin), pt("code", "acme-small", "high", 40, origin="independent"),
+        pt("code", "zeta-1", "high", 55, origin="independent"))
+    caps, vendor = scored(rows("vendor"))
+    _, independent = scored(rows("independent"))
+    ratio = (evidence_for(caps, vendor, ("acme-large",), "high").coverage["reasoning"]
+             / evidence_for(caps, independent, ("acme-large",), "high").coverage["reasoning"])
+    assert ratio == pytest.approx(0.5)
+
+
+def test_a_score_near_the_ceiling_carries_less_evidence_than_one_near_the_middle():
+    caps, scores = scored(linked(pt("code", "acme-large", "high", 99), pt("code", "acme-small", "high", 50),
+                                 pt("code", "zeta-1", "high", 60)))
+    top = evidence_for(caps, scores, ("acme-large",), "high").coverage["reasoning"]
+    mid = evidence_for(caps, scores, ("acme-small",), "high").coverage["reasoning"]
+    assert top < 0.1 * mid
+
+
+def test_the_baseline_moves_chance_to_zero():
+    benches = {**BENCHES, "code": {**BENCHES["code"], "baseline": 0.25}}
+    _, scores = scored(linked(pt("code", "acme-large", "high", 25), pt("code", "zeta-1", "high", 62.5, origin="independent"),
+                              pt("code", "acme-small", "high", 40)), benches)
+    # 62.5% with a 25% baseline is 50% of the way to full marks: u = 4 x 0.5 x 0.5.
+    assert scores.readings["code"]["zeta-1"]["high"].u == pytest.approx(1.0)
+
+
+def test_a_point_is_matched_by_any_of_the_models_keys():
+    caps, scores = scored(THREE + linked(pt("code", "acme-large-alias", "high", 80)))
+    ev = evidence_for(caps, scores, ("acme-large-2026", "acme-large-alias"), "high")
+    assert ev.coverage["reasoning"] > 0
+
+
+def test_an_unmatched_point_informs_the_scale_when_its_model_links_benchmarks():
+    caps, before = scored(THREE)
+    _, crowd = scored(THREE + [pt("code", "ghost-9", "high", 10)])  # on one benchmark: no effect
+    _, linking = scored(THREE + linked(pt("code", "ghost-9", "high", 10)))
+    at = lambda s: evidence_for(caps, s, ("acme-large",), "high").ability["reasoning"]
+    assert at(crowd) == pytest.approx(at(before))
+    assert at(linking) != pytest.approx(at(before))
+
+
+def test_the_blend_is_the_profile_at_no_coverage_and_moves_continuously_toward_the_evidence():
+    levels = []
+    for weight in (0.0, 1e-6, 0.25, 1.0):
+        benches = {**BENCHES, "code": {"description": "d", "requirements": {"reasoning": weight}}}
+        caps, scores = scored(THREE, benches)
+        levels.append(card(caps, scores, "acme-large", "high").levels["reasoning"])
+    assert levels[0] == 2.0  # exactly today's card
+    assert levels[1] == pytest.approx(2.0, abs=1e-4)  # no jump as a weight leaves zero
+    assert levels[0] < levels[2] < levels[3]
+
+
+def test_a_measured_effort_gap_beats_the_rule_only_when_it_is_larger_than_c0_over_c_times_the_shift():
+    # c0 = 0.25, C ~ 1, rule shift high - medium = +0.3: the threshold is about 0.075
+    # levels. 0.40 logits is clearly above it; 0.02 clearly below.
+    def medium_minus_high(gap_logits: float) -> float:
+        high = 0.6
+        medium = 1 / (1 + math.exp(-(logit(high) + gap_logits)))
+        caps, scores = scored(linked(
+            pt("code", "acme-large", "medium", medium * 100), pt("code", "acme-large", "high", high * 100),
+            pt("code", "zeta-1", "high", 50), pt("code", "acme-small", "high", 40),
+        ))
+        return card(caps, scores, "acme-large", "medium").levels["reasoning"] - \
+            card(caps, scores, "acme-large", "high").levels["reasoning"]
+
+    assert medium_minus_high(0.40) > 0  # the measurement wins
+    assert medium_minus_high(0.02) < 0  # within noise: the rule decides
+
+
+def test_the_profile_line_keeps_the_profiles_mean_and_spread():
+    pairs = [(1.0, -1.0, 1.0), (2.0, 0.0, 1.0), (3.0, 1.0, 1.0), (2.5, 2.0, 1.0)]
+    a, k = profile_line(pairs)
+    levels = [a + k * x for _, x, _ in pairs]
+    mean = lambda v: sum(v) / len(v)
+    sd = lambda v: math.sqrt(mean([(x - mean(v)) ** 2 for x in v]))
+    assert mean(levels) == pytest.approx(mean([p for p, _, _ in pairs]))
+    assert sd(levels) == pytest.approx(sd([p for p, _, _ in pairs]))
+    assert profile_line(pairs[:2]) == (2.0, 1.0)  # too few pairs
+
+
+def test_the_line_takes_fitted_offsets_and_an_explicit_config_value_wins():
+    tiers = lambda caps: [((m,), "high", profile(caps, m)) for m in ("acme-large", "acme-small")] + [
+        (("zeta-1",), "high", profile(caps, "zeta-*"))]
+    caps, scores = scored(THREE)
+    a0, k0 = line_for(caps, scores, tiers(caps))
+    caps, fitted = scored(THREE, sidecar={"fit": {"delta_a": 0.2, "k_ratio": 0.5}})
+    assert line_for(caps, fitted, tiers(caps)) == pytest.approx((a0 + 0.2, k0 * 0.5))
+    caps, fixed = scored(THREE, sidecar={"fit": {"delta_a": 0.2}}, a=1.5, k=2.0)
+    assert line_for(caps, fixed, tiers(caps)) == (1.5, 2.0)
+
+
+def test_a_fitted_scale_applies_only_while_the_benchmarks_words_are_unchanged():
+    caps, scores = scored(THREE)
+    digest = content_hash(scores.benchmarks["code"], caps.requirements)
+    base = evidence_for(caps, scores, ("acme-large",), "high").coverage["reasoning"]
+    _, fitted = scored(THREE, sidecar={"fit": {"scales": {"code": {"scale": 0.5, "hash": digest}}}})
+    assert evidence_for(caps, fitted, ("acme-large",), "high").coverage["reasoning"] == pytest.approx(base / 2)
+    changed = {**BENCHES, "code": {"description": "fix code", "requirements": {"reasoning": 0.9}}}
+    _, stale = scored(THREE, changed, sidecar={"fit": {"scales": {"code": {"scale": 0.5, "hash": digest}}}})
+    assert evidence_for(caps, stale, ("acme-large",), "high").coverage["reasoning"] == pytest.approx(base * 0.9)
+
+
+def test_output_tokens_follow_the_published_cost_ratios_and_fall_back_to_the_rule():
+    caps, scores = scored(linked(
+        pt("code", "acme-large", "medium", 50, cost_usd=1.0), pt("code", "acme-large", "high", 55, cost_usd=2.0),
+        pt("lore", "acme-large", "medium", 50, cost_usd=0.5), pt("lore", "acme-large", "high", 55, cost_usd=2.0),
+        # a pair with a missing cost is left out of the median
+        pt("code", "zeta-1", "high", 50), pt("lore", "zeta-1", "high", 50),
+    ))
+    assert card(caps, scores, "acme-large", "medium").output_tokens == 750  # 2000 x median(0.5, 0.25)
+    assert card(caps, scores, "acme-large", "xhigh").output_tokens == 3200  # the rule's x1.6
+    assert card(caps, scores, "acme-large", None).output_tokens == 2000
+
+
+def test_costs_count_for_output_tokens_even_on_a_benchmark_off_the_shared_scale():
+    caps, scores = scored([pt("lore", "acme-large", "medium", 50, cost_usd=1.0),
+                           pt("lore", "acme-large", "high", 55, cost_usd=4.0)])
+    assert scores.links["lore"] == 0  # unlinked: no reading, but the costs are still published ratios
+    assert card(caps, scores, "acme-large", "medium").output_tokens == 500  # 2000 x 0.25
