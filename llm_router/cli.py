@@ -1,4 +1,4 @@
-"""Command line: `llm-router serve`, `stats`, `train`, `label`, `reconcile` and `check`."""
+"""Command line: `llm-router serve`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
 
 from __future__ import annotations
 
@@ -120,6 +120,16 @@ def _build_parser() -> argparse.ArgumentParser:
         help="how far above the target a sufficient tier must land (Jev's readings vary between calls)",
     )
 
+    bench = sub.add_parser("benchmarks", help="benchmark evidence -> card levels")
+    bench_sub = bench.add_subparsers(dest="action", required=True)
+    imp = bench_sub.add_parser("import", help="fetch the configured sources and rewrite the imported points")
+    imp.add_argument("--source", default=None, help="import only this source")
+    bench_sub.add_parser("read", help="ask Jev what each new or changed benchmark measures; writes the sidecar")
+    bench_sub.add_parser("check", help="validate the files and show the evidence and levels per model")
+    fit = bench_sub.add_parser("fit", help="fit each benchmark's worth and the level line from judged outcomes")
+    fit.add_argument("--db", default=None, help="read outcomes from this database instead of the serving log")
+    fit.add_argument("--write", action="store_true", help="store the fit in the sidecar")
+
     check = sub.add_parser("check", help="validate the config and exit")
     check.add_argument(
         "--prices",
@@ -202,13 +212,23 @@ def _train(config, args) -> int:
     return 0
 
 
+def _expanded(config):
+    """The config with discovered tiers, cards derived from benchmark evidence when configured."""
+    from .catalog import check_catalog
+    from .discovery import expand
+    from .scores import load_scores
+
+    report = check_catalog(config)
+    scores = load_scores(config)  # a ConfigError here is the caller's to report
+    expanded, found, _ = expand(config, report, scores)
+    return expanded, found, report, scores
+
+
 def _calibrate(config, args) -> int:
     import asyncio
 
     from .calibration import calibrate, load_anchors, with_scale, write_scale
     from .capabilities import CapabilityRouter
-    from .catalog import check_catalog
-    from .discovery import expand
     from .schemas import ChatCompletionRequest
 
     if config.router.kind != "capabilities":
@@ -224,7 +244,11 @@ def _calibrate(config, args) -> int:
     except ConfigError as exc:
         print(f"anchors: {exc}", file=sys.stderr)
         return 2
-    config, _, _ = expand(config, check_catalog(config))
+    try:
+        config, _, _, _ = _expanded(config)
+    except ConfigError as exc:
+        print(f"benchmarks: {exc}", file=sys.stderr)
+        return 2
 
     async def run():
         router = CapabilityRouter(config)
@@ -268,10 +292,12 @@ def _calibrate(config, args) -> int:
 def _calibrate_from_log(config, args) -> int:
     from .calibration import fit_family_scales, log_outcomes, write_family_scales
     from .capabilities import CapabilityRouter
-    from .catalog import check_catalog
-    from .discovery import expand
 
-    config, _, _ = expand(config, check_catalog(config))
+    try:
+        config, _, _, _ = _expanded(config)
+    except ConfigError as exc:
+        print(f"benchmarks: {exc}", file=sys.stderr)
+        return 2
 
     async def never(packet, questions):  # the log already holds what Jev read
         raise RuntimeError("calibrate --from-log asks nobody")
@@ -301,6 +327,178 @@ def _calibrate_from_log(config, args) -> int:
     return 0
 
 
+def _benchmarks(config, args) -> int:
+    from .scores import load_scores
+
+    caps = config.router.capabilities
+    if config.router.kind != "capabilities" or caps is None or caps.benchmarks is None:
+        print("benchmarks needs router.kind: capabilities and a router.capabilities.benchmarks block",
+              file=sys.stderr)
+        return 2
+    try:
+        scores = load_scores(config)
+    except ConfigError as exc:
+        print(f"benchmarks: {exc}", file=sys.stderr)
+        return 2
+    if args.action == "import":
+        return _benchmarks_import(config, scores, args)
+    if args.action == "read":
+        return _benchmarks_read(config, scores)
+    if args.action == "check":
+        return _benchmarks_check(config, scores)
+    return _benchmarks_fit(config, scores, args)
+
+
+def _benchmarks_import(config, scores, args) -> int:
+    from .scores_import import http_fetch, import_sources
+
+    if args.source and args.source not in scores.sources:
+        print(f"no source {args.source!r}; the file has: {', '.join(scores.sources) or 'none'}", file=sys.stderr)
+        return 2
+    report = import_sources(config, scores, http_fetch(config.router.capabilities.benchmarks.refresh_timeout_s),
+                            only=args.source)
+    for name, summary in sorted(report.sources.items()):
+        print(f"{name}: {summary.rows} row(s) read, {summary.skipped} skipped, {summary.points} point(s) "
+              f"in {len(summary.benchmarks)} benchmark(s)")
+    for name, error in sorted(report.errors.items()):
+        print(f"failed: {name}: {error} (its previous points are kept)", file=sys.stderr)
+    print(f"written to {scores.imported_path}")
+    return 1 if report.errors else 0
+
+
+def _benchmarks_read(config, scores) -> int:
+    import asyncio
+
+    from .capabilities import jev_asker
+    from .scores_read import read
+
+    ask = jev_asker(config.tier(config.router.capabilities.jev_tier))
+
+    async def run():
+        try:
+            return await read(config, scores, ask)
+        finally:
+            await ask.client.aclose()
+
+    report = asyncio.run(run())
+    for key in report.asked:
+        print(f"read: {key}")
+    print(f"{len(report.asked)} read, {len(report.unchanged)} unchanged, {len(report.manual)} manual")
+    for key, error in report.errors.items():
+        print(f"jev error on {key}, its old reading is kept: {error}", file=sys.stderr)
+    if report.asked:
+        print(f"written to {scores.sidecar_path}")
+    return 1 if report.errors else 0
+
+
+def _benchmarks_check(config, scores) -> int:
+    from .catalog import check_catalog
+    from .discovery import expand, profile_for, served_ids
+    from .scores import base_weights, fitted_scales
+    from .scores_derive import derive, evidence_summary, line_for, served_keys, startup_lines
+
+    caps = config.router.capabilities
+    report = check_catalog(config)
+    expanded, found, _ = expand(config, report, scores)
+    weights, scales = base_weights(scores, caps), fitted_scales(scores, caps)
+    print(f"{len(scores.benchmarks)} benchmark(s), {len(scores.points)} point(s), "
+          f"imported {scores.imported_at or 'never'}")
+    for name, source in scores.sources.items():
+        print(f"  source {name} ({source.origin}): {scores.imported_status.get(name, 'not imported')}")
+    for key in scores.benchmarks:
+        how, row = weights.get(key, ("unread", {}))
+        links = scores.links.get(key, 0)
+        marker = "" if links >= 3 else (" [unlinked]" if links == 0 else " [thin]")
+        readings = [r for by_effort in scores.readings.get(key, {}).values() for r in by_effort.values()]
+        models = len(scores.readings.get(key, {}))
+        spread = (f"difficulty {scores.scale.beta[key] / scores.scale.alpha[key]:+.2f}, "
+                  f"spread {scores.scale.alpha[key]:.2f}, ") if key in scores.scale.alpha else ""
+        info = f", mean information {sum(r.u for r in readings) / len(readings):.2f}" if readings else ""
+        print(f"\n{key}{marker}: {spread}{len(readings)} point(s), {models} model(s), {links} linking{info}")
+        scale = f" x{scales[key]:.2f} fitted" if key in scales else ""
+        print(f"  weights ({how}{scale}): " + (" ".join(f"{r}={w:.2f}" for r, w in row.items() if w > 0) or "none"))
+    served = served_ids(found, report)
+    keys, _ = served_keys(scores, served)
+    print("\nevidence per served model:")
+    for name in sorted(served):
+        summary = evidence_summary(scores, keys[name])
+        if not summary:
+            print(f"  {name}: no evidence")
+            continue
+        origins = set().union(*(o for _, o in summary.values()))
+        tag = " [vendor-only]" if origins == {"vendor"} else ""
+        print(f"  {name}{tag}: " + "; ".join(
+            f"{b} ({', '.join(sorted(str(e) for e in efforts))})" for b, (efforts, _) in sorted(summary.items())))
+    tiers = []
+    for f in found:
+        offered = report.discovered[f.source].models[f.model]
+        tiers.append((f.tier, keys[f"{f.source}:{f.model}"], f.effort, profile_for(caps, offered)[0]))
+    line = line_for(caps, scores, [(k, e, p) for _, k, e, p in tiers])
+    print(f"\nline over the discovered tiers: a={line[0]:.2f} k={line[1]:.2f} profile_weight={scores.c0:.2f}\n")
+    cards = expanded.router.capabilities.cards
+    for tier, k, effort, profile in tiers:
+        derived = derive(caps, scores, k, effort, profile, line)
+        # A tier no benchmark covers is its profile, and is named by the no-evidence line below.
+        if not any(derived.coverage[r] > 0 for r in caps.requirements):
+            continue
+        # Levels and output as served (the card `expand` built); source and C from the evidence.
+        print(f"{tier}: output_tokens {cards[tier].output_tokens}")
+        for r in caps.requirements:
+            level = cards[tier].levels.get(r, 0.0)
+            print(f"  {r:14} {level:.2f}  {derived.source[r]:9} C={derived.coverage[r]:.2f}")
+    for line_text in startup_lines(scores, caps, served):
+        print(line_text)
+    for p in scores.superseded:
+        print(f"superseded (an independent point replaces it; it can be deleted): {p.benchmark} {p.model} {p.effort}")
+    served_keys_all = sorted({k for ks in keys.values() for k in ks})
+    unmatched = sorted({p.model for p in scores.points if scores.key(p.model) not in served_keys_all})
+    if unmatched:
+        import difflib
+
+        print(f"{len(unmatched)} unmatched model string(s) (no served model has the key; they still inform "
+              f"the scale when they link benchmarks)")
+        # The ones that look like a served model written differently: an `aliases` entry fixes each.
+        for text in unmatched:
+            near = difflib.get_close_matches(scores.key(text), served_keys_all, n=1, cutoff=0.8)
+            if near:
+                print(f"  {text!r} is near served key {near[0]!r}: add an alias if it is the same model")
+    return 0
+
+
+def _benchmarks_fit(config, scores, args) -> int:
+    from .calibration import log_outcomes
+    from .catalog import check_catalog
+    from .discovery import expand, model_ids
+    from .scores_fit import fit, write_fit
+
+    report = check_catalog(config)
+    expanded, _, _ = expand(config, report, scores)
+    source = args.db or config.log.path
+    log = RequestLog(source)
+    try:
+        outcomes = log_outcomes(log, expanded)
+    finally:
+        log.close()
+    if not outcomes:
+        print(f"no judged capabilities outcomes in {source}: nothing to fit")
+        return 0
+    result = fit(expanded, scores, outcomes, model_ids=model_ids(report))
+    print(f"{result.outcomes} outcome(s) on {len(result.tiers)} derived tier(s)")
+    print(f"log L: {result.loglik_prior:.2f} at the prior, {result.loglik:.2f} fitted")
+    print(f"line: a {result.a_line:.2f} -> {result.a:.2f} (delta {result.delta_a:+.2f}), "
+          f"k {result.k_line:.2f} -> {result.k:.2f} (x{result.k_ratio:.2f})")
+    for bench, value in result.moved:
+        print(f"  {bench}: worth 1.00 -> {value:.2f}")
+    for bench in result.unlinked:
+        print(f"  {bench}: unlinked, never enters a level; its worth stays at the prior")
+    if args.write:
+        write_fit(scores.sidecar_path, result, scores, config)
+        print(f"written to {scores.sidecar_path}")
+        print("serving recomputes the profile line with the new scales, so its a and k can differ slightly")
+        print("next: `calibrate --from-log`, then `calibrate --anchors`; both fit on these levels")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -313,6 +511,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "calibrate":
         return _calibrate(config, args)
 
+    if args.command == "benchmarks":
+        return _benchmarks(config, args)
+
     if args.command == "check":
         quiet = args.json and (args.prices or args.catalog)
         if not quiet:
@@ -324,8 +525,14 @@ def main(argv: list[str] | None = None) -> int:
             if config.catalog.path and write_if_changed(report, config.catalog.path) and not quiet:
                 print(f"catalog updated: {config.catalog.path}")
             from .discovery import expand
+            from .scores import load_scores
 
-            _, found, unprofiled = expand(config, report)
+            try:
+                scores = load_scores(config)
+            except ConfigError as exc:
+                scores = None
+                print(f"benchmarks failed to load: {exc}", file=sys.stderr)
+            _, found, unprofiled = expand(config, report, scores)
             if args.json:
                 print(json.dumps({**report.to_dict(), "discovered_tiers": [f.tier for f in found],
                                   "unprofiled": unprofiled}, indent=2))

@@ -144,3 +144,62 @@ def test_a_broken_benchmarks_file_does_not_stop_startup(tmp_path, capsys, backen
     with TestClient(app) as client:
         assert client.get("/healthz").status_code == 200
     assert app.state.config.router.capabilities.cards["cli:acme-large@high"].levels["reasoning"] == 2.0
+
+
+# ---------------------------------------------------------------- command line
+from llm_router import cli  # noqa: E402
+
+
+def _cli_config(tmp_path, monkeypatch, body: dict) -> str:
+    bench = tmp_path / "b.yaml"
+    bench.write_text(yaml.safe_dump(body), encoding="utf-8")
+    raw = raw_config(benchmarks={"path": str(bench)})
+    raw["catalog"] = {"check_on_start": False, "path": None}
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    monkeypatch.setattr("llm_router.catalog.check_catalog", lambda config: REPORT)
+    return str(path)
+
+
+def test_benchmarks_check_prints_benchmarks_evidence_per_model_and_levels(tmp_path, monkeypatch, capsys):
+    path = _cli_config(tmp_path, monkeypatch, CURATED)
+    assert cli.main(["-c", path, "benchmarks", "check"]) == 0
+    out = capsys.readouterr().out
+    flat = " ".join(out.split())
+    assert "code: difficulty" in flat and "3 model(s), 3 linking" in flat
+    assert "weights (manual): reasoning=1.00" in flat
+    assert "cli:acme-small: base (None); code (None)" in flat
+    assert "cli:unknown-1: no evidence" in flat
+    assert "cli:acme-large@high: output_tokens" in flat
+    assert "niche 2.00 profile C=0.00" in flat  # uncovered, still listed
+
+
+def test_benchmarks_needs_the_block(tmp_path):
+    raw = raw_config()
+    del raw["router"]["capabilities"]["benchmarks"]
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(raw), encoding="utf-8")
+    assert cli.main(["-c", str(path), "benchmarks", "check"]) == 2
+
+
+def test_benchmarks_import_fetches_and_reports(tmp_path, monkeypatch, capsys):
+    table = [{"Model version": "acme-large_high", "Score": "0.8"}]
+    body = {"sources": {"hub": SOURCES["hub"]}, "benchmarks": {
+        "hubbed": {"description": "d", "requirements": {"reasoning": 1.0},
+                   "data": {"source": "hub", "table": "t.csv", "score": "Score"}}}, "points": []}
+    path = _cli_config(tmp_path, monkeypatch, body)
+    fetch = Fetch(**{"https://hub_test": zipped(t__csv=table, meta__csv=META)})
+    monkeypatch.setattr("llm_router.scores_import.http_fetch", lambda timeout: fetch)
+    assert cli.main(["-c", path, "benchmarks", "import"]) == 0
+    assert "hub: 1 row(s) read, 0 skipped, 1 point(s) in 1 benchmark(s)" in capsys.readouterr().out
+    assert cli.main(["-c", path, "benchmarks", "import", "--source", "nope"]) == 2
+    monkeypatch.setattr("llm_router.scores_import.http_fetch", lambda timeout: Fetch())
+    assert cli.main(["-c", path, "benchmarks", "import"]) == 1
+    assert "failed: hub" in capsys.readouterr().err
+
+
+def test_benchmarks_fit_with_no_outcomes_says_so_and_exits_zero(tmp_path, monkeypatch, capsys):
+    path = _cli_config(tmp_path, monkeypatch, CURATED)
+    assert cli.main(["-c", path, "benchmarks", "fit", "--db", str(tmp_path / "empty.db")]) == 0
+    assert "nothing to fit" in capsys.readouterr().out
+    assert not (tmp_path / "b.derived.json").exists()
