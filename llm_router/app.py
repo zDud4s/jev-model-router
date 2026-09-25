@@ -142,6 +142,8 @@ def create_app(
     request_log = log or RequestLog(config.log.path, store_prompts=config.log.store_prompts)
     backends: dict[str, Backend] = build_backends(config, backend_factory)
     active_router: Router = router or build_router(config)
+    if catalog["unavailable"] and hasattr(active_router, "note_unavailable"):
+        active_router.note_unavailable(catalog["unavailable"])
     if getattr(active_router, "dominance_error", None):
         print(f"dominance check failed: {active_router.dominance_error}", file=sys.stderr)
     elif getattr(active_router, "dominated", None):

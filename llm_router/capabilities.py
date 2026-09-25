@@ -33,9 +33,10 @@ A subscription is still watched, for availability only: one that has answered
 
 A tier's family scale (`family_scales`) and level caps (`level_caps`) are kept
 under its family key: the profile glob for a discovered card, or the tier name
-for a hand-written one. `state()` reports the tiers no need vector can ever
-send work to: those another tier beats on every requirement at no more cost
-(see `dominance.py`).
+for a hand-written one. `state()` reports the dominated tiers: those another
+tier, as eligible and available, beats on every requirement at no more cost,
+so they are never the cheapest adequate choice while it is there (see
+`dominance.py` for what can still pick them).
 """
 
 from __future__ import annotations
@@ -286,11 +287,16 @@ class CapabilityRouter:
         self.fingerprint = "capabilities:" + hashlib.sha256(
             json.dumps(spec, sort_keys=True).encode()
         ).hexdigest()[:12]
-        # Cards do not change after construction, so neither does which of them can never win.
+        # Cards do not change after construction, so neither does which of them are dominated;
+        # only the catalog's verdict can, and `note_unavailable` takes it.
+        self.note_unavailable(())
+
+    def note_unavailable(self, unavailable: Any) -> None:
+        """Recompute the dominance report with these tiers (the catalog check's verdict) dominating nothing."""
         from .dominance import dominated  # local: dominance imports this module's types
 
         try:
-            self.dominated = dominated(self)
+            self.dominated = dominated(self, unavailable)
             self.dominance_error: str | None = None
         except Exception as exc:  # noqa: BLE001 - a report must not stop the router
             self.dominated, self.dominance_error = {}, f"{type(exc).__name__}: {exc}"

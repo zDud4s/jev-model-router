@@ -570,6 +570,7 @@ def main(argv: list[str] | None = None) -> int:
                 from .dominance import summary
 
                 routed = CapabilityRouter(expanded, ask=_never_ask)
+                routed.note_unavailable(report.unavailable)
                 unused = unused_caps(expanded)
                 extra = {"dominated": routed.dominated, "unused_level_caps": unused}
                 if routed.dominance_error:

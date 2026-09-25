@@ -13,8 +13,20 @@ from llm_router.dominance import dominated, summary
 from test_capabilities import CAPS, Ask, raw_config
 
 
-def found(**caps):
-    return dominated(CapabilityRouter(parse_config(raw_config(**caps)), ask=Ask()))
+def config(tiers=None, verification=None, **caps):
+    raw = raw_config(**caps)
+    # cx and sub take tools like the tiers they are compared with, so only the cards decide.
+    for name in ("cx", "sub"):
+        raw["tiers"][name]["supports_tools"] = True
+    for name, change in (tiers or {}).items():
+        raw["tiers"][name].update(change)
+    if verification is not None:
+        raw["verification"] = verification
+    return parse_config(raw)
+
+
+def found(tiers=None, verification=None, unavailable=(), **caps):
+    return dominated(CapabilityRouter(config(tiers, verification, **caps), ask=Ask()), unavailable)
 
 
 def cards(**changes):
@@ -52,7 +64,29 @@ def test_a_tiers_own_prices_beat_its_cards_list_prices():
     assert found(cards=cards(mid=cheap_list))["mid"] == ["cx"]
 
 
+def test_a_smaller_context_window_takes_dominance_away():
+    # A request between the two windows can go to mid and not to cx.
+    assert "mid" not in found(tiers={"cx": {"context_window": 100_000}})
+
+
+def test_a_tier_without_tools_does_not_dominate_one_with_them():
+    assert "mid" not in found(tiers={"cx": {"supports_tools": False}})
+
+
+def test_under_expected_cost_a_less_verified_tier_does_not_dominate():
+    # mid's failures are caught by the verifier, cx's are not: a failure on cx costs more.
+    verification = {"enabled": True, "verifier_tier": "top", "verify_tiers": ["mid"]}
+    assert "mid" not in found(verification=verification, rule="expected_cost")
+    # The target rule does not weigh failures: there it still dominates.
+    assert found(verification=verification)["mid"] == ["cx"]
+
+
+def test_an_unavailable_tier_dominates_nothing():
+    assert "mid" not in found(unavailable={"cx": "model not served"})
+
+
 def test_summary_names_at_most_three_dominators():
     lines = summary({"x": ["a", "b", "c", "d"]}, 9)
-    assert lines == ["dominance: 1 of 9 carded tier(s) can never be picked", "  x: beaten by a, b, c (+1 more)"]
+    assert lines == ["dominance: 1 of 9 carded tier(s) are never the cheapest adequate choice "
+                     "while a tier that dominates them is eligible and available", "  x: beaten by a, b, c (+1 more)"]
     assert summary({}, 9) == []

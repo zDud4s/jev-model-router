@@ -318,13 +318,37 @@ def test_level_caps_that_would_mislead_are_refused(caps, message):
         parse_config(raw_config(level_caps=caps))
 
 
+def with_tools(**caps_overrides: Any) -> dict[str, Any]:
+    """raw_config with cx and sub taking tools, like mid and top, so dominance is decided by the cards alone."""
+    raw = raw_config(**caps_overrides)
+    for name in ("cx", "sub"):
+        raw["tiers"][name]["supports_tools"] = True
+    return raw
+
+
 def test_state_reports_the_dominated_tiers():
-    assert router(Ask()).state()["dominated"] == {"mid": ["cx"], "top": ["sub"]}
+    assert CapabilityRouter(parse_config(with_tools()), ask=Ask()).state()["dominated"] == {"mid": ["cx"], "top": ["sub"]}
+    # As configured, cx and sub take no tools: a request with tools can go to mid and top only.
+    assert router(Ask()).state()["dominated"] == {}
 
 
 def test_healthz_reports_dominance_without_the_catalog_check(backend_factory, capsys):
-    app = create_app(parse_config(raw_config()), backend_factory=backend_factory, log=RequestLog(":memory:"),
-                     router=router(Ask()))
+    config = parse_config(with_tools())
+    app = create_app(config, backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     router=CapabilityRouter(config, ask=Ask()))
     with TestClient(app) as client:
         assert client.get("/healthz").json()["routing"]["dominated"] == {"mid": ["cx"], "top": ["sub"]}
-    assert "dominance: 2 of 5 carded tier(s) can never be picked" in capsys.readouterr().err
+    assert "dominance: 2 of 5 carded tier(s) are never the cheapest adequate choice" in capsys.readouterr().err
+
+
+def test_a_tier_the_catalog_finds_unavailable_dominates_nothing_in_healthz(backend_factory):
+    from types import SimpleNamespace
+
+    raw = with_tools()
+    raw["catalog"] = {"check_on_start": True, "path": None}
+    config = parse_config(raw)
+    report = SimpleNamespace(unavailable={"cx": "model not served"}, discovered=None, checked_at="now", unconfigured=[])
+    app = create_app(config, backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     router=CapabilityRouter(config, ask=Ask()), catalog_check=lambda config: report)
+    with TestClient(app) as client:
+        assert client.get("/healthz").json()["routing"]["dominated"] == {"top": ["sub"]}

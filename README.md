@@ -694,7 +694,11 @@ tier's whole family, written as `level_caps`: the anchor's `because: <requiremen
 the need that takes the most off its estimate. A cap that would break a `sufficient` anchor
 is reported, not kept. Startup, `/healthz` (`routing.dominated`) and `check --catalog` also
 name every carded tier another one beats on every requirement at no more cost at any prompt
-size: such a tier can never be picked, which usually means its card is wrong.
+size, while taking every request it can (context window, tools, catalog availability, and
+under `expected_cost` no worse verifier coverage). Such a tier is never the cheapest adequate
+choice while the tier that dominates it is eligible and available, which usually means its
+card is wrong. It can still be picked on an exact tie (config order decides), by a retry after
+the dominating tier failed, while that tier's subscription is locked, or by the fallback.
 
 ### Levels from benchmark evidence
 
