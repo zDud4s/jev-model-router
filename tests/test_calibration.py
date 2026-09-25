@@ -89,3 +89,15 @@ def test_with_scale_changes_only_the_scale():
     scaled = with_scale(config, 0.3)
     assert scaled.router.capabilities.miss_scale == 0.3
     assert scaled.router.capabilities.cards == config.router.capabilities.cards
+
+
+def test_because_must_name_a_requirement_and_sit_on_an_insufficient_anchor(tmp_path):
+    path = tmp_path / "anchors.yaml"
+    path.write_text("- task: x\n  sufficient: mid\n  because: reasoning\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="no insufficient tier"):
+        load_anchors(path)
+    path.write_text("- task: x\n  insufficient: mid\n  because: speed\n", encoding="utf-8")
+    with pytest.raises(ConfigError, match="unknown requirement 'speed'"):
+        load_anchors(path, {"reasoning": "?", "code": "?"})
+    path.write_text("- task: x\n  insufficient: mid\n  because: code\n", encoding="utf-8")
+    assert load_anchors(path, {"reasoning": "?", "code": "?"})[0]["because"] == "code"

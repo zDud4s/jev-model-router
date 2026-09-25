@@ -30,7 +30,7 @@ from __future__ import annotations
 import json
 import math
 import re
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -49,9 +49,12 @@ class AnchorResult:
     needs: dict[str, float]
     bounds: dict[str, tuple[str, float]]  # tier -> ("<=" or ">=", scale)
     picked_after: str | None = None
+    because: str | None = None
+    # (tier, family key, requirement, old level, new level, "because" | "weakest link")
+    capped: list[tuple[str, str, str, float, float, str]] = field(default_factory=list)
 
 
-def load_anchors(path: str | Path) -> list[dict[str, Any]]:
+def load_anchors(path: str | Path, requirements: dict[str, str] | None = None) -> list[dict[str, Any]]:
     raw = yaml.safe_load(Path(path).read_text(encoding="utf-8")) or []
     if not isinstance(raw, list) or not raw:
         raise ConfigError(f"{path}: anchors must be a non-empty list")
@@ -60,6 +63,15 @@ def load_anchors(path: str | Path) -> list[dict[str, Any]]:
             raise ConfigError(f"{path}: anchor {i} needs a 'task'")
         if not anchor.get("sufficient") and not anchor.get("insufficient"):
             raise ConfigError(f"{path}: anchor {i} names no sufficient or insufficient tier")
+        because = anchor.get("because")
+        if because is not None:
+            if not isinstance(because, str):
+                raise ConfigError(f"{path}: anchor {i}: 'because' is one requirement key, got {because!r}")
+            if not anchor.get("insufficient"):
+                # It would be silently ignored: it says which requirement an insufficient tier lacks.
+                raise ConfigError(f"{path}: anchor {i} has 'because' but no insufficient tier")
+            if requirements is not None and because not in requirements:
+                raise ConfigError(f"{path}: anchor {i}: 'because' names unknown requirement {because!r}")
     return raw
 
 
