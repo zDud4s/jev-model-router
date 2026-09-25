@@ -56,12 +56,11 @@ def effort_prior(caps: CapabilitiesConfig, profile: ModelProfile, effort: str | 
 
 
 def _curve(scores: Scores, bench: str, keys: tuple[str, ...]) -> dict[str | None, Reading]:
-    """effort -> reading, for the first of the model's keys with points on `bench`."""
-    for key in keys:
-        curve = scores.readings.get(bench, {}).get(key)
-        if curve:
-            return curve
-    return {}
+    """effort -> reading, over all of the model's keys on `bench`; the earlier key wins at the same effort."""
+    curve: dict[str | None, Reading] = {}
+    for key in reversed(keys):
+        curve.update(scores.readings.get(bench, {}).get(key) or {})
+    return curve
 
 
 def reading_at(scores: Scores, bench: str, keys: tuple[str, ...], effort: str | None) -> tuple[float, float] | None:

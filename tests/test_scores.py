@@ -554,3 +554,11 @@ def json_load(path):
     import json
 
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def test_a_models_curve_merges_its_keys_efforts_and_the_first_key_wins_where_both_have_one():
+    _, scores = scored(THREE + linked(pt("code", "acme-large-alias", "low", 30), pt("code", "acme-large-alias", "high", 20)))
+    keys = ("acme-large", "acme-large-alias")
+    assert reading_at(scores, "code", keys, "low") == reading_at(scores, "code", ("acme-large-alias",), "low")
+    assert reading_at(scores, "code", keys, "high") == reading_at(scores, "code", ("acme-large",), "high")
+    assert reading_at(scores, "code", keys, "medium") is not None  # between the two keys' points
