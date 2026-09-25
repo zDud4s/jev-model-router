@@ -480,3 +480,9 @@ def test_imported_bounds_that_divide_by_zero_or_invert_the_scale_are_dropped_wit
     assert scores.readings["code"]["acme-large"]["high"].u == pytest.approx(1.0)  # (0.625 - 0.25) / 0.75 = 0.5
     _, scores = from_hub(rows, baseline=float("nan"))
     assert len(scores.errors) == 1 and scores.readings["code"]["acme-large"]["high"].u == pytest.approx(0.9375)
+
+
+def test_a_curated_effort_is_resolved_like_an_imported_one_and_an_unknown_label_is_kept():
+    _, scores = scored([pt("code", "m", "High", 50), pt("code", "n", "extra  high", 50), pt("code", "o", "turbo", 50)],
+                       extra={"efforts": {"labels": {"extra high": "xhigh"}}})
+    assert {p.model: p.effort for p in scores.points} == {"m": "high", "n": "xhigh", "o": "turbo"}

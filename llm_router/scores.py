@@ -414,7 +414,7 @@ def _number(value: Any) -> bool:
     return isinstance(value, (int, float)) and not isinstance(value, bool)
 
 
-def _point(entry: Any, benchmarks: dict[str, Benchmark], where: str, order: int) -> Point:
+def _point(entry: Any, benchmarks: dict[str, Benchmark], efforts: EffortRules, where: str, order: int) -> Point:
     entry = _mapping(entry, where)
     _only(entry, {"benchmark", "model", "effort", "score", "cost_usd", "date", "source", "origin", "approx"}, where)
     bench = entry.get("benchmark")
@@ -436,7 +436,9 @@ def _point(entry: Any, benchmarks: dict[str, Benchmark], where: str, order: int)
         raise ConfigError(f"{where}: origin must be one of {list(ORIGINS)}, got {origin!r}")
     date = entry.get("date")
     return Point(
-        benchmark=str(bench), model=str(entry["model"]), effort=effort, score=float(score),
+        # Written as a source would write it (`High`, `extra high`): one reading for both files.
+        benchmark=str(bench), model=str(entry["model"]),
+        effort=None if effort is None else efforts.resolve(effort) or effort, score=float(score),
         cost_usd=None if cost is None else float(cost),
         date=date.isoformat() if hasattr(date, "isoformat") else str(date or ""),
         source=str(entry.get("source") or ""), origin=origin, approx=bool(entry.get("approx", False)), order=order,
@@ -557,7 +559,7 @@ def parse_scores(
     raw_points = raw.get("points") or []
     if not isinstance(raw_points, list):
         raise ConfigError("benchmarks file: 'points' must be a list")
-    curated = [_point(e, benchmarks, f"points[{i}]", i) for i, e in enumerate(raw_points)]
+    curated = [_point(e, benchmarks, efforts, f"points[{i}]", i) for i, e in enumerate(raw_points)]
     try:
         from_import, meta = _imported_points(imported or {}, benchmarks, sources)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
