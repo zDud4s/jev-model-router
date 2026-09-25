@@ -253,3 +253,16 @@ def test_served_ids_cover_the_explicit_tiers_expand_derives_too(tmp_path, capsys
     create_app(parse_config(raw), backend_factory=backend_factory, log=RequestLog(":memory:"),
                catalog_check=lambda c: REPORT)
     assert "no evidence: cli:acme-small, cli:unknown-1" in capsys.readouterr().err
+
+
+def test_benchmarks_fit_write_with_no_outcome_on_a_derived_tier_writes_nothing(tmp_path, monkeypatch, capsys):
+    from llm_router.calibration import Outcome
+
+    path = _cli_config(tmp_path, monkeypatch, CURATED)
+    monkeypatch.setattr("llm_router.calibration.log_outcomes",
+                        lambda log, config: [Outcome("explicit-only", {"reasoning": 1.0}, False, "verdict")])
+    db = tmp_path / "log.db"
+    RequestLog(str(db)).close()
+    assert cli.main(["-c", path, "benchmarks", "fit", "--db", str(db), "--write"]) == 0
+    assert "nothing to fit" in capsys.readouterr().out
+    assert not (tmp_path / "b.derived.json").exists()

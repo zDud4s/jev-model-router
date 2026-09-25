@@ -483,6 +483,9 @@ def _benchmarks_fit(config, scores, args) -> int:
         print(f"no judged capabilities outcomes in {source}: nothing to fit")
         return 0
     result = fit(expanded, scores, outcomes, model_ids=model_ids(report))
+    if result.outcomes == 0:  # offsets are written only when there are outcomes
+        print(f"{len(outcomes)} judged outcome(s) in {source}, none on a derived tier: nothing to fit")
+        return 0
     print(f"{result.outcomes} outcome(s) on {len(result.tiers)} derived tier(s)")
     print(f"log L: {result.loglik_prior:.2f} at the prior, {result.loglik:.2f} fitted")
     print(f"line: a {result.a_line:.2f} -> {result.a:.2f} (delta {result.delta_a:+.2f}), "
