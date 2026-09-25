@@ -201,11 +201,15 @@ def derive(
 
 
 def served_keys(scores: Scores, served: dict[str, tuple[str, ...]]) -> tuple[dict[str, tuple[str, ...]], set[str]]:
-    """(served name -> its model keys, ambiguous keys). A key two different models share is used for neither."""
+    """(served name -> its model keys, ambiguous keys). A key two different models share is used for neither.
+
+    A model is its first id without a date suffix: one model served at several
+    efforts, or by two sources as a dated snapshot and its undated id, is one.
+    """
     owners: dict[str, set[str]] = {}
     for ids in served.values():
         for i in ids:
-            owners.setdefault(scores.key(i), set()).add(ids[0])  # one model served twice is still one model
+            owners.setdefault(scores.key(i), set()).add(scores.keys.undated(ids[0].strip()))
     ambiguous = {k for k, names in owners.items() if len(names) > 1}
     out = {
         name: tuple(dict.fromkeys(k for k in (scores.key(i) for i in ids) if k not in ambiguous))

@@ -203,3 +203,14 @@ def test_benchmarks_fit_with_no_outcomes_says_so_and_exits_zero(tmp_path, monkey
     assert cli.main(["-c", path, "benchmarks", "fit", "--db", str(tmp_path / "empty.db")]) == 0
     assert "nothing to fit" in capsys.readouterr().out
     assert not (tmp_path / "b.derived.json").exists()
+
+
+def test_a_snapshot_and_its_undated_id_served_apart_are_one_model_not_an_ambiguity():
+    _, scores = scored(POINTS, extra={"model_keys": {"date_suffixes": [r"[-_]\d{8}$"]}})
+    keys, ambiguous = served_keys(scores, {"cli:acme-large": ("acme-large",),
+                                           "api:acme-large-20260101": ("acme-large-20260101",),
+                                           "cli:b": ("acme_large",)})
+    assert ambiguous == {"acme-large"}  # the underscore is a different model string, not a date
+    keys, ambiguous = served_keys(scores, {"cli:acme-large": ("acme-large",),
+                                           "api:acme-large-20260101": ("acme-large-20260101",)})
+    assert ambiguous == set() and keys["cli:acme-large"] == keys["api:acme-large-20260101"] == ("acme-large",)

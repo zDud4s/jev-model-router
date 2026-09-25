@@ -156,6 +156,14 @@ class KeyRules:
                 break
         return _norm(rest), _norm(undated)
 
+    def undated(self, text: str) -> str:
+        """The string without the date suffix `date_suffixes` strips from it, if any."""
+        for pattern in self.date_suffixes:
+            stripped = re.sub(pattern, "", text)
+            if stripped != text:
+                return stripped
+        return text
+
     def key(self, text: str, efforts: EffortRules) -> str:
         alias = self.aliases.get(text.strip().lower())
         if alias is not None:
