@@ -138,7 +138,7 @@ def fit(
         out = 0.0
         for t in subjects:
             levels = blend(evs[t], priors[t], caps.requirements, a=a, k=k, c0=scores.c0)
-            levels = capped(levels, caps.level_caps.get(caps.cards[t].family))  # the card the router would build
+            levels = capped(levels, caps.level_caps.get(router.family_key(t)))  # the card the router would build
             for needs, passes, fails in trials[t]:
                 p = min(1 - _CLAMP, max(_CLAMP, router.success(needs, t, levels=levels)))
                 out += passes * math.log(p) + fails * math.log(1 - p)
