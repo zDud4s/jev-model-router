@@ -14,12 +14,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from llm_router.app import create_app
-from llm_router.capabilities import CapabilityRouter, build_packet, failed_tiers
-from llm_router.config import ConfigError, parse_config
-from llm_router.db import RequestLog
-from llm_router.routing import build_router
-from llm_router.schemas import Usage
+from jev_model_router.app import create_app
+from jev_model_router.capabilities import CapabilityRouter, build_packet, failed_tiers
+from jev_model_router.config import ConfigError, parse_config
+from jev_model_router.db import RequestLog
+from jev_model_router.routing import build_router
+from jev_model_router.schemas import Usage
 
 from conftest import BASE_CONFIG, make_request
 
@@ -217,7 +217,7 @@ def test_the_packet_leads_with_what_the_client_supplied_and_measures_the_rest():
     request = make_request(
         messages=[
             {"role": "system", "content": "You are a careful engineer."},
-            {"role": "user", "content": "Fix the bug in core/src/http.rs and llm_router/app.py\n```rust\nfn x() {}\n```"},
+            {"role": "user", "content": "Fix the bug in core/src/http.rs and jev_model_router/app.py\n```rust\nfn x() {}\n```"},
         ],
         packet={"kind": "debug", "size": "small", "failed_tiers": ["cx"]},
         tools=[{"type": "function", "function": {"name": "bash", "parameters": {}}}],
@@ -225,7 +225,7 @@ def test_the_packet_leads_with_what_the_client_supplied_and_measures_the_rest():
     packet = build_packet(request, max_chars=6000)
     assert packet.startswith("TASK PACKET\nkind: debug\nsize: small\n")
     assert "failed_tiers" not in packet
-    assert "files_mentioned: 2 (core/src/http.rs, llm_router/app.py)" in packet
+    assert "files_mentioned: 2 (core/src/http.rs, jev_model_router/app.py)" in packet
     assert "code_blocks: 1 (rust)" in packet
     assert "tools_offered: bash" in packet
     assert "instructions:\nYou are a careful engineer." in packet

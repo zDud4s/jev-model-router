@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from llm_router.eligibility import RejectionReason, evaluate
-from llm_router.routing import StaticRouter
-from llm_router.tokens import estimate_prompt_tokens, estimate_request_budget
+from jev_model_router.eligibility import RejectionReason, evaluate
+from jev_model_router.routing import StaticRouter
+from jev_model_router.tokens import estimate_prompt_tokens, estimate_request_budget
 
 from conftest import make_request
 
@@ -84,7 +84,7 @@ def test_an_explicit_tier_request_is_honoured_when_eligible(config) -> None:
 
 
 def test_the_model_map_steers_a_client_that_hardcodes_a_model_name() -> None:
-    from llm_router.config import parse_config
+    from jev_model_router.config import parse_config
 
     from conftest import BASE_CONFIG
 

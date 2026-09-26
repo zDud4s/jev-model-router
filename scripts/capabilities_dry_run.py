@@ -13,12 +13,12 @@ import asyncio
 import json
 import sys
 
-from llm_router.capabilities import CapabilityRouter
-from llm_router.catalog import check_catalog
-from llm_router.config import load_config
-from llm_router.discovery import expand
-from llm_router.eligibility import evaluate
-from llm_router.schemas import ChatCompletionRequest
+from jev_model_router.capabilities import CapabilityRouter
+from jev_model_router.catalog import check_catalog
+from jev_model_router.config import load_config
+from jev_model_router.discovery import expand
+from jev_model_router.eligibility import evaluate
+from jev_model_router.schemas import ChatCompletionRequest
 
 SAMPLE = [
     {"messages": [{"role": "user", "content": "Rename the variable `cnt` to `count` in utils.py."}]},
@@ -32,7 +32,7 @@ SAMPLE = [
         "libresource.a. Find the real cause and propose a fix to the gate script and docs.")}],
      "packet": {"kind": "debug", "size": "medium", "repo": "nucleos", "languages": "rust, ts"}},
     {"messages": [{"role": "user", "content": (
-        "Add a capabilities router to llm-router: a new router kind that sends a task packet to Jev, reads "
+        "Add a capabilities router to jev-model-router: a new router kind that sends a task packet to Jev, reads "
         "per-requirement probabilities, and picks the cheapest model card that covers them, with quota "
         "accounting per subscription, new codex_cli backend, config validation, app wiring and tests.")}],
      "packet": {"kind": "code_change", "size": "large", "files_in_scope": 9, "risk": "normal"}},

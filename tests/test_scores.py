@@ -12,7 +12,7 @@ from typing import Any
 
 import pytest
 
-from llm_router.config import ConfigError, parse_config
+from jev_model_router.config import ConfigError, parse_config
 
 from conftest import BASE_CONFIG
 
@@ -79,7 +79,7 @@ def test_a_benchmarks_block_that_would_mislead_is_refused(block, message):
 
 
 # ---------------------------------------------------------------- the file
-from llm_router.scores import EffortRules, KeyRules, content_hash, date_collisions, load_scores, parse_scores, split_model  # noqa: E402
+from jev_model_router.scores import EffortRules, KeyRules, content_hash, date_collisions, load_scores, parse_scores, split_model  # noqa: E402
 
 
 def caps_with(**settings: Any):
@@ -254,7 +254,7 @@ def test_unknown_and_budget_points_never_link_benchmarks():
 
 
 # ---------------------------------------------------------------- derivation
-from llm_router.scores_derive import derive, effort_prior, evidence_for, line_for, profile_line, reading_at  # noqa: E402
+from jev_model_router.scores_derive import derive, effort_prior, evidence_for, line_for, profile_line, reading_at  # noqa: E402
 
 
 def profile(caps, match: str = "acme-large"):
@@ -489,7 +489,7 @@ def test_a_curated_effort_is_resolved_like_an_imported_one_and_an_unknown_label_
 
 
 def test_a_benchmark_group_that_shares_no_model_with_the_main_scale_counts_for_nothing():
-    from llm_router.scores_derive import startup_lines
+    from jev_model_router.scores_derive import startup_lines
 
     benches = {**BENCHES, "far": {"description": "d", "requirements": {"niche": 1.0}},
                "away": {"description": "d", "requirements": {}}}
@@ -534,7 +534,7 @@ def test_effort_label_values_are_lowercased_like_their_keys():
 
 
 def test_generated_files_are_replaced_whole_or_not_at_all(tmp_path, monkeypatch):
-    from llm_router.scores import write_json, write_sidecar
+    from jev_model_router.scores import write_json, write_sidecar
 
     path = tmp_path / "b.derived.json"
     write_sidecar(path, jev={"code": 1})

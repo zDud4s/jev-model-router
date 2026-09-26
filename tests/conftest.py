@@ -11,16 +11,16 @@ from typing import Any, AsyncIterator, Callable
 
 import pytest
 
-from llm_router.backends.base import (
+from jev_model_router.backends.base import (
     BackendError,
     BackendResponse,
     StreamChunk,
     StreamEnd,
     StreamEvent,
 )
-from llm_router.config import Config, TierConfig, parse_config
-from llm_router.db import RequestLog
-from llm_router.schemas import ChatCompletionRequest, Usage, build_chunk, build_completion
+from jev_model_router.config import Config, TierConfig, parse_config
+from jev_model_router.db import RequestLog
+from jev_model_router.schemas import ChatCompletionRequest, Usage, build_chunk, build_completion
 
 BASE_CONFIG: dict[str, Any] = {
     "log": {"path": ":memory:"},

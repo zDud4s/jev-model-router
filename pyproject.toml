@@ -3,7 +3,7 @@ requires = ["setuptools>=68"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "llm-router"
+name = "jev-model-router"
 version = "0.1.0"
 description = "OpenAI-compatible HTTP proxy that routes each request to a configured backend tier and logs what it cost."
 readme = "README.md"
@@ -23,10 +23,10 @@ dev = [
 ]
 
 [project.scripts]
-llm-router = "llm_router.cli:main"
+jev-model-router = "jev_model_router.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["llm_router*"]
+include = ["jev_model_router*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -11,14 +11,14 @@ import math
 
 import pytest
 
-from llm_router.calibration import Outcome
-from llm_router.capabilities import CapabilityRouter
-from llm_router.catalog import CatalogReport, Offered, Source
-from llm_router.config import parse_config
-from llm_router.discovery import expand
-from llm_router.scores import parse_scores, write_sidecar
-from llm_router.scores_derive import blend, effort_prior, evidence_for, line_for
-from llm_router.scores_fit import fit, write_fit
+from jev_model_router.calibration import Outcome
+from jev_model_router.capabilities import CapabilityRouter
+from jev_model_router.catalog import CatalogReport, Offered, Source
+from jev_model_router.config import parse_config
+from jev_model_router.discovery import expand
+from jev_model_router.scores import parse_scores, write_sidecar
+from jev_model_router.scores_derive import blend, effort_prior, evidence_for, line_for
+from jev_model_router.scores_fit import fit, write_fit
 
 from test_scores import raw_config
 

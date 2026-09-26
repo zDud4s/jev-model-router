@@ -7,10 +7,10 @@ import json
 import pytest
 from fastapi.testclient import TestClient
 
-from llm_router.app import create_app
-from llm_router.backends.base import BackendError
-from llm_router.db import RequestLog
-from llm_router.schemas import Usage
+from jev_model_router.app import create_app
+from jev_model_router.backends.base import BackendError
+from jev_model_router.db import RequestLog
+from jev_model_router.schemas import Usage
 
 
 @pytest.fixture

@@ -4,10 +4,10 @@ from __future__ import annotations
 
 import pytest
 
-from llm_router.catalog import CatalogReport, Offered, Source
-from llm_router.config import parse_config
-from llm_router.discovery import expand, model_ids, served_ids
-from llm_router.scores_derive import served_keys, startup_lines
+from jev_model_router.catalog import CatalogReport, Offered, Source
+from jev_model_router.config import parse_config
+from jev_model_router.discovery import expand, model_ids, served_ids
+from jev_model_router.scores_derive import served_keys, startup_lines
 
 from test_scores import BENCHES, linked, pt, raw_config, scored
 
@@ -86,8 +86,8 @@ from datetime import datetime, timedelta, timezone  # noqa: E402
 import yaml  # noqa: E402
 from fastapi.testclient import TestClient  # noqa: E402
 
-from llm_router.app import create_app  # noqa: E402
-from llm_router.db import RequestLog  # noqa: E402
+from jev_model_router.app import create_app  # noqa: E402
+from jev_model_router.db import RequestLog  # noqa: E402
 
 from test_scores_import import META, SOURCES, Fetch, zipped  # noqa: E402
 
@@ -147,7 +147,7 @@ def test_a_broken_benchmarks_file_does_not_stop_startup(tmp_path, capsys, backen
 
 
 def test_expand_failing_on_the_evidence_falls_back_to_profile_only_cards(tmp_path, capsys, monkeypatch, backend_factory):
-    import llm_router.discovery as discovery
+    import jev_model_router.discovery as discovery
 
     real = discovery.expand
 
@@ -169,7 +169,7 @@ def test_a_failing_startup_report_does_not_change_what_is_served(tmp_path, capsy
     def broken(*args, **kwargs):
         raise RuntimeError("bad report")
 
-    monkeypatch.setattr("llm_router.scores_derive.startup_lines", broken)
+    monkeypatch.setattr("jev_model_router.scores_derive.startup_lines", broken)
     app = create_app(_app_config(tmp_path, CURATED), backend_factory=backend_factory, log=RequestLog(":memory:"),
                      catalog_check=lambda c: REPORT)
     err = capsys.readouterr().err
@@ -182,7 +182,7 @@ def test_a_failing_startup_report_does_not_change_what_is_served(tmp_path, capsy
 
 
 # ---------------------------------------------------------------- command line
-from llm_router import cli  # noqa: E402
+from jev_model_router import cli  # noqa: E402
 
 
 def _cli_config(tmp_path, monkeypatch, body: dict) -> str:
@@ -192,7 +192,7 @@ def _cli_config(tmp_path, monkeypatch, body: dict) -> str:
     raw["catalog"] = {"check_on_start": False, "path": None}
     path = tmp_path / "c.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    monkeypatch.setattr("llm_router.catalog.check_catalog", lambda config: REPORT)
+    monkeypatch.setattr("jev_model_router.catalog.check_catalog", lambda config: REPORT)
     return str(path)
 
 
@@ -224,11 +224,11 @@ def test_benchmarks_import_fetches_and_reports(tmp_path, monkeypatch, capsys):
                    "data": {"source": "hub", "table": "t.csv", "score": "Score"}}}, "points": []}
     path = _cli_config(tmp_path, monkeypatch, body)
     fetch = Fetch(**{"https://hub_test": zipped(t__csv=table, meta__csv=META)})
-    monkeypatch.setattr("llm_router.scores_import.http_fetch", lambda timeout: fetch)
+    monkeypatch.setattr("jev_model_router.scores_import.http_fetch", lambda timeout: fetch)
     assert cli.main(["-c", path, "benchmarks", "import"]) == 0
     assert "hub: 1 row(s) read, 0 skipped, 1 point(s) in 1 benchmark(s)" in capsys.readouterr().out
     assert cli.main(["-c", path, "benchmarks", "import", "--source", "nope"]) == 2
-    monkeypatch.setattr("llm_router.scores_import.http_fetch", lambda timeout: Fetch())
+    monkeypatch.setattr("jev_model_router.scores_import.http_fetch", lambda timeout: Fetch())
     assert cli.main(["-c", path, "benchmarks", "import"]) == 1
     assert "failed: hub" in capsys.readouterr().err
 
@@ -253,9 +253,9 @@ def test_a_snapshot_and_its_undated_id_served_apart_are_one_model_not_an_ambigui
 
 
 def test_expand_reads_the_benchmark_weights_once_and_derive_takes_them(monkeypatch):
-    import llm_router.discovery as discovery
-    import llm_router.scores_derive as scores_derive
-    from llm_router.scores import benchmark_weights
+    import jev_model_router.discovery as discovery
+    import jev_model_router.scores_derive as scores_derive
+    from jev_model_router.scores import benchmark_weights
     from test_scores import profile
 
     caps, scores = scored(POINTS)
@@ -292,10 +292,10 @@ def test_served_ids_cover_the_explicit_tiers_expand_derives_too(tmp_path, capsys
 
 
 def test_benchmarks_fit_write_with_no_outcome_on_a_derived_tier_writes_nothing(tmp_path, monkeypatch, capsys):
-    from llm_router.calibration import Outcome
+    from jev_model_router.calibration import Outcome
 
     path = _cli_config(tmp_path, monkeypatch, CURATED)
-    monkeypatch.setattr("llm_router.calibration.log_outcomes",
+    monkeypatch.setattr("jev_model_router.calibration.log_outcomes",
                         lambda log, config: [Outcome("explicit-only", {"reasoning": 1.0}, False, "verdict")])
     db = tmp_path / "log.db"
     RequestLog(str(db)).close()
@@ -314,7 +314,7 @@ def test_a_source_without_its_key_is_skipped_with_a_warning_and_the_import_still
         "points": []}
     path = _cli_config(tmp_path, monkeypatch, body)
     fetch = Fetch(**{"https://hub_test": zipped(t__csv=table, meta__csv=META)})
-    monkeypatch.setattr("llm_router.scores_import.http_fetch", lambda timeout: fetch)
+    monkeypatch.setattr("jev_model_router.scores_import.http_fetch", lambda timeout: fetch)
     assert cli.main(["-c", path, "benchmarks", "import"]) == 0
     err = capsys.readouterr().err
     assert "skipped: api" in err and "TEST_BENCH_KEY" in err and "failed" not in err
@@ -328,7 +328,7 @@ def test_benchmarks_fit_on_a_database_that_does_not_exist_is_an_error_and_create
 
 
 def _fit_cli(tmp_path, monkeypatch, capsys, settings: dict, passed: bool) -> str:
-    from llm_router.calibration import Outcome
+    from jev_model_router.calibration import Outcome
 
     bench = tmp_path / "b.yaml"
     bench.write_text(yaml.safe_dump(CURATED), encoding="utf-8")
@@ -336,10 +336,10 @@ def _fit_cli(tmp_path, monkeypatch, capsys, settings: dict, passed: bool) -> str
     raw["catalog"] = {"check_on_start": False, "path": None}
     path = tmp_path / "c.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    monkeypatch.setattr("llm_router.catalog.check_catalog", lambda config: REPORT)
+    monkeypatch.setattr("jev_model_router.catalog.check_catalog", lambda config: REPORT)
     data = [Outcome(t, {"reasoning": 1.0}, passed, "verdict")
             for t in ("cli:acme-large@high", "cli:acme-small") for _ in range(400)]
-    monkeypatch.setattr("llm_router.calibration.log_outcomes", lambda log, config: data)
+    monkeypatch.setattr("jev_model_router.calibration.log_outcomes", lambda log, config: data)
     db = tmp_path / "log.db"
     RequestLog(str(db)).close()
     assert cli.main(["-c", str(path), "benchmarks", "fit", "--db", str(db)]) == 0
@@ -347,15 +347,15 @@ def _fit_cli(tmp_path, monkeypatch, capsys, settings: dict, passed: bool) -> str
 
 
 def test_benchmarks_fit_shows_the_line_served_now_and_warns_at_a_box_edge(tmp_path, monkeypatch, capsys):
-    from llm_router.discovery import expand
-    from llm_router.scores import load_scores
-    from llm_router.scores_fit import BOX_SCALE
+    from jev_model_router.discovery import expand
+    from jev_model_router.scores import load_scores
+    from jev_model_router.scores_fit import BOX_SCALE
 
     out = _fit_cli(tmp_path, monkeypatch, capsys, {}, passed=False)
     config = parse_config(yaml.safe_load((tmp_path / "c.yaml").read_text(encoding="utf-8")))
     scores = load_scores(config)
-    from llm_router.discovery import model_ids
-    from llm_router.scores_fit import fit
+    from jev_model_router.discovery import model_ids
+    from jev_model_router.scores_fit import fit
 
     expanded, _, _ = expand(config, REPORT, scores)
     result = fit(expanded, scores, [], model_ids=model_ids(REPORT))
@@ -377,9 +377,9 @@ def test_benchmarks_check_exits_one_when_a_file_is_unreadable(tmp_path, monkeypa
 
 
 def test_benchmarks_check_prints_the_line_expand_uses_over_explicit_tiers_too(tmp_path, monkeypatch, capsys):
-    from llm_router.discovery import profile_for
-    from llm_router.scores import load_scores
-    from llm_router.scores_derive import line_for, served_keys
+    from jev_model_router.discovery import profile_for
+    from jev_model_router.scores import load_scores
+    from jev_model_router.scores_derive import line_for, served_keys
 
     bench = tmp_path / "b.yaml"
     bench.write_text(yaml.safe_dump(CURATED), encoding="utf-8")
@@ -389,7 +389,7 @@ def test_benchmarks_check_prints_the_line_expand_uses_over_explicit_tiers_too(tm
     raw["catalog"] = {"check_on_start": False, "path": None}
     path = tmp_path / "c.yaml"
     path.write_text(yaml.safe_dump(raw), encoding="utf-8")
-    monkeypatch.setattr("llm_router.catalog.check_catalog", lambda config: REPORT)
+    monkeypatch.setattr("jev_model_router.catalog.check_catalog", lambda config: REPORT)
     assert cli.main(["-c", str(path), "benchmarks", "check"]) == 0
     out = capsys.readouterr().out
     config = parse_config(raw)
@@ -456,8 +456,8 @@ def test_startup_returns_within_the_refresh_budget_when_a_fetch_hangs(tmp_path, 
 
 
 def test_a_benchmarks_file_that_is_not_utf8_is_a_config_error_naming_it(tmp_path, monkeypatch, capsys):
-    from llm_router.config import ConfigError
-    from llm_router.scores import load_scores
+    from jev_model_router.config import ConfigError
+    from jev_model_router.scores import load_scores
 
     path = _cli_config(tmp_path, monkeypatch, CURATED)
     (tmp_path / "b.yaml").write_bytes(b"points: [\xff\xfe]\n")
@@ -470,8 +470,8 @@ def test_a_benchmarks_file_that_is_not_utf8_is_a_config_error_naming_it(tmp_path
 def test_a_benchmarks_file_that_cannot_be_read_is_a_config_error_naming_it(tmp_path, monkeypatch):
     from pathlib import Path
 
-    from llm_router.config import ConfigError
-    from llm_router.scores import load_scores
+    from jev_model_router.config import ConfigError
+    from jev_model_router.scores import load_scores
 
     path = _cli_config(tmp_path, monkeypatch, CURATED)
     config = cli.load_config(path)
@@ -556,7 +556,7 @@ def test_a_failing_tiers_view_does_not_stop_startup(tmp_path, capsys, monkeypatc
     def broken(*args, **kwargs):
         raise RuntimeError("bad view")
 
-    monkeypatch.setattr("llm_router.tiers_view.build", broken)
+    monkeypatch.setattr("jev_model_router.tiers_view.build", broken)
     app = create_app(_app_config(tmp_path, CURATED), backend_factory=backend_factory, log=RequestLog(":memory:"),
                      catalog_check=lambda c: REPORT)
     assert "tiers view failed: RuntimeError: bad view" in capsys.readouterr().err

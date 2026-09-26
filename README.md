@@ -1,4 +1,4 @@
-# llm-router
+# jev-model-router
 
 An OpenAI-compatible proxy that decides which model serves each request, and records what
 that decision cost.
@@ -59,7 +59,7 @@ tiers:
     backend: openai_compatible            # OpenAI, OpenRouter, vLLM, a proxy...
     model: claude-opus-5
     base_url: https://api.example-proxy.com/v1
-    api_key_env: LLM_ROUTER_TOP_KEY       # read at call time; no credential in this file
+    api_key_env: JEV_MODEL_ROUTER_TOP_KEY       # read at call time; no credential in this file
     context_window: 200000
     supports_tools: true
     prices:                               # USD per 1M tokens, every field optional;
@@ -72,7 +72,7 @@ tiers:
 Validate it without starting anything:
 
 ```bash
-python -m llm_router -c config.yaml check            # add --prices to compare with OpenRouter's list
+python -m jev_model_router -c config.yaml check            # add --prices to compare with OpenRouter's list
 ```
 
 ### Eligibility comes before routing
@@ -283,7 +283,7 @@ with. It predicts one thing: **P(this prompt's cheap answer fails review)**.
 ### Training it
 
 ```bash
-python -m llm_router -c config.yaml train --out classifier.json
+python -m jev_model_router -c config.yaml train --out classifier.json
 ```
 
 There is no bundled model and no shortcut to one. The labels come from the verification loop
@@ -309,8 +309,8 @@ the more reliable grader of the two — a judge that cannot afford to reason was
 missing arithmetic. `label` takes GSM8K's JSONL:
 
 ```bash
-python -m llm_router -c config.yaml label --gsm8k test.jsonl --db gsm8k.db --limit 400
-python -m llm_router -c config.yaml train --db gsm8k.db --out classifier.json
+python -m jev_model_router -c config.yaml label --gsm8k test.jsonl --db gsm8k.db --limit 400
+python -m jev_model_router -c config.yaml train --db gsm8k.db --out classifier.json
 ```
 
 Labelling asks at **temperature 0** by default (`--temperature` to change it, `None` in the
@@ -626,7 +626,7 @@ willing to ship.
 ## Run
 
 ```bash
-python -m llm_router -c config.yaml serve
+python -m jev_model_router -c config.yaml serve
 ```
 
 Then point any OpenAI-compatible client at it:
@@ -683,12 +683,12 @@ POST /v1/route/{decision_id}/outcome
 -> 200; 404 unknown decision; 409 an outcome was already reported (the first one is kept)
 ```
 
-`pass`/`fail` is the label `llm-router calibrate --from-log` learns each model family's
+`pass`/`fail` is the label `jev-model-router calibrate --from-log` learns each model family's
 scale from; `error` means the run broke for a reason that says nothing about the model, and
 is not learnt from. `rate_limited` takes that subscription off the table until its window
 turns -- the router cannot see a 429 on a call it did not make.
 
-`llm-router calibrate --anchors FILE` takes tasks with a tier known to be (or not be) enough.
+`jev-model-router calibrate --anchors FILE` takes tasks with a tier known to be (or not be) enough.
 An `insufficient` anchor whose tier still reaches the target caps one requirement for that
 tier's whole family, written as `level_caps`: the anchor's `because: <requirement>`, or else
 the need that takes the most off its estimate. A cap that would break a `sufficient` anchor
@@ -704,7 +704,7 @@ the dominating tier failed, while that tier's subscription is locked, or by the 
 
 A profile is a guess at effort `high`. With `router.capabilities.benchmarks` set, each
 discovered card's levels come from measured results instead, per model and per effort:
-`llm-router benchmarks import` fetches the sources in `benchmarks.yaml` (sources that run the
+`jev-model-router benchmarks import` fetches the sources in `benchmarks.yaml` (sources that run the
 same benchmark on every vendor's models), `benchmarks read` asks Jev once what each benchmark
 measures, and `benchmarks check` shows the evidence behind every served model and the levels
 it gives. A new model needs no edit: it arrives with the next import. `benchmarks fit` then
@@ -721,7 +721,7 @@ host or scheme. In the shipped `benchmarks.yaml`, `artificial-analysis` needs `A
 ## Read the log back
 
 ```bash
-python -m llm_router -c config.yaml stats
+python -m jev_model_router -c config.yaml stats
 ```
 
 ```
@@ -770,7 +770,7 @@ gone straight to `top`" means one `top` call, not one plus a review — charging
 for a loop it would never have run is how a router flatters itself into a saving.
 
 The log is SQLite. Query it directly for anything the summary does not cover; the schema is
-in `llm_router/db.py`.
+in `jev_model_router/db.py`.
 
 Prompts are stored as a SHA-256 hash by default, because prompts are user data. Set
 `log.store_prompts: true` to keep the text as well.
@@ -921,7 +921,7 @@ That is not a risk Jev reduces. It is a risk that does not exist in it.
   free-tier OpenRouter key gives 50 requests a day across every free model, most of which
   went on the measurements above. The remote judge is now known to work, so the remaining
   step is traffic: `verification.sample_rate: 1.0`, `log.store_prompts: true`, a few hundred
-  real requests, then `llm-router train`.
+  real requests, then `jev-model-router train`.
 - **Somebody else's transcripts.** The labels here come from this router's own log, so every
   row is a genuine request. Training on other transcripts is a different job with its own trap:
   they are full of tool results, system notices and attachment placeholders that are not
@@ -938,7 +938,7 @@ is kept beside it, never merged into it:
 | provider | what it says per request | how the router uses it |
 |---|---|---|
 | OpenRouter | `usage.cost`, on every response and on the last frame of a stream | `billed_cost_usd`, `billed_source: inline` |
-| OpenRouter, after the fact | `GET /generation?id=` — cost and native tokens | `llm-router reconcile` |
+| OpenRouter, after the fact | `GET /generation?id=` — cost and native tokens | `jev-model-router reconcile` |
 | OpenAI, Anthropic direct | nothing; daily totals from admin-key cost endpoints | not reconcilable per row — counted as such |
 | Ollama | there is no invoice | billed `0` |
 
@@ -956,7 +956,7 @@ shutdown. The write is now shielded, the row says `499` and *client disconnected
 the provider's id from the first frame. Then:
 
 ```bash
-python -m llm_router -c config.yaml reconcile      # --dry-run to look first
+python -m jev_model_router -c config.yaml reconcile      # --dry-run to look first
 ```
 
 asks the provider what that call cost and how many tokens it really used, and recomputes the
@@ -973,7 +973,7 @@ Drift in `stats` shows up only after the traffic has run. The price table itself
 checked first, against OpenRouter's public model list (no key, no quota):
 
 ```bash
-python -m llm_router -c config.yaml check --prices     # --json for a script; exit 1 on any finding
+python -m jev_model_router -c config.yaml check --prices     # --json for a script; exit 1 on any finding
 ```
 
 Every OpenRouter tier is compared field by field, in USD per 1M tokens. The command reports

@@ -7,10 +7,10 @@ from __future__ import annotations
 
 from fastapi.testclient import TestClient
 
-from llm_router.calibration import log_outcomes
-from llm_router.capabilities import CapabilityRouter
-from llm_router.config import parse_config
-from llm_router.db import RequestLog
+from jev_model_router.calibration import log_outcomes
+from jev_model_router.capabilities import CapabilityRouter
+from jev_model_router.config import parse_config
+from jev_model_router.db import RequestLog
 
 from test_capabilities import HARD, Ask, raw_config
 
@@ -18,7 +18,7 @@ TASK = {"task": "Fix the race in the scheduler", "stage": "implement", "files": 
 
 
 def client_for(backend_factory, ask=None, log=None):
-    from llm_router.app import create_app
+    from jev_model_router.app import create_app
 
     config = parse_config(raw_config())
     router = CapabilityRouter(config, ask=ask or Ask(HARD))

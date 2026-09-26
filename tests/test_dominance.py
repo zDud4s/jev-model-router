@@ -6,9 +6,9 @@ import copy
 
 import pytest
 
-from llm_router.capabilities import CapabilityRouter
-from llm_router.config import parse_config
-from llm_router.dominance import dominated, summary
+from jev_model_router.capabilities import CapabilityRouter
+from jev_model_router.config import parse_config
+from jev_model_router.dominance import dominated, summary
 
 from test_capabilities import CAPS, Ask, raw_config
 

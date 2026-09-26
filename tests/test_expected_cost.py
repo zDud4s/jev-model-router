@@ -10,11 +10,11 @@ import json
 
 import pytest
 
-from llm_router.calibration import fit_family_scales, log_outcomes, write_family_scales
-from llm_router.capabilities import CapabilityRouter
-from llm_router.config import ConfigError, parse_config
-from llm_router.db import LogEntry, RequestLog
-from llm_router.verification import Verdict, VerificationOutcome, Verifier
+from jev_model_router.calibration import fit_family_scales, log_outcomes, write_family_scales
+from jev_model_router.capabilities import CapabilityRouter
+from jev_model_router.config import ConfigError, parse_config
+from jev_model_router.db import LogEntry, RequestLog
+from jev_model_router.verification import Verdict, VerificationOutcome, Verifier
 
 from conftest import FakeBackend, make_request
 from test_capabilities import ALL, Ask, decide, raw_config, router

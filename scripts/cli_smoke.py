@@ -11,10 +11,10 @@ import asyncio
 import sys
 import time
 
-from llm_router.backends import build_backend
-from llm_router.backends.base import BackendError
-from llm_router.config import load_config
-from llm_router.schemas import ChatCompletionRequest
+from jev_model_router.backends import build_backend
+from jev_model_router.backends.base import BackendError
+from jev_model_router.config import load_config
+from jev_model_router.schemas import ChatCompletionRequest
 
 PROMPT = "Reply with exactly the word: pong"
 

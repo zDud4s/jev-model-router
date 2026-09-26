@@ -13,13 +13,13 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from llm_router.app import create_app
-from llm_router.backends.base import BackendError, BackendResponse
-from llm_router.config import ConfigError, parse_config
-from llm_router.db import RequestLog
-from llm_router.schemas import ChatCompletionRequest, build_completion
-from llm_router.stats import collect, format_text
-from llm_router.verification import answer_text, build_review_request, parse_verdict
+from jev_model_router.app import create_app
+from jev_model_router.backends.base import BackendError, BackendResponse
+from jev_model_router.config import ConfigError, parse_config
+from jev_model_router.db import RequestLog
+from jev_model_router.schemas import ChatCompletionRequest, build_completion
+from jev_model_router.stats import collect, format_text
+from jev_model_router.verification import answer_text, build_review_request, parse_verdict
 
 from conftest import BASE_CONFIG, FakeBackend, make_request
 
@@ -524,8 +524,8 @@ def test_an_answer_with_no_text_is_skipped_rather_than_failed() -> None:
 
 
 def test_sampling_decides_before_the_verifier_is_paid() -> None:
-    from llm_router.backends import build_backends
-    from llm_router.verification import Verifier
+    from jev_model_router.backends import build_backends
+    from jev_model_router.verification import Verifier
 
     log = RequestLog(":memory:")
     config = verifying(sample_rate=0.1)

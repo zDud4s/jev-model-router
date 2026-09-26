@@ -391,7 +391,7 @@ class RequestLog:
             # Last resort. The in-process counter stays accurate and /healthz
             # reports it, so a silently broken log is still visible somewhere.
             print(
-                f"llm-router: log write failed and could not be recorded: {message}",
+                f"jev-model-router: log write failed and could not be recorded: {message}",
                 file=sys.stderr,
             )
 

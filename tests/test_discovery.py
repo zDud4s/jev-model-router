@@ -12,12 +12,12 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from llm_router.app import create_app
-from llm_router.capabilities import CapabilityRouter
-from llm_router.catalog import CatalogReport, Offered, Source
-from llm_router.config import ConfigError, parse_config
-from llm_router.db import RequestLog
-from llm_router.discovery import expand
+from jev_model_router.app import create_app
+from jev_model_router.capabilities import CapabilityRouter
+from jev_model_router.catalog import CatalogReport, Offered, Source
+from jev_model_router.config import ConfigError, parse_config
+from jev_model_router.db import RequestLog
+from jev_model_router.discovery import expand
 
 from conftest import BASE_CONFIG, make_request
 
@@ -207,7 +207,7 @@ def test_an_effort_ceiling_keeps_the_levels_above_it_out_of_the_catalog():
         parse_config(raw_config(max_effort="turbo"))
 
 
-from llm_router.discovery import unused_caps
+from jev_model_router.discovery import unused_caps
 
 
 def test_a_cap_lowers_the_final_level_at_every_effort_and_never_raises_one():

@@ -9,8 +9,8 @@ client received an empty answer. The gate's number was fiction for this backend.
 
 from __future__ import annotations
 
-from llm_router.backends.ollama import OllamaBackend
-from llm_router.config import parse_config
+from jev_model_router.backends.ollama import OllamaBackend
+from jev_model_router.config import parse_config
 
 from conftest import BASE_CONFIG, make_request
 

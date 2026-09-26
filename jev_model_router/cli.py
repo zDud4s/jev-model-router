@@ -1,4 +1,4 @@
-"""Command line: `llm-router serve`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
+"""Command line: `jev-model-router serve`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ DEFAULT_CONFIG = "config.yaml"
 
 
 def _build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(prog="llm-router", description=__doc__)
+    parser = argparse.ArgumentParser(prog="jev-model-router", description=__doc__)
     parser.add_argument("-c", "--config", default=DEFAULT_CONFIG, help="path to the YAML config")
     sub = parser.add_subparsers(dest="command", required=True)
 

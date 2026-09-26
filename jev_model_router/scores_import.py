@@ -95,7 +95,7 @@ def http_fetch(timeout: float) -> Fetch:
         left = deadline - _clock()
         if left <= 0:
             raise TimeoutError("timed out")
-        request = urllib.request.Request(url, headers={"User-Agent": "llm-router", **headers})
+        request = urllib.request.Request(url, headers={"User-Agent": "jev-model-router", **headers})
         opener = urllib.request.build_opener(_PrivateHeaders(set(headers)))
         with opener.open(request, timeout=min(timeout, left)) as response:  # noqa: S310 - URLs come from the operator's file
             return _read(response, deadline)

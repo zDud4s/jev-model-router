@@ -1,7 +1,7 @@
 # Benchmark evidence: what cards are derived from.
 # See docs/superpowers/specs/2026-09-25-benchmark-derived-cards-design.md.
 #
-# A new model needs nothing here: `llm-router benchmarks import` brings its rows
+# A new model needs nothing here: `jev-model-router benchmarks import` brings its rows
 # from the sources below once they publish them. A new benchmark is an entry
 # with a description (Jev reads it) and a `data` mapping. A new source is an
 # entry under `sources`, if its format is one the importer reads.

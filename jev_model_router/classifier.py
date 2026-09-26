@@ -287,7 +287,7 @@ class DifficultyModel:
     def load(cls, path: str | Path) -> "DifficultyModel":
         p = Path(path)
         if not p.is_file():
-            raise ModelError(f"no model at {p}; train one with `llm-router train`")
+            raise ModelError(f"no model at {p}; train one with `jev-model-router train`")
         try:
             raw = json.loads(p.read_text(encoding="utf-8"))
         except ValueError as exc:

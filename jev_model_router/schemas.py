@@ -196,7 +196,7 @@ def model_card(tier_name: str, model: str) -> dict[str, Any]:
         "id": tier_name,
         "object": "model",
         "created": 0,
-        "owned_by": "llm-router",
+        "owned_by": "jev-model-router",
         # Non-standard, but harmless to clients and useful to a human reading it.
         "root": model,
     }

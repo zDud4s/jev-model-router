@@ -6,11 +6,11 @@ import copy
 
 from fastapi.testclient import TestClient
 
-from llm_router.app import create_app
-from llm_router.capabilities import CapabilityRouter
-from llm_router.config import parse_config
-from llm_router.db import RequestLog
-from llm_router.trace import TraceStore
+from jev_model_router.app import create_app
+from jev_model_router.capabilities import CapabilityRouter
+from jev_model_router.config import parse_config
+from jev_model_router.db import RequestLog
+from jev_model_router.trace import TraceStore
 
 from conftest import BASE_CONFIG
 from test_capabilities import Ask, HARD, raw_config

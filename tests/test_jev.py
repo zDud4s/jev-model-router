@@ -25,12 +25,12 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from llm_router.app import create_app
-from llm_router.backends.base import BackendError
-from llm_router.backends.jev import DEFAULT_INSTRUCTIONS, JevBackend
-from llm_router.config import Config, ConfigError, parse_config
-from llm_router.db import RequestLog
-from llm_router.verification import build_review_request
+from jev_model_router.app import create_app
+from jev_model_router.backends.base import BackendError
+from jev_model_router.backends.jev import DEFAULT_INSTRUCTIONS, JevBackend
+from jev_model_router.config import Config, ConfigError, parse_config
+from jev_model_router.db import RequestLog
+from jev_model_router.verification import build_review_request
 
 from conftest import BASE_CONFIG, FakeBackend, make_request
 
@@ -121,7 +121,7 @@ async def test_the_probability_survives_the_verdict_so_a_run_can_be_rethresholde
 
 
 async def test_the_verdict_is_the_shape_the_loop_already_parses() -> None:
-    from llm_router.verification import answer_text, parse_verdict
+    from jev_model_router.verification import answer_text, parse_verdict
 
     config = config_with()
     backend = JevBackend(config.tier("judge"), client=judging(noul=0.10))
@@ -325,7 +325,7 @@ def test_a_jev_tier_needs_no_base_url() -> None:
 
 
 def test_a_judge_is_never_eligible_to_serve_and_so_never_a_counterfactual() -> None:
-    from llm_router.eligibility import RejectionReason, evaluate
+    from jev_model_router.eligibility import RejectionReason, evaluate
 
     config = config_with()
     result = evaluate(config, make_request())
@@ -341,8 +341,8 @@ def test_a_judge_is_never_eligible_to_serve_and_so_never_a_counterfactual() -> N
 
 
 def test_the_same_judge_is_eligible_for_the_review_it_exists_to_read() -> None:
-    from llm_router.eligibility import check_tier
-    from llm_router.tokens import estimate_request_budget
+    from jev_model_router.eligibility import check_tier
+    from jev_model_router.tokens import estimate_request_budget
 
     config = config_with()
     review = a_review(config)
@@ -359,7 +359,7 @@ def test_the_same_judge_is_eligible_for_the_review_it_exists_to_read() -> None:
 
 
 def test_a_judge_that_cannot_fit_the_review_is_still_rejected_for_size() -> None:
-    from llm_router.eligibility import RejectionReason, check_tier
+    from jev_model_router.eligibility import RejectionReason, check_tier
 
     # `serving=False` relaxes one rule, not the gate. A review that does not fit
     # must still be a skip rather than a call that will be refused upstream.

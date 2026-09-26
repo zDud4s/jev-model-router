@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import pytest
 
-from llm_router.scores_scale import Obs, fit_scale
+from jev_model_router.scores_scale import Obs, fit_scale
 
 
 def _synthetic():

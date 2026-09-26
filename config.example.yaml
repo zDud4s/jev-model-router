@@ -1,4 +1,4 @@
-# llm-router configuration.
+# jev-model-router configuration.
 #
 # This file IS the model catalog. Nothing in the source names a model, so adding
 # a backend is one entry here and no code change.
@@ -8,7 +8,7 @@ server:
   port: 8080
 
 log:
-  path: ./llm-router.db
+  path: ./jev-model-router.db
   # Prompts are user data, so only their SHA-256 is stored by default.
   # Set to true to keep the full text as well.
   store_prompts: false
@@ -28,7 +28,7 @@ router:
   #
   # The model is not bundled and cannot be. Its labels come from the
   # verification loop below, so the order is: verification on at sample_rate
-  # 1.0, real traffic, then `llm-router train`. With `kind: classifier` and no
+  # 1.0, real traffic, then `jev-model-router train`. With `kind: classifier` and no
   # readable model file the proxy refuses to start, rather than quietly serving
   # every request from default_tier and looking identical to a working router
   # in every report it produces.
@@ -83,7 +83,7 @@ router:
   #   # else Jev's reading of a `precision` requirement).
   #   rule: expected_cost
   #   failure: {detected: 1.5, undetected: 4.0, stakes: {low: 0.5, normal: 1.0, high: 3.0}}
-  #   # `llm-router calibrate --anchors FILE` sets miss_scale from tasks with a
+  #   # `jev-model-router calibrate --anchors FILE` sets miss_scale from tasks with a
   #   # tier known to be (or not be) enough; `calibrate --from-log` fits one
   #   # scale per model family from judged outcomes (verifier verdicts, and
   #   # tiers a client resent as `failed_tiers`).
@@ -124,11 +124,11 @@ router:
 # tags) -- none of it spends quota. A tier whose model or effort is no longer
 # served leaves eligibility with the reason logged; models no tier uses are
 # listed. The report is kept in `path`, rewritten only when it changes, and
-# served on /healthz. `llm-router check --catalog` runs the same check by hand.
+# served on /healthz. `jev-model-router check --catalog` runs the same check by hand.
 #
 # catalog:
 #   check_on_start: true
-#   path: llm-router.catalog.json
+#   path: jev-model-router.catalog.json
 
 tiers:
   # A local model. No prices, so it costs zero -- that is the correct answer,
@@ -147,7 +147,7 @@ tiers:
     backend: openai_compatible
     model: claude-sonnet-5
     base_url: https://api.example-proxy.com/v1
-    api_key_env: LLM_ROUTER_MID_KEY
+    api_key_env: JEV_MODEL_ROUTER_MID_KEY
     context_window: 200000
     supports_tools: true
     # USD per 1M tokens; every field optional. An omitted cache_read is billed
@@ -164,7 +164,7 @@ tiers:
     backend: openai_compatible
     model: claude-opus-5
     base_url: https://api.example-proxy.com/v1
-    api_key_env: LLM_ROUTER_TOP_KEY
+    api_key_env: JEV_MODEL_ROUTER_TOP_KEY
     context_window: 200000
     supports_tools: true
     prices:
@@ -255,7 +255,7 @@ tiers:
 # OFF by default, and the default is not shyness. Every checked request buys a
 # second call, and every failed verdict buys a third; with the tiers above, a
 # request that is routed cheap and then fails review costs MORE than sending it
-# to `top` in the first place. `llm-router stats` prints the loop's spend as a
+# to `top` in the first place. `jev-model-router stats` prints the loop's spend as a
 # share of the bill for exactly this reason -- read it before believing a
 # savings number.
 verification:

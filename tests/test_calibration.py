@@ -9,9 +9,9 @@ import asyncio
 
 import pytest
 
-from llm_router.calibration import Calibration, calibrate, load_anchors, with_caps, with_scale, write_scale
-from llm_router.config import ConfigError, parse_config
-from llm_router.capabilities import CapabilityRouter
+from jev_model_router.calibration import Calibration, calibrate, load_anchors, with_caps, with_scale, write_scale
+from jev_model_router.config import ConfigError, parse_config
+from jev_model_router.capabilities import CapabilityRouter
 
 from test_capabilities import Ask, raw_config
 
@@ -160,7 +160,7 @@ def test_because_must_name_a_requirement_and_sit_on_an_insufficient_anchor(tmp_p
     assert load_anchors(path, {"reasoning": "?", "code": "?"})[0]["because"] == "code"
 
 
-from llm_router.calibration import write_level_caps
+from jev_model_router.calibration import write_level_caps
 
 
 def test_level_caps_are_written_beside_family_scales_merged_lower_wins_and_comments_kept(tmp_path):
@@ -180,8 +180,8 @@ def test_a_run_with_family_scales_is_idempotent_through_the_written_config(tmp_p
     # move the global scale on the next run (it did: the capped mid bounded it lower).
     import yaml
 
-    from llm_router.config import load_config
-    from llm_router.config import _DEFAULT_MISS
+    from jev_model_router.config import load_config
+    from jev_model_router.config import _DEFAULT_MISS
 
     ask = ByTask({"ALPHA": {"reasoning": 0.6, "code": 0.9}, "BETA": {"reasoning": 0.99, "code": 0.1},
                   "GAMMA": {"reasoning": 0.9, "code": 0.9}})
@@ -257,7 +257,7 @@ def test_a_block_form_level_caps_is_refused_not_corrupted(tmp_path):
 def test_calibrate_write_refuses_a_block_form_level_caps_and_writes_nothing(tmp_path, monkeypatch, capsys):
     import yaml
 
-    from llm_router import cli
+    from jev_model_router import cli
     from test_discovery import report
 
     raw = raw_config(miss_scale=1.0, level_caps={"top": {"code": 3.0}})
@@ -268,15 +268,15 @@ def test_calibrate_write_refuses_a_block_form_level_caps_and_writes_nothing(tmp_
     assert "level_caps:\n" in before  # block form
     anchors = tmp_path / "a.yaml"
     anchors.write_text(yaml.safe_dump(ANCHORS), encoding="utf-8")
-    monkeypatch.setattr("llm_router.catalog.check_catalog", lambda config: report())
-    monkeypatch.setattr("llm_router.capabilities.jev_asker", lambda tier: Ask(HARD))
+    monkeypatch.setattr("jev_model_router.catalog.check_catalog", lambda config: report())
+    monkeypatch.setattr("jev_model_router.capabilities.jev_asker", lambda tier: Ask(HARD))
     assert cli.main(["-c", str(path), "calibrate", "--anchors", str(anchors), "--write"]) == 2
     assert "level_caps" in capsys.readouterr().err
     assert path.read_text(encoding="utf-8") == before  # neither miss_scale nor level_caps written
 
 
 def test_a_block_form_family_scales_is_refused_not_corrupted(tmp_path):
-    from llm_router.calibration import write_family_scales
+    from jev_model_router.calibration import write_family_scales
 
     path = tmp_path / "c.yaml"
     text = BLOCK.replace("level_caps:\n      top:\n        code: 3.0\n", "family_scales:\n      top: 0.5\n")
@@ -288,7 +288,7 @@ def test_a_block_form_family_scales_is_refused_not_corrupted(tmp_path):
 
 def test_a_cap_is_checked_and_reported_at_the_floored_value_that_is_written():
     # write_level_caps floors to 3 places; protection and "routed after" must see that value, not a finer one.
-    from llm_router.calibration import floor_cap
+    from jev_model_router.calibration import floor_cap
 
     _, _, cal = run(ANCHORS)
     (_, _, _, _, new, _), = cal.results[1].capped
@@ -304,7 +304,7 @@ def test_a_need_on_a_level_that_misses_nothing_is_still_blamed_on_the_most_neede
     assert (req, old, how) == ("code", 3, "weakest link") and new < 3
 
 
-from llm_router.calibration import write_calibration, write_family_scales  # noqa: E402
+from jev_model_router.calibration import write_calibration, write_family_scales  # noqa: E402
 
 FLAT = "router:\n  capabilities:\n    miss: [0.9, 0.5, 0.2, 0.05]\n    miss_scale: 1.0\n    family_scales: {}\n"
 

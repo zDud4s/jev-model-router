@@ -7,10 +7,10 @@ from decimal import Decimal
 
 import pytest
 
-from llm_router.benchmark import INSTRUCTION, Item, final_answer, grade, label, load_gsm8k
-from llm_router.config import parse_config
-from llm_router.db import RequestLog
-from llm_router.training import train_from_log
+from jev_model_router.benchmark import INSTRUCTION, Item, final_answer, grade, label, load_gsm8k
+from jev_model_router.config import parse_config
+from jev_model_router.db import RequestLog
+from jev_model_router.training import train_from_log
 
 from conftest import BASE_CONFIG, FakeBackend
 
@@ -156,7 +156,7 @@ def test_an_unfinished_reply_is_graded_apart_from_a_wrong_one() -> None:
 
 
 def test_a_corpus_that_is_mostly_budget_says_so_before_it_is_trained_on(tmp_path) -> None:
-    from llm_router.benchmark import format_label_report
+    from jev_model_router.benchmark import format_label_report
 
     config = parse_config(
         {**BASE_CONFIG, "router": {"kind": "static", "default_tier": "cheap",

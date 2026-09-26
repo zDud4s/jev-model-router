@@ -1,4 +1,4 @@
-"""Allows `python -m llm_router ...`."""
+"""Allows `python -m jev_model_router ...`."""
 
 from .cli import main
 

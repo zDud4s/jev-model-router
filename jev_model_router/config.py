@@ -545,7 +545,7 @@ class CapabilitiesConfig:
     fallback_profile: ModelProfile | None = None
     effort_rules: dict[str, EffortRule] = field(default_factory=lambda: dict(_DEFAULT_EFFORT_RULES))
     thinking: tuple[str, ...] = ()
-    # Every `miss` entry is multiplied by it. Set by `llm-router calibrate` from
+    # Every `miss` entry is multiplied by it. Set by `jev-model-router calibrate` from
     # anchors -- tasks with a tier the operator knows is (or is not) enough.
     miss_scale: float = 1.0
     # The highest effort discovery turns into a tier. The operator's rule, not
@@ -851,7 +851,7 @@ class VerificationConfig:
 
 @dataclass(frozen=True)
 class LogConfig:
-    path: str = "llm-router.db"
+    path: str = "jev-model-router.db"
     # Prompts are user data. The default stores only a SHA-256 hash, which is
     # enough to spot repeats and correlate reports without holding the content.
     store_prompts: bool = False
@@ -867,7 +867,7 @@ class CatalogConfig:
 
     check_on_start: bool = True
     # Where the report is kept, rewritten only when it changes. None: not kept.
-    path: str | None = "llm-router.catalog.json"
+    path: str | None = "jev-model-router.catalog.json"
     check_ollama: bool = True
     # Overrides for where the CLIs keep their state; default ~/.claude, ~/.codex.
     claude_dir: str | None = None
@@ -1056,7 +1056,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
 
     raw_log = raw.get("log") or {}
     log = LogConfig(
-        path=str(raw_log.get("path", "llm-router.db")),
+        path=str(raw_log.get("path", "jev-model-router.db")),
         store_prompts=bool(raw_log.get("store_prompts", False)),
     )
 

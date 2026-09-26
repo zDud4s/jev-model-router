@@ -327,7 +327,7 @@ def _format_billing(b: BillingStats) -> list[str]:
     if b.recoverable_rows:
         lines.append(
             f"  RECOVERABLE {b.recoverable_rows} row(s) with zero tokens and a provider id -- "
-            "abandoned streams, costed at nothing: run `llm-router reconcile`"
+            "abandoned streams, costed at nothing: run `jev-model-router reconcile`"
         )
     return lines
 

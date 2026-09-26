@@ -6,14 +6,14 @@ from typing import Any
 
 from fastapi.testclient import TestClient
 
-from llm_router.app import billed_total, create_app
-from llm_router.config import parse_config
-from llm_router.db import LogEntry, RequestLog
-from llm_router.pricing import counterfactuals
-from llm_router.reconcile import reconcile
-from llm_router.schemas import Usage
-from llm_router.stats import collect, format_text
-from llm_router.verification import Verdict, VerificationOutcome
+from jev_model_router.app import billed_total, create_app
+from jev_model_router.config import parse_config
+from jev_model_router.db import LogEntry, RequestLog
+from jev_model_router.pricing import counterfactuals
+from jev_model_router.reconcile import reconcile
+from jev_model_router.schemas import Usage
+from jev_model_router.stats import collect, format_text
+from jev_model_router.verification import Verdict, VerificationOutcome
 
 from conftest import BASE_CONFIG, FakeBackend
 
@@ -278,8 +278,8 @@ def test_a_stream_the_client_abandons_still_writes_its_row() -> None:
     import httpx
     import uvicorn
 
-    from llm_router.backends.base import StreamChunk
-    from llm_router.schemas import build_chunk
+    from jev_model_router.backends.base import StreamChunk
+    from jev_model_router.schemas import build_chunk
 
     class SlowStream(FakeBackend):
         async def stream(self, request):

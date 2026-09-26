@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from llm_router.config import Prices
-from llm_router.pricing import cost_usd, counterfactuals
-from llm_router.schemas import Usage
+from jev_model_router.config import Prices
+from jev_model_router.pricing import cost_usd, counterfactuals
+from jev_model_router.schemas import Usage
 
 
 def test_a_local_model_with_no_prices_costs_zero(config) -> None:

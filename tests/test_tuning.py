@@ -5,8 +5,8 @@ from __future__ import annotations
 import math
 import random
 
-from llm_router.classifier import Example, build_model
-from llm_router.training import (
+from jev_model_router.classifier import Example, build_model
+from jev_model_router.training import (
     TUNING_GRID,
     auc_interval,
     calibrate_for_recall,

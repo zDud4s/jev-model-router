@@ -191,7 +191,7 @@ def create_app(
             await closer()
         request_log.close()
 
-    app = FastAPI(title="llm-router", version="0.1.0", lifespan=lifespan)
+    app = FastAPI(title="jev-model-router", version="0.1.0", lifespan=lifespan)
     app.state.config = config
     app.state.log = request_log
     app.state.backends = backends

@@ -15,10 +15,10 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from llm_router.app import create_app
-from llm_router.catalog import OK, UNAVAILABLE, UNVERIFIED, check_catalog, write_if_changed
-from llm_router.config import ConfigError, parse_config
-from llm_router.db import RequestLog
+from jev_model_router.app import create_app
+from jev_model_router.catalog import OK, UNAVAILABLE, UNVERIFIED, check_catalog, write_if_changed
+from jev_model_router.config import ConfigError, parse_config
+from jev_model_router.db import RequestLog
 
 from conftest import BASE_CONFIG
 
@@ -209,7 +209,7 @@ def test_catalog_settings_are_validated():
     assert parse_config(BASE_CONFIG).catalog.check_on_start is False  # the suite's own setting
     del raw["catalog"]
     assert parse_config(raw).catalog.check_on_start is True
-    assert parse_config(raw).catalog.path == "llm-router.catalog.json"
+    assert parse_config(raw).catalog.path == "jev-model-router.catalog.json"
 
 
 # ---------------------------------------------------------------- through the app

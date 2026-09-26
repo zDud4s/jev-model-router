@@ -18,11 +18,11 @@ from typing import Any
 
 import pytest
 
-from llm_router.backends import build_backend
-from llm_router.backends.base import BackendError, StreamChunk, StreamEnd
-from llm_router.backends.claude_cli import ClaudeCliBackend
-from llm_router.config import ConfigError, parse_config
-from llm_router.schemas import ChatCompletionRequest
+from jev_model_router.backends import build_backend
+from jev_model_router.backends.base import BackendError, StreamChunk, StreamEnd
+from jev_model_router.backends.claude_cli import ClaudeCliBackend
+from jev_model_router.config import ConfigError, parse_config
+from jev_model_router.schemas import ChatCompletionRequest
 
 from conftest import BASE_CONFIG
 

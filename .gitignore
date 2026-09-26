@@ -13,7 +13,7 @@ config.yaml
 # Local paths to this machine's CLIs, like config.yaml.
 config.capabilities.yaml
 # Written by the startup catalog check; names this machine's executables.
-llm-router.catalog.json
+jev-model-router.catalog.json
 .env
 classifier.json
 anchors.capabilities.yaml

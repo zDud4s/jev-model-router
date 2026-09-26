@@ -282,7 +282,7 @@ def _set_scale(text: str, scale: float, path: str | Path) -> str:
     if not match:
         raise ConfigError(f"{path}: no `miss:` line under router.capabilities to put miss_scale beside")
     indent = match.group(1)
-    insert = f"\n{indent}# Set by `llm-router calibrate`: every miss entry is multiplied by it.\n{indent}{line}"
+    insert = f"\n{indent}# Set by `jev-model-router calibrate`: every miss entry is multiplied by it.\n{indent}{line}"
     return text[: match.end()] + insert + text[match.end():]
 
 
@@ -441,7 +441,7 @@ def write_family_scales(path: str | Path, scales: dict[str, float]) -> None:
         if not match:
             raise ConfigError(f"{path}: no `miss:` line under router.capabilities to put family_scales beside")
         indent = match.group(1)
-        insert = (f"\n{indent}# Fitted by `llm-router calibrate --from-log`: a family here ignores miss_scale."
+        insert = (f"\n{indent}# Fitted by `jev-model-router calibrate --from-log`: a family here ignores miss_scale."
                   f"\n{indent}{line}")
         text = text[: match.end()] + insert + text[match.end():]
     _replace(target, text)
@@ -491,7 +491,7 @@ def _set_level_caps(text: str, level_caps: dict[str, dict[str, float]], path: st
     if not anchor:
         raise ConfigError(f"{path}: no `miss:` line under router.capabilities to put level_caps beside")
     indent = anchor.group(1)
-    insert = (f"\n{indent}# Set by `llm-router calibrate --anchors` from insufficient anchors: a family's"
+    insert = (f"\n{indent}# Set by `jev-model-router calibrate --anchors` from insufficient anchors: a family's"
               f"\n{indent}# ceiling on one requirement, applied last to every card.\n{indent}{line}")
     return text[: anchor.end()] + insert + text[anchor.end():]
 

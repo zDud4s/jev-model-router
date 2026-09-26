@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from llm_router.config import ConfigError, load_config, parse_config
+from jev_model_router.config import ConfigError, load_config, parse_config
 
 from conftest import BASE_CONFIG
 

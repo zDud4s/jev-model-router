@@ -57,7 +57,7 @@ class CodexCliBackend:
     def __init__(self, tier: TierConfig, runner: Runner | None = None) -> None:
         self.tier = tier
         self._runner = runner or _run
-        self._cwd = tempfile.mkdtemp(prefix="llm-router-codex-")
+        self._cwd = tempfile.mkdtemp(prefix="jev-model-router-codex-")
 
     def _argv(self) -> list[str]:
         argv = [

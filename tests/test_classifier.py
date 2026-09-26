@@ -15,8 +15,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from conftest import BASE_CONFIG, make_request
-from llm_router.app import create_app
-from llm_router.classifier import (
+from jev_model_router.app import create_app
+from jev_model_router.classifier import (
     MODEL_FORMAT,
     DifficultyModel,
     Example,
@@ -29,14 +29,14 @@ from llm_router.classifier import (
     fit,
     split_by_group,
 )
-from llm_router.config import ConfigError, parse_config
-from llm_router.db import SCHEMA_VERSION, LogEntry, RequestLog
-from llm_router.pricing import Counterfactual
-from llm_router.routing import ClassifierRouter, RouteDecision, StaticRouter, build_router
-from llm_router.schemas import Usage
-from llm_router.stats import collect, format_text
-from llm_router.training import TrainingError, format_report, load_rows, train_from_log
-from llm_router.verification import VerificationOutcome, Verdict
+from jev_model_router.config import ConfigError, parse_config
+from jev_model_router.db import SCHEMA_VERSION, LogEntry, RequestLog
+from jev_model_router.pricing import Counterfactual
+from jev_model_router.routing import ClassifierRouter, RouteDecision, StaticRouter, build_router
+from jev_model_router.schemas import Usage
+from jev_model_router.stats import collect, format_text
+from jev_model_router.training import TrainingError, format_report, load_rows, train_from_log
+from jev_model_router.verification import VerificationOutcome, Verdict
 
 
 # --------------------------------------------------------------------------
@@ -221,7 +221,7 @@ def test_a_model_file_from_a_future_format_is_refused(tmp_path):
 
 
 def test_a_missing_model_file_names_the_command_that_makes_one(tmp_path):
-    with pytest.raises(ModelError, match="llm-router train"):
+    with pytest.raises(ModelError, match="jev-model-router train"):
         DifficultyModel.load(tmp_path / "absent.json")
 
 
@@ -542,7 +542,7 @@ def test_a_classifier_router_with_no_model_refuses_to_start(tmp_path):
     )
     # Not a fallback to static: a router that looks like it is classifying and
     # is not would be indistinguishable from a working one in every report.
-    with pytest.raises(ConfigError, match="llm-router train"):
+    with pytest.raises(ConfigError, match="jev-model-router train"):
         build_router(config)
 
 

@@ -55,12 +55,12 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from llm_router.backends import build_backend  # noqa: E402
-from llm_router.backends.base import BackendError  # noqa: E402
-from llm_router.config import ConfigError, load_config  # noqa: E402
-from llm_router.pricing import cost_usd  # noqa: E402
-from llm_router.schemas import ChatCompletionRequest  # noqa: E402
-from llm_router.verification import (  # noqa: E402
+from jev_model_router.backends import build_backend  # noqa: E402
+from jev_model_router.backends.base import BackendError  # noqa: E402
+from jev_model_router.config import ConfigError, load_config  # noqa: E402
+from jev_model_router.pricing import cost_usd  # noqa: E402
+from jev_model_router.schemas import ChatCompletionRequest  # noqa: E402
+from jev_model_router.verification import (  # noqa: E402
     answer_text,
     build_review_request,
     finish_reason,

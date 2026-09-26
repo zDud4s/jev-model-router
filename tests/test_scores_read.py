@@ -5,9 +5,9 @@ from __future__ import annotations
 import asyncio
 import json
 
-from llm_router.config import parse_config
-from llm_router.scores import load_scores
-from llm_router.scores_read import MAX_EXAMPLES, read
+from jev_model_router.config import parse_config
+from jev_model_router.scores import load_scores
+from jev_model_router.scores_read import MAX_EXAMPLES, read
 
 from test_scores import raw_config
 

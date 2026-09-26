@@ -80,7 +80,7 @@ class ClaudeCliBackend:
         self._runner = runner or _run
         # A fresh empty directory: the CLI discovers CLAUDE.md files by walking
         # up from its cwd, and the proxy's own cwd is usually a repository.
-        self._cwd = tempfile.mkdtemp(prefix="llm-router-claude-")
+        self._cwd = tempfile.mkdtemp(prefix="jev-model-router-claude-")
 
     def _argv(self, system: str | None) -> list[str]:
         argv = [

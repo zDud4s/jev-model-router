@@ -4,8 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
-from llm_router.config import parse_config
-from llm_router.price_check import check_prices, format_report, listed_prices
+from jev_model_router.config import parse_config
+from jev_model_router.price_check import check_prices, format_report, listed_prices
 
 from conftest import BASE_CONFIG
 

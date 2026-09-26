@@ -12,9 +12,9 @@ from datetime import datetime, timezone
 import pytest
 import yaml
 
-from llm_router.config import parse_config
-from llm_router.scores import load_scores
-from llm_router.scores_import import import_sources
+from jev_model_router.config import parse_config
+from jev_model_router.scores import load_scores
+from jev_model_router.scores_import import import_sources
 
 from test_scores import raw_config
 
@@ -196,7 +196,7 @@ def test_an_alias_maps_a_display_name_and_two_rows_on_one_key_collapse(tmp_path,
 
 def test_paging_stops_at_the_cap_and_a_truncated_page_set_is_an_error_that_keeps_the_previous_points(
         tmp_path, monkeypatch):
-    from llm_router.scores_import import MAX_PAGES
+    from jev_model_router.scores_import import MAX_PAGES
 
     monkeypatch.setenv("TEST_BENCH_KEY", "k")
     one = json.dumps({"data": [{"name": "acme-small (high)", "i": 40.0}], "more": False}).encode()
@@ -259,7 +259,7 @@ def test_an_alias_can_carry_the_effort_its_display_name_means_so_two_variants_st
 def test_the_api_key_never_follows_a_redirect_to_another_host_or_to_http():
     import urllib.request
 
-    from llm_router.scores_import import _PrivateHeaders
+    from jev_model_router.scores_import import _PrivateHeaders
 
     handler = _PrivateHeaders({"x-api-key"})
     request = urllib.request.Request("https://api.test/models", headers={"x-api-key": "k", "User-Agent": "r"})
@@ -288,7 +288,7 @@ class Clock:
 
 
 def test_a_source_has_refresh_timeout_s_for_all_its_pages_and_fails_with_timed_out(tmp_path, monkeypatch):
-    import llm_router.scores_import as scores_import
+    import jev_model_router.scores_import as scores_import
 
     monkeypatch.setenv("TEST_BENCH_KEY", "k")
     clock = Clock()
@@ -309,7 +309,7 @@ def test_a_source_has_refresh_timeout_s_for_all_its_pages_and_fails_with_timed_o
 
 
 def test_a_trickling_response_is_cut_at_the_deadline(monkeypatch):
-    import llm_router.scores_import as scores_import
+    import jev_model_router.scores_import as scores_import
 
     clock = Clock()
     monkeypatch.setattr(scores_import, "_clock", clock)
@@ -359,7 +359,7 @@ def test_an_unreadable_table_fails_only_its_benchmark(tmp_path):
 def test_a_refresh_where_every_source_failed_is_retried_at_the_next_start(tmp_path):
     from datetime import timedelta
 
-    from llm_router.scores_import import refresh
+    from jev_model_router.scores_import import refresh
 
     config, _ = setup(tmp_path, {"code": CODE})
     import_sources(config, load_scores(config),
@@ -373,7 +373,7 @@ def test_a_refresh_where_every_source_failed_is_retried_at_the_next_start(tmp_pa
 
 
 def test_a_response_or_a_zip_member_over_the_size_cap_fails_with_an_error(tmp_path, monkeypatch):
-    import llm_router.scores_import as scores_import
+    import jev_model_router.scores_import as scores_import
 
     monkeypatch.setattr(scores_import, "MAX_BYTES", 1000)
 
@@ -391,7 +391,7 @@ def test_a_response_or_a_zip_member_over_the_size_cap_fails_with_an_error(tmp_pa
 
 
 def test_an_import_time_without_a_zone_or_not_a_string_is_stale_not_an_error():
-    from llm_router.scores_import import stale
+    from jev_model_router.scores_import import stale
 
     assert stale("2026-09-25T11:00:00", 24, now=NOW)
     assert stale(12345, 24, now=NOW)  # type: ignore[arg-type]
@@ -438,7 +438,7 @@ def _trickle_server(interval: float, count: int):
 
 
 def test_a_server_trickling_bytes_over_loopback_is_cut_at_the_deadline():
-    from llm_router.scores_import import _clock, http_fetch
+    from jev_model_router.scores_import import _clock, http_fetch
 
     listener, url = _trickle_server(0.05, 60)  # 3 s of bytes, each well inside the socket timeout
     try:
