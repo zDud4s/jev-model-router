@@ -20,3 +20,5 @@ anchors.capabilities.yaml
 # Written by `benchmarks import|read|fit`; regenerable from benchmarks.yaml, the sources and the log.
 *.imported.json
 *.derived.json
+# Specs and plans stay local, never in the repository or its history.
+docs/
