@@ -1,7 +1,11 @@
-# jev-model-router configuration.
+# jev-model-router example config.
 #
-# This file IS the model catalog. Nothing in the source names a model, so adding
-# a backend is one entry here and no code change.
+# The easy path is `jev-model-router init`, which detects this machine and writes a
+# config for you. This file is the hand-written alternative: copy it to config.yaml,
+# edit the tiers, then run `jev-model-router -c config.yaml check`.
+#
+# This file IS the model catalog: nothing in the source names a model.
+# Why each option exists, with measurements: DESIGN.md.
 
 server:
   host: 127.0.0.1
@@ -9,130 +13,35 @@ server:
 
 log:
   path: ./jev-model-router.db
-  # Prompts are user data, so only their SHA-256 is stored by default.
-  # Set to true to keep the full text as well.
-  store_prompts: false
+  store_prompts: false      # only a SHA-256 of each prompt is kept unless true
 
 router:
-  kind: static          # static | classifier | capabilities
+  kind: static              # static | classifier | capabilities
   default_tier: cheap
-  # Optional: let a client that hardcodes a vendor model string pick a tier.
-  model_map:
+  model_map:                # optional: a client asking for this model gets this tier
     gpt-4o: top
     gpt-4o-mini: cheap
 
-  # --- kind: classifier -----------------------------------------------------
-  # A learned router. It reads the prompt and predicts whether `default_tier`'s
-  # answer would survive review; above `threshold` the request goes straight to
-  # `strong_tier` and no cheap answer is produced at all.
-  #
-  # The model is not bundled and cannot be. Its labels come from the
-  # verification loop below, so the order is: verification on at sample_rate
-  # 1.0, real traffic, then `jev-model-router train`. With `kind: classifier` and no
-  # readable model file the proxy refuses to start, rather than quietly serving
-  # every request from default_tier and looking identical to a working router
-  # in every report it produces.
-  #
+  # kind: classifier -- learned from verification verdicts (`jev-model-router train`).
   # strong_tier: top
   # model_path: ./classifier.json
-  # threshold: 0.5        # omit to use the threshold the model was trained with
-  #
-  # Fraction of would-be escalations sent to default_tier anyway, so they get
-  # answered and reviewed. Without it the model destroys the evidence that
-  # would test it: every prompt it scores high skips the cheap tier, is never
-  # verified, and never becomes a label, so the NEXT model is fitted only on
-  # prompts this one already believed were easy. Those explored rows are the
-  # only ones that can ever contradict it.
-  #
-  # Note that this knob and verification.sample_rate MULTIPLY: explore_rate 0.10
-  # with sample_rate 0.25 labels 2.5% of would-be escalations, not 10%.
-  #
-  # explore_rate: 0.05
+  # explore_rate: 0.05      # keep a few predicted-hard requests cheap, so they get judged
 
-  # --- kind: capabilities ---------------------------------------------------
-  # Jev reads a short packet built from the request (plus any `packet` object
-  # the client sends: kind, size, risk, files, `failed_tiers`) and answers one
-  # yes/no probability per requirement. Each destination tier has a card with a
-  # level 0..3 per requirement; the cheapest tier whose estimated success
-  # reaches `target` serves the request. A tier is a model AND an effort
-  # (`effort:` on claude_cli / codex_cli tiers), so the router picks both.
-  # Cost is the tier's `prices` when it bills per token, else the card's
-  # `list_prices` -- the same price per token for a subscription as for the
-  # API: quota is a share of those tokens. A 429 takes a subscription out
-  # until its window turns.
-  #
-  # With `discover`, the tiers are not listed at all: every model the Claude
-  # Code and Codex subscriptions (and a local Ollama) serve, at every effort it
-  # takes, becomes a tier `<source>:<model>@<effort>` at startup, its card built
-  # from the first `profiles` glob that matches -- or `fallback_profile`, as the
-  # last resort, and reported. Nothing is excluded by hand: a model that costs
-  # more than a newer one and does no better simply never wins.
-  # A complete configuration over both subscriptions: config.capabilities.yaml.
-  #
+  # kind: capabilities -- Jev scores what the request needs; the cheapest tier
+  # likely to succeed serves it. Tiers can be discovered instead of listed:
   # capabilities:
   #   jev_tier: judge
   #   target: 0.8
-  #   floor: 0.2            # Jev's "no" band: p at or below it is "not needed"
-  #   max_effort: high      # efforts above it are not generated as tiers
-  #   # `target` (default): the cheapest tier with success >= target.
-  #   # `expected_cost`: the least price + (1 - success) x the cost of failing,
-  #   # so the bar moves per task. Failing costs a redo on the tier `target` picks,
-  #   # times `detected` when something catches it (the packet says
-  #   # `verifiable: true`, or the router's verifier checks that tier) or
-  #   # `undetected` when not, times the stakes (packet `stakes: low|normal|high`,
-  #   # else Jev's reading of a `precision` requirement).
-  #   rule: expected_cost
-  #   failure: {detected: 1.5, undetected: 4.0, stakes: {low: 0.5, normal: 1.0, high: 3.0}}
-  #   # `jev-model-router calibrate --anchors FILE` sets miss_scale from tasks with a
-  #   # tier known to be (or not be) enough; `calibrate --from-log` fits one
-  #   # scale per model family from judged outcomes (verifier verdicts, and
-  #   # tiers a client resent as `failed_tiers`).
-  #   miss_scale: 1.0
-  #   family_scales: {}
-  #   # A family's ceiling on one requirement, written by `calibrate --anchors`
-  #   # when an `insufficient` anchor names a tier that still reaches the target.
-  #   level_caps: {}
-  #   # Benchmark evidence that derives discovered cards (see benchmarks.yaml):
-  #   # imported from sources that measure every vendor (`benchmarks import`),
-  #   # read onto one ability scale, and blended with the profile by the
-  #   # evidence C behind each requirement: C/(C + profile_weight) measured.
-  #   # a/k null: the line through the profiles' own levels.
-  #   # A source in benchmarks.yaml that needs a key names its environment
-  #   # variable with `api_key_env`; unset, that source is skipped with a warning.
-  #   benchmarks: {path: benchmarks.yaml, profile_weight: 0.25, vendor_weight: 0.5, refresh_hours: 24}
-  #   subscriptions:
-  #     claude: {window_hours: 5}   # after a 429, off the table for this long
-  #   requirements:
-  #     reasoning: The state is a task packet. Does it need deep, multi-step reasoning?
-  #     multi_file: The state is a task packet. Does it need changes across several files?
-  #   cards:
-  #     cheap: {levels: {reasoning: 1, multi_file: 0}, list_prices: {input: 0.1, output: 0.4}}
-  #     top:   {levels: {reasoning: 3, multi_file: 3}, output_tokens: 3000}
-
-# Cheap first, then up: with `escalate_to: auto` a failed verdict is re-answered
-# on the tier the capabilities router picks among those rated at least as
-# strong as the one that failed. Every checked answer costs a review call.
-#
-# verification:
-#   enabled: true
-#   prefilter_tier: judge
-#   verifier_tier: "claude:claude-sonnet-5@low"
-#   escalate_to: auto
-
-# At startup every tier is checked against the models its provider serves now
-# (Claude Code's model catalog and CLI version, `codex debug models`, Ollama's
-# tags) -- none of it spends quota. A tier whose model or effort is no longer
-# served leaves eligibility with the reason logged; models no tier uses are
-# listed. The report is kept in `path`, rewritten only when it changes, and
-# served on /healthz. `jev-model-router check --catalog` runs the same check by hand.
-#
-# catalog:
-#   check_on_start: true
-#   path: jev-model-router.catalog.json
+  #   discover:
+  #     or:
+  #       backend: openai_compatible
+  #       base_url: https://openrouter.ai/api/v1
+  #       api_key_env: OPENROUTER_API_KEY
+  #       effort_body: {reasoning: {effort: "{effort}"}}
+  #       require_evidence: true    # only models with benchmark data or a profile
 
 tiers:
-  # A local model. No prices, so it costs zero -- that is the correct answer,
-  # not a missing value, and it needs no configuration to say so.
+  # Local model. No prices means it costs zero.
   cheap:
     backend: ollama
     model: llama3.1:8b
@@ -140,9 +49,8 @@ tiers:
     context_window: 131072
     supports_tools: false
 
-  # `backend: openai_compatible` covers OpenAI, OpenRouter, vLLM, and Anthropic
-  # behind an OpenAI-shaped proxy. The api key is read from the named env var at
-  # call time, so this file carries no credential.
+  # Any OpenAI-compatible API: OpenAI, OpenRouter, vLLM, a proxy.
+  # The key is read from the named env var (or `jev-model-router keys set`).
   mid:
     backend: openai_compatible
     model: claude-sonnet-5
@@ -150,11 +58,7 @@ tiers:
     api_key_env: JEV_MODEL_ROUTER_MID_KEY
     context_window: 200000
     supports_tools: true
-    # USD per 1M tokens; every field optional. An omitted cache_read is billed
-    # at the input rate, not at zero: providers report cached tokens whether or
-    # not you priced them (OpenRouter marked a whole repeated prompt cached),
-    # and a discount you did not write down is not one the report may claim.
-    prices:
+    prices:                 # USD per 1M tokens; an omitted cache_read bills at input
       input: 3.00
       output: 15.00
       cache_read: 0.30
@@ -173,170 +77,38 @@ tiers:
       cache_read: 1.50
       cache_write: 18.75
 
-  # A judge rather than a model. `backend: jev` is TypeSafe's Jev, which is not
-  # an LLM: it answers a typed yes/no question with one calibrated probability
-  # and cannot generate text at all. So a Jev tier can VERIFY and can never
-  # SERVE -- name it as `verifier_tier` below, never as `default_tier`, and a
-  # streamed request to it fails loudly rather than half-working.
-  #
-  # The appeal is arithmetic. A text judge buys a second full generation for
-  # every request it checks; this is $0.042 per 1M input tokens with the output
-  # free, which is roughly a hundredth of what the `mid` tier above charges to
-  # read the same review. Whether it is worth it is NOT arithmetic, and the
-  # measurement is `scripts/judge_eval.py` -- point it at this tier and at a
-  # text judge, and read the recall on wrong answers rather than the accuracy.
-  # Jev is a System One model, meaning it answers in one pass without reasoning
-  # first, and the one thing this project has measured twice is that a judge
-  # which cannot think cannot count. That prior is what the script is for.
-  #
-  # `model` IS sent, and is required. TypeSafe's written guide says the
-  # endpoint names its own model; the live API disagrees with 422 `missing:
-  # body.model`, and its published schema at /openapi.json marks the field
-  # required. Corrected 2026-09-21 against the service rather than the docs,
-  # which is also where the name `jev-latest` came from -- `jev` is rejected.
+  # A judge, not a model: Jev answers yes/no with a probability and cannot
+  # generate text, so it can verify answers but never serve one.
   judge:
     backend: jev
-    # Sent in the body and required there. `jev-latest` and `jev-preview` are
-    # what GET /v1/models lists; the response says which version answered, so
-    # the log keeps a specific one even though this names an alias.
     model: jev-latest
-    # Default; a Cloudflare Workers AI gateway fronting the same model goes here.
-    base_url: https://api.typesafe.ai/v1
-    api_key_env: TYPESAFE_API_KEY
-    # TypeSafe's guide says 64k and Cloudflare's model page says 32k. The lower
-    # reading is the safe one until an invoice settles it.
+    endpoints:              # same model from two providers; the first with a key wins
+      - label: TypeSafe
+        base_url: https://api.typesafe.ai/v1
+        api_key_env: TYPESAFE_API_KEY
+      - label: OpenRouter
+        base_url: https://openrouter.ai/api/v1
+        model: "~typesafe/jev-latest"
+        api_key_env: OPENROUTER_API_KEY
+        key_url: https://openrouter.ai/keys
     context_window: 32000
     supports_tools: false
     prices:
       input: 0.042
-      # Written down rather than omitted. An omitted price is "I did not say";
-      # this one really is zero, and the report may only claim what was stated.
       output: 0.0
     jev:
-      # Where the probability becomes a verdict. Not `extra_body`, because it is
-      # never sent to TypeSafe -- it is this router's decision about its own
-      # economics, and 0.5 is the neutral reading rather than a recommendation.
-      # A false FAIL buys an escalation nobody needed; a false PASS ships a
-      # wrong answer. Those cost different amounts, so the line between them is
-      # not naturally in the middle. `judge_eval.py` sweeps it for you.
-      threshold: 0.5
-      # Optional. Replaces the reviewer brief for this tier only; leaving it out
-      # means the brief the verification loop already builds is used, so
-      # `verification.system_prompt` keeps working for a Jev judge too.
-      # instructions: |
-      #   ...
-      #
-      # Optional, and measured: several narrow questions in ONE call, averaged
-      # in logit space, with `threshold` applied to the result. `questions` ask
-      # "is it right in this respect"; `error_questions` ask "is there a
-      # defect" and are read as 1 - p. On 434 reviewed answers (2026-09-23,
-      # Opus 5 as the reference) eight of them beat the single question by
-      # +0.023 AUC, 95% CI [0.008, 0.038], for ~30% more input tokens -- the
-      # state is read once. Two candidates that sounded obvious did not earn a
-      # place: "would the code compile" (0.59) and "was the task delivered"
-      # (0.64). Replaces `instructions` and `question_key`; setting either
-      # beside these is refused.
-      # questions:
-      #   faithful: >-
-      #     Does every statement the answer makes about the code, diff or text
-      #     the user supplied agree with what that material actually says?
-      #   coherent: >-
-      #     Is everything the answer says consistent with the user's material
-      #     and with the answer's own other statements?
-      # error_questions:
-      #   has_error: >-
-      #     Does this answer contain at least one error: a wrong claim, a
-      #     misreading, code that would not work, a wrong calculation?
+      threshold: 0.5        # probability at or above which the answer passes
 
-# The verification loop: a stronger tier reads the cheap tier's answer and says
-# whether it stands. A failed verdict re-runs the request at `escalate_to`, and
-# the client receives that second answer instead.
-#
-# OFF by default, and the default is not shyness. Every checked request buys a
-# second call, and every failed verdict buys a third; with the tiers above, a
-# request that is routed cheap and then fails review costs MORE than sending it
-# to `top` in the first place. `jev-model-router stats` prints the loop's spend as a
-# share of the bill for exactly this reason -- read it before believing a
-# savings number.
+# Verification: a stronger tier reviews the cheap answer; a FAIL re-runs the request
+# on `escalate_to` and the client gets that answer instead. Off by default because
+# every review is another call -- `stats` shows what the loop costs.
 verification:
   enabled: false
-  verifier_tier: top        # who judges
-  # Optional: a cheaper judge asked FIRST, whose PASS is final and whose
-  # anything-else hands the review to `verifier_tier`. It never fails an answer
-  # by itself -- wrong, unsure or down, it only costs the saving. Built for a
-  # Jev tier: as the ONLY judge it reached AUC ~0.78 against Opus 5, too weak
-  # to escalate on, but in front of one at `jev.threshold: 0.865` it passed
-  # 15-17% of natural traffic without the Opus review and let 1-2% of bad
-  # answers through (and 0 of 18 natural failures). Its reply stays in the
-  # verdict's reason either way, so the log can count both its leaks and its
-  # savings.
-  # prefilter_tier: judge
-  verify_tiers: [cheap]     # which served tiers get judged; empty = all but the verifier
-  escalate_to: top          # who re-answers a failed verdict; defaults to verifier_tier
-
-  # Fraction of eligible answers actually reviewed. Keep it at 1.0 while the
-  # loop is producing labelled data; drop it once the failure rate is known and
-  # you are paying for confirmation rather than discovery.
-  sample_rate: 1.0
-
-  # What happens when the verifier cannot be understood, or cannot be reached.
-  # `accept` keeps the cheap answer; `escalate` buys a second one. The default
-  # refuses to spend money because a verifier is misconfigured -- `stats` counts
-  # both cases so the choice stays visible rather than convenient.
+  verifier_tier: top        # who judges (try `judge` for a far cheaper review)
+  verify_tiers: [cheap]     # whose answers get judged
+  escalate_to: top          # who re-answers a failed one
+  sample_rate: 1.0          # share of answers reviewed
   on_unparseable: accept    # accept | escalate
   on_verifier_error: accept # accept | escalate
-
-  # An answer that is empty, or cut off at this tier's own output budget, is
-  # failed without a review: the response body already says so, and reading it
-  # costs nothing, so sample_rate does not apply to those. With this on, the
-  # SAME tier is asked once more before a stronger one is paid for.
-  #
-  # Measured on 400 GSM8K questions through qwen3.5:4b: of 60 answers that ran
-  # past the budget without finishing, 33 were answered on the next ask -- and
-  # 27 of those finished inside the same budget, several in under 300 tokens.
-  # The budget was never binding on them; the first sample ran away.
-  #
-  # Off by default because whether it pays is arithmetic, not taste: a retry is
-  # worth it when the cheap tier costs less than (retry success rate) x the
-  # strong tier. At 45%, a local tier at a fiftieth of the price is free money
-  # and a cheap tier at half the price is a loss. A retry that fails is billed
-  # and then escalates, so the row shows both calls.
-  retry_unfinished: false
-
-  # Bounds on what the verifier is shown. A review prompt that grows without
-  # limit is how a verification loop quietly becomes the most expensive call in
-  # the system.
-  max_transcript_chars: 12000
-  max_answer_chars: 8000
-
-  # A ceiling, not a spend: a judge that answers directly stops by itself at
-  # 6-26 tokens. It binds only on a THINKING judge, which reasons before it
-  # writes the verdict; cut off, it gives none, and on_unparseable: accept
-  # turns that into a pass nobody made. Measured: deepseek-v4-flash via
-  # OpenRouter finished every verdict in 54-183 at 1024, and lost one at 200;
-  # a local qwen3.5:4b needed 490-1054. Turning reasoning off instead
-  # (Ollama: extra_body {think: false}; OpenRouter: {reasoning: {enabled:
-  # false}}) is ~6 tokens a verdict and both judges then passed a wrong answer
-  # they caught with reasoning on.
-  #
-  # 1024 is enough to judge arithmetic and not always enough to judge PROSE.
-  # Added 2026-09-20 from `scripts/judge_eval.py`: reviewing a wrong one-sentence
-  # description of a mutex, the local qwen3.5:4b spent the whole 1024 reasoning
-  # and emitted NO content at all -- empty answer, finish_reason `length`, and
-  # `on_unparseable: accept` would have shipped the wrong answer as a pass. It
-  # reproduced on a re-run, and the same case answered correctly at 4096. The
-  # earlier numbers above could not have caught this: every planted answer they
-  # were measured on had arithmetic or a fact in it, which is what lets the
-  # reasoning terminate. An open question has nothing to stop it.
-  #
-  # The default stays 1024 because that is one case on one model, not a curve.
-  # If your judge thinks AND your traffic is open-ended, raise it -- by the same
-  # argument that took this from 200 to 1024, it costs a direct judge nothing
-  # and buys a thinking one the difference between a verdict and a silent pass.
-  max_verdict_tokens: 1024
-
-  # Optional. Replaces the built-in reviewer instructions wholesale. Whatever
-  # you write must still ask for a line of the form `VERDICT: PASS` or
-  # `VERDICT: FAIL`, or every verdict is unparseable.
-  # system_prompt: |
-  #   ...
+  retry_unfinished: false   # re-ask the same tier once before escalating a cut-off answer
+  max_verdict_tokens: 1024  # raise it for a thinking judge on open-ended prompts
