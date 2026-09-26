@@ -135,7 +135,10 @@ def create_app(
                 catalog["unprofiled"] = unprofiled
                 print(f"catalog: {len(found)} tier(s) discovered", file=sys.stderr)
                 if unprofiled:
-                    print(f"  on the fallback profile (write a profile): {', '.join(unprofiled)}", file=sys.stderr)
+                    from .scores_derive import some
+
+                    print(f"  on the fallback profile (write a profile): {len(unprofiled)}: {some(unprofiled)}",
+                          file=sys.stderr)
                 from .discovery import unused_caps
 
                 unused = unused_caps(config)
@@ -309,8 +312,10 @@ def create_app(
             if trace is not None:
                 traces.finish(trace, "error")
             runners = sorted(ask.runners) or "any runner"
+            left_out = (f"; the request's models/exclude left out {eligibility.excluded} tier(s)"
+                        if eligibility.excluded else "")
             return JSONResponse(status_code=422, content=error_body(
-                f"no eligible tier runs on {runners}"))
+                f"no eligible tier runs on {runners}{left_out}"))
         began = time.perf_counter()
         decision = active_router.decide(request, eligible)
         if inspect.isawaitable(decision):
@@ -434,6 +439,9 @@ def create_app(
             if trace is not None:
                 traces.finish(trace, "error")
             reasons = "; ".join(f"{r.tier}: {r.detail}" for r in eligibility.rejections)
+            if eligibility.excluded:
+                reasons = "; ".join(filter(None, [
+                    reasons, f"{eligibility.excluded} tier(s) left out by the request's models/exclude"]))
             base_entry.http_status = 400
             base_entry.error = f"no eligible tier ({reasons})"
             base_entry.latency_ms = _elapsed_ms(started)

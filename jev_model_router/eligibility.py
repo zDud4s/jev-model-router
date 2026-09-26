@@ -47,6 +47,9 @@ class Rejection:
 class EligibilityResult:
     eligible: list[str]
     rejections: list[Rejection]
+    # Tiers the request's own `models`/`exclude` left out. A choice the caller
+    # made, not a fact about the tier, so counted rather than listed as rejections.
+    excluded: int = 0
 
     def is_eligible(self, tier: str) -> bool:
         return tier in self.eligible
@@ -115,9 +118,13 @@ def evaluate(
     unavailable = unavailable or {}
     eligible: list[str] = []
     rejections: list[Rejection] = []
+    excluded = 0
     # Configuration order is preserved so that "first eligible" is a stable,
     # operator-controlled fallback rather than dictionary luck.
     for name, tier in config.tiers.items():
+        if not request.allows(name, tier.model):
+            excluded += 1
+            continue
         if name in unavailable:
             rejections.append(Rejection(tier=name, reason=RejectionReason.UNAVAILABLE, detail=unavailable[name]))
             continue
@@ -126,4 +133,4 @@ def evaluate(
             eligible.append(name)
         else:
             rejections.append(rejection)
-    return EligibilityResult(eligible=eligible, rejections=rejections)
+    return EligibilityResult(eligible=eligible, rejections=rejections, excluded=excluded)

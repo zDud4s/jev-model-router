@@ -7,6 +7,8 @@ to forward them rather than to reject the request.
 
 from __future__ import annotations
 
+import fnmatch
+
 import time
 import uuid
 from typing import Any, Literal
@@ -38,6 +40,17 @@ class ChatCompletionRequest(BaseModel):
     tool_choice: Any = None
     stream_options: dict[str, Any] | None = None
     user: str | None = None
+    # The caller's own shortlist for this decision: globs over tier names and
+    # model ids. Only tiers `models` matches (all, when absent), minus those
+    # `exclude` matches, are candidates. The router's input, never forwarded.
+    models: list[str] | None = None
+    exclude: list[str] | None = None
+
+    def allows(self, tier_name: str, model: str) -> bool:
+        """Whether this request lets `tier_name` (serving `model`) be chosen."""
+        names = (tier_name.lower(), model.lower())
+        hit = lambda globs: any(fnmatch.fnmatchcase(n, g.lower()) for n in names for g in globs)  # noqa: E731
+        return (not self.models or hit(self.models)) and not (self.exclude and hit(self.exclude))
 
     @property
     def output_budget(self) -> int | None:
@@ -48,7 +61,7 @@ class ChatCompletionRequest(BaseModel):
         """The request body to pass on, minus fields the router owns itself."""
         body = self.model_dump(exclude_none=True)
         # `packet` is the capabilities router's input, not the model's.
-        for owned in ("model", "stream", "stream_options", "packet"):
+        for owned in ("model", "stream", "stream_options", "packet", "models", "exclude"):
             body.pop(owned, None)
         return body
 

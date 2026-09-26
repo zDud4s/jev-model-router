@@ -467,6 +467,20 @@ class DiscoverSource:
     # See ModelCard.input_overhead: the CLI's own prompt, on every call.
     input_overhead: int = 0
     subscription: str | None = None
+    # A per-token API: the key every discovered tier sends, and what goes in each body.
+    api_key_env: str | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
+    # How an API takes a reasoning effort, with "{effort}" where the level goes,
+    # e.g. {reasoning: {effort: "{effort}"}}. Without it, an API model is one
+    # tier at its provider's default effort: a level nobody can send is not a tier.
+    effort_body: dict[str, Any] | None = None
+    # Globs over a model's ids: only these (empty: all), then none of these.
+    include: tuple[str, ...] = ()
+    exclude: tuple[str, ...] = ()
+    # Route only to models some evidence speaks for: a profile that names them,
+    # or benchmark points. A large catalog is mostly models no one has measured,
+    # and on the fallback profile they would be picked on price alone.
+    require_evidence: bool = False
 
 
 def _parse_levels(raw: Any, requirements: dict[str, str], where: str, default: float = 0.0) -> dict[str, float]:
@@ -800,6 +814,16 @@ def _parse_failure(raw: Any) -> FailureCost:
     return failure
 
 
+def _globs(raw: Any, where: str) -> tuple[str, ...]:
+    if raw is None:
+        return ()
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, list) or not all(isinstance(g, str) and g for g in raw):
+        raise ConfigError(f"{where} must be a list of globs")
+    return tuple(raw)
+
+
 def _parse_discover(raw: Any) -> dict[str, DiscoverSource]:
     if raw is None:
         return {}
@@ -812,24 +836,42 @@ def _parse_discover(raw: Any) -> dict[str, DiscoverSource]:
             raise ConfigError(f"{where} must be a mapping")
         extra = set(entry) - {
             "backend", "base_url", "context_window", "timeout_s", "supports_tools", "input_overhead", "subscription",
+            "api_key_env", "extra_body", "effort_body", "include", "exclude", "require_evidence",
         }
         if extra:
             raise ConfigError(f"{where}: unknown fields {sorted(extra)}")
         backend = entry.get("backend")
-        if backend not in ("claude_cli", "codex_cli", "ollama"):
-            # The three that publish a catalog this router can read for free.
-            raise ConfigError(f"{where}: backend must be claude_cli, codex_cli or ollama, got {backend!r}")
+        if backend not in ("claude_cli", "codex_cli", "ollama", "openai_compatible"):
+            # The ones that publish a catalog this router can read for free.
+            raise ConfigError(
+                f"{where}: backend must be claude_cli, codex_cli, ollama or openai_compatible, got {backend!r}"
+            )
         if ":" in str(name):
             raise ConfigError(f"{where}: the name prefixes tier names and cannot contain ':'")
+        base_url = entry.get("base_url") or _DEFAULT_BASE_URLS.get(backend)
+        if not base_url:
+            raise ConfigError(f"{where}: 'base_url' is required for {backend}")
+        effort_body = entry.get("effort_body")
+        if effort_body is not None and (not isinstance(effort_body, dict) or "{effort}" not in str(effort_body)):
+            raise ConfigError(f"{where}: effort_body must be a mapping with \"{{effort}}\" where the level goes")
+        for key in ("extra_body",):
+            if entry.get(key) is not None and not isinstance(entry[key], dict):
+                raise ConfigError(f"{where}: {key} must be a mapping")
         out[str(name)] = DiscoverSource(
             name=str(name),
             backend=backend,
-            base_url=str(entry.get("base_url") or _DEFAULT_BASE_URLS[backend]).rstrip("/"),
+            base_url=str(base_url).rstrip("/"),
             context_window=int(entry.get("context_window", 200000)),
             timeout_s=float(entry.get("timeout_s", 600.0)),
             supports_tools=bool(entry.get("supports_tools", False)),
             input_overhead=int(entry.get("input_overhead", 0)),
             subscription=entry.get("subscription", _SUBSCRIPTION_BACKENDS.get(backend)),
+            api_key_env=entry.get("api_key_env"),
+            extra_body=dict(entry.get("extra_body") or {}),
+            effort_body=effort_body,
+            include=_globs(entry.get("include"), f"{where}.include"),
+            exclude=_globs(entry.get("exclude"), f"{where}.exclude"),
+            require_evidence=bool(entry.get("require_evidence", False)),
         )
     return out
 

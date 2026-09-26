@@ -233,12 +233,17 @@ def served_keys(scores: Scores, served: dict[str, tuple[str, ...]]) -> tuple[dic
 
     A model is its first id without a date suffix: one model served at several
     efforts, or by two sources as a dated snapshot and its undated id, is one.
+    Different models are told apart within one catalog -- the part of a served
+    name before ":" -- because a catalog does not list one model under two
+    spellings, while two catalogs routinely do (`vendor/x-5.5` beside `x-5-5`).
+    So two ids sharing a key are ambiguous only when one catalog serves both.
     """
-    owners: dict[str, set[str]] = {}
-    for ids in served.values():
+    owners: dict[str, dict[str, set[str]]] = {}
+    for name, ids in served.items():
+        scope = name.split(":", 1)[0] if ":" in name else ""
         for i in ids:
-            owners.setdefault(scores.key(i), set()).add(scores.keys.undated(ids[0].strip()))
-    ambiguous = {k for k, names in owners.items() if len(names) > 1}
+            owners.setdefault(scores.key(i), {}).setdefault(scope, set()).add(scores.keys.undated(ids[0].strip()))
+    ambiguous = {k for k, by_scope in owners.items() if any(len(names) > 1 for names in by_scope.values())}
     out = {
         name: tuple(dict.fromkeys(k for k in (scores.key(i) for i in ids) if k not in ambiguous))
         for name, ids in served.items()
@@ -258,6 +263,13 @@ def evidence_summary(scores: Scores, keys: tuple[str, ...]) -> dict[str, tuple[s
     return out
 
 
+def some(names, limit: int = 12) -> str:
+    """A comma list of at most `limit` names, with how many more: a catalog of hundreds is not a log line."""
+    names = list(names)
+    more = f" (+{len(names) - limit} more)" if len(names) > limit else ""
+    return ", ".join(names[:limit]) + more
+
+
 def startup_lines(scores: Scores, caps: CapabilitiesConfig, served: dict[str, tuple[str, ...]]) -> list[str]:
     """What the operator should know: models with no or only vendor evidence, and entries doing nothing.
 
@@ -274,18 +286,18 @@ def startup_lines(scores: Scores, caps: CapabilitiesConfig, served: dict[str, tu
         elif origins == {"vendor"}:
             vendor_only.append(name)
     if bare:
-        lines.append(f"benchmarks: {len(bare)} served model(s) with no evidence: {', '.join(bare)}")
+        lines.append(f"benchmarks: {len(bare)} served model(s) with no evidence: {some(bare)}")
     if vendor_only:
         lines.append(f"benchmarks: {len(vendor_only)} served model(s) with vendor evidence only: "
-                     f"{', '.join(vendor_only)}")
+                     f"{some(vendor_only)}")
     unread = [b for b in scores.benchmarks if b not in base_weights(scores, caps)]
     if unread:
-        lines.append(f"benchmarks: unread (run `jev-model-router benchmarks read`): {', '.join(unread)}")
+        lines.append(f"benchmarks: unread (run `jev-model-router benchmarks read`): {some(unread)}")
     if scores.scale.detached:
         lines.append("benchmarks: not linked to the main scale (no model shared with it), counting for nothing: "
                      + ", ".join(scores.scale.detached))
     if ambiguous:
-        lines.append(f"benchmarks: ambiguous model key(s), used for no tier: {', '.join(sorted(ambiguous))}")
+        lines.append(f"benchmarks: ambiguous model key(s), used for no tier: {some(sorted(ambiguous))}")
     if scores.keys.keep_dates:
         lines.append("benchmarks: dated snapshot(s) kept apart, a served alias may no longer match: "
                      + ", ".join(sorted(scores.keys.keep_dates)))

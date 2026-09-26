@@ -541,8 +541,13 @@ def _benchmarks_fit(config, scores, args) -> int:
 
 
 def _keyed(config) -> list[tuple[str, list[tuple[str | None, str, str | None]]]]:
-    """(what needs it, its key options) for every tier that takes a key."""
-    return [(name, _key_options(tier)) for name, tier in config.tiers.items() if _key_options(tier)]
+    """(what needs it, its key options) for every tier and discover source that takes a key."""
+    out = [(name, _key_options(tier)) for name, tier in config.tiers.items() if _key_options(tier)]
+    caps = config.router.capabilities
+    for name, source in (caps.discover if caps else {}).items():
+        if source.api_key_env:
+            out.append((f"discover {name}", [(None, source.api_key_env, None)]))
+    return out
 
 
 def _key_options(tier) -> list[tuple[str | None, str, str | None]]:
@@ -560,7 +565,8 @@ def _missing_keys(config) -> list[str]:
     for name, options in _keyed(config):
         if not any(keystore.lookup(var) for _, var, _ in options):
             wanted = " or ".join(var for _, var, _ in options)
-            lines.append(f"tier {name!r} has no key: set {wanted} (run `jev-model-router keys set`)")
+            what = name if name.startswith("discover ") else f"tier {name!r}"
+            lines.append(f"{what} has no key: set {wanted} (run `jev-model-router keys set`)")
     return lines
 
 

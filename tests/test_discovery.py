@@ -160,14 +160,17 @@ def test_levels_between_the_table_points_are_interpolated():
     "change, message",
     [
         ({"fallback_profile": None}, "fallback_profile"),
-        ({"discover": {"x": {"backend": "openai_compatible"}}}, "claude_cli, codex_cli or ollama"),
+        ({"discover": {"x": {"backend": "anthropic"}}}, "claude_cli, codex_cli, ollama or openai_compatible"),
+        ({"discover": {"x": {"backend": "openai_compatible"}}}, "'base_url' is required"),
+        ({"discover": {"x": {"backend": "openai_compatible", "base_url": "https://x",
+                             "effort_body": {"reasoning": "high"}}}}, "effort_body"),
         ({"discover": {"a:b": {"backend": "ollama"}}}, "cannot contain ':'"),
         ({"profiles": [{"match": "gpt-*", "level": 2}]}, "list_prices is required"),
         ({"profiles": [{"match": "gpt-*", "level": 4, "list_prices": {"input": 1}}]}, "between 0 and 3"),
         ({"effort_rules": {"turbo": {"shift": 1}}}, "unknown effort"),
         ({"thinking": ["speed"]}, "unknown requirements"),
     ],
-    ids=["no-fallback", "backend", "name", "no-prices", "level", "effort", "thinking"],
+    ids=["no-fallback", "backend", "api-no-url", "effort-body", "name", "no-prices", "level", "effort", "thinking"],
 )
 def test_discovery_settings_that_would_mislead_are_refused(change, message):
     raw = raw_config(**change)

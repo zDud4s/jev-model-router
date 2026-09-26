@@ -26,7 +26,7 @@ RUNNERS = {"claude_cli": "claude", "codex_cli": "codex", "ollama": "ollama"}
 OUTCOMES = ("pass", "fail", "rate_limited", "error")
 # The gate's tail is what says why the last attempt failed; its head is noise.
 GATE_OUTPUT_CHARS = 1500
-_KNOWN = {"task", "stage", "files", "attempt", "gate_output", "failed", "runners", "packet"}
+_KNOWN = {"task", "stage", "files", "attempt", "gate_output", "failed", "runners", "packet", "models", "exclude"}
 
 
 def runner_of(tier: TierConfig) -> str:
@@ -65,6 +65,14 @@ def parse_route_ask(payload: Any, config: Config) -> RouteAsk:
     if not isinstance(failed_raw, list) or not all(isinstance(f, str) for f in failed_raw):
         raise ValueError("'failed' must be a list of tier names or model[@effort]")
     failed, unknown = _match_failed(failed_raw, config)
+    shortlist: dict[str, list[str]] = {}
+    for key in ("models", "exclude"):
+        globs = payload.get(key)
+        if globs is None:
+            continue
+        if not isinstance(globs, list) or not all(isinstance(g, str) and g for g in globs):
+            raise ValueError(f"'{key}' must be a list of globs over tier names and model ids, e.g. [\"vendor/*\"]")
+        shortlist[key] = globs
 
     context: dict[str, Any] = dict(packet)
     for key in ("stage", "files", "attempt"):
@@ -79,6 +87,7 @@ def parse_route_ask(payload: Any, config: Config) -> RouteAsk:
         "model": "auto",
         "messages": [{"role": "user", "content": task}],
         "packet": context,
+        **shortlist,
     })
     stage = payload.get("stage")
     return RouteAsk(

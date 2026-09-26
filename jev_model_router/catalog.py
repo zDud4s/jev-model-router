@@ -16,6 +16,10 @@ from sources that cost no quota:
   `~/.claude/cache/model-catalog/`, plus `claude --version`, because a model can
   require a newer CLI than the one a tier points at.
 * **Ollama** -- `GET /api/tags` on the tier's server.
+* **An OpenAI-compatible API** named by a `discover` source -- `GET /models`.
+  Where the listing says more than ids (context length, per-token prices, tool
+  support, reasoning efforts, which id is a variant of which), that is read too:
+  a discovered tier is built from what its provider states, not from a default.
 
 A tier whose model or effort is not served is UNAVAILABLE: removed from
 eligibility, with the reason in every request's rejections. A tier whose source
@@ -63,6 +67,17 @@ class Offered:
     # Served, but not offered to people (Codex's `visibility: hide`): a utility
     # model, never reported as one a tier could be added for.
     hidden: bool = False
+    # The id this one is a variant or alias of, when the listing says so and
+    # lists it too: the same model, so the same benchmark evidence.
+    same_as: str | None = None
+    # What the listing states per model. None: it does not say, and the
+    # discover source's own value holds.
+    context_window: int | None = None
+    supports_tools: bool | None = None
+    prices: dict[str, float] | None = None  # USD per 1M tokens: input, output, cache_read, cache_write
+    # Priced per call by something the listing cannot state up front (a router
+    # model, a negative sentinel): a tier could never be costed before the call.
+    unpriceable: bool = False
 
 
 @dataclass
@@ -254,10 +269,82 @@ def ollama_source(base_url: str, get: Callable[[str], Any] | None = None) -> Sou
     return source
 
 
-def _get_json(url: str) -> Any:
-    response = httpx.get(url, timeout=5.0)
+def _get_json(url: str, headers: dict[str, str] | None = None, timeout: float = 5.0) -> Any:
+    response = httpx.get(url, timeout=timeout, headers=headers)
     response.raise_for_status()
     return response.json()
+
+
+# Listing price fields (USD per token, as strings) -> Prices fields (per 1M).
+_LISTED_PRICES = {"prompt": "input", "completion": "output", "input_cache_read": "cache_read",
+                  "input_cache_write": "cache_write"}
+
+
+def models_source(base_url: str, get: Callable[[str], Any] | None = None, api_key: str | None = None) -> Source:
+    """`GET {base_url}/models`, the OpenAI-compatible listing, read as far as it goes.
+
+    Every such API returns `data[].id`. Richer listings also state each model's
+    context length, per-token prices, supported parameters, output modalities
+    and reasoning efforts, and which id is an alias or variant of which; each is
+    read when present and left to the discover source's defaults when not.
+    """
+    source = Source(f"models {base_url}", origin=f"{base_url}/models")
+    headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+    try:
+        payload = get(f"{base_url}/models") if get else _get_json(f"{base_url}/models", headers, timeout=30.0)
+    except Exception as exc:  # noqa: BLE001
+        source.error = f"unreachable ({type(exc).__name__}: {exc})"[:300]
+        return source
+    source.fetched_at = datetime.now(timezone.utc).isoformat(timespec="seconds")
+    entries = [m for m in (payload.get("data") if isinstance(payload, dict) else None) or [] if isinstance(m, dict)]
+    listed = {str(m["id"]) for m in entries if m.get("id")}
+    for model in entries:
+        model_id = str(model.get("id") or "")
+        if not model_id:
+            continue
+        outputs = (model.get("architecture") or {}).get("output_modalities")
+        if isinstance(outputs, list) and "text" not in outputs:
+            continue  # it cannot write an answer
+        params = model.get("supported_parameters")
+        reasoning = model.get("reasoning") or {}
+        efforts = reasoning.get("supported_efforts") if isinstance(reasoning, dict) else None
+        prices, unpriceable = _listed_prices(model.get("pricing"))
+        context = model.get("context_length") or (model.get("top_provider") or {}).get("context_length")
+        aliases = tuple(a for a in (model.get("canonical_slug"),) if a and a != model_id)
+        source.models[model_id] = Offered(
+            id=model_id,
+            efforts=tuple(str(e) for e in efforts) if isinstance(efforts, list) and efforts else None,
+            aliases=aliases,
+            same_as=_same_as(model_id, model.get("alias_target"), listed),
+            context_window=int(context) if isinstance(context, (int, float)) and context > 0 else None,
+            supports_tools=("tools" in params) if isinstance(params, list) else None,
+            prices=prices,
+            unpriceable=unpriceable,
+        )
+    return source
+
+
+def _listed_prices(raw: Any) -> tuple[dict[str, float] | None, bool]:
+    if not isinstance(raw, dict):
+        return None, False
+    out: dict[str, float] = {}
+    for listed, field_name in _LISTED_PRICES.items():
+        try:
+            value = float(raw[listed])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if value < 0:
+            return None, True
+        out[field_name] = round(value * 1_000_000, 6)
+    return (out or None), False
+
+
+def _same_as(model_id: str, alias_target: Any, listed: set[str]) -> str | None:
+    """The listed id this one is another name for: its alias target, or the id before a `:variant` suffix."""
+    if isinstance(alias_target, str) and alias_target in listed and alias_target != model_id:
+        return alias_target
+    base = model_id.split(":", 1)[0]
+    return base if base != model_id and base in listed else None
 
 
 # ---------------------------------------------------------------- the check
@@ -299,7 +386,7 @@ def check_catalog(
     tiers: dict[str, TierStatus] = {}
     source_of: dict[str, str] = {}
 
-    def read(backend: str, base_url: str) -> str | None:
+    def read(backend: str, base_url: str, api_key: str | None = None, listing: bool = False) -> str | None:
         key = f"{backend} {base_url}"
         if key not in sources:
             if backend == "codex_cli":
@@ -308,9 +395,23 @@ def check_catalog(
                 sources[key] = claude_source(base_url, settings.claude_dir, run, now)
             elif backend == "ollama" and settings.check_ollama:
                 sources[key] = ollama_source(base_url, get)
+            elif backend == "openai_compatible" and listing:
+                # Read only for a discover source: an explicit tier on an API
+                # nobody asked to list stays NOT_CHECKED, as it always was.
+                sources[key] = models_source(base_url, get, api_key)
             else:
                 return None
         return key
+
+    caps = config.router.capabilities
+    discover_keys: dict[str, str] = {}
+    for name, provider in (caps.discover if caps else {}).items():
+        from . import keystore
+
+        api_key = keystore.lookup(provider.api_key_env) if provider.api_key_env else None
+        key = read(provider.backend, provider.base_url, api_key, listing=True)
+        if key is not None:
+            discover_keys[name] = key
 
     for name, tier in config.tiers.items():
         key = read(tier.backend, tier.base_url)
@@ -318,13 +419,6 @@ def check_catalog(
             tiers[name] = TierStatus(NOT_CHECKED, f"no catalog source for backend {tier.backend!r}")
             continue
         source_of[name] = key
-
-    caps = config.router.capabilities
-    discover_keys: dict[str, str] = {}
-    for name, provider in (caps.discover if caps else {}).items():
-        key = read(provider.backend, provider.base_url)
-        if key is not None:
-            discover_keys[name] = key
 
     families = [key.split(" ", 1)[0] for key in sources]
     for key, source in sources.items():

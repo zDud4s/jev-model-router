@@ -1,7 +1,8 @@
 """Discovery: every model a provider serves, at every effort it takes, becomes a tier.
 
 The catalog is not a list someone keeps. `discover` names providers -- the Claude
-Code subscription, the Codex subscription, a local Ollama -- and at startup each
+Code subscription, the Codex subscription, a local Ollama, any API with an
+OpenAI-compatible `/models` listing -- and at startup each
 one is asked what it serves (see `catalog.py`, which costs no quota). Each
 (model, effort) pair it answers with becomes a tier named
 `<source>:<model>@<effort>`, with a card built from the first profile whose glob
@@ -14,6 +15,12 @@ matches is offered too, on `fallback_profile` -- low levels, high prices, so it
 is the last resort rather than a surprise -- and is named in the report so a
 profile can be written for it.
 
+A listing of hundreds of models is the exception to "nothing is excluded": most
+of it is models no one has measured, and on the fallback profile they would win
+on price alone. So a source may `require_evidence` (a profile or benchmark
+points), and `include`/`exclude` globs narrow it; both are config, not code.
+What the listing states per model -- context, prices, tools -- is used as stated.
+
 Performance is the one thing no catalog publishes, so profiles are priors. The
 router logs every decision with Jev's reading and the card fingerprint, and that
 is what recalibrates them.
@@ -25,7 +32,17 @@ import fnmatch
 from dataclasses import dataclass, replace
 
 from .catalog import CatalogReport, Offered, _older
-from .config import EFFORTS, CapabilitiesConfig, Config, DiscoverSource, ModelCard, ModelProfile, TierConfig, capped
+from .config import (
+    EFFORTS,
+    CapabilitiesConfig,
+    Config,
+    DiscoverSource,
+    ModelCard,
+    ModelProfile,
+    Prices,
+    TierConfig,
+    capped,
+)
 from .scores import Scores, benchmark_weights
 from .scores_derive import DerivedCard, derive, effort_prior, line_for, served_keys
 
@@ -40,7 +57,7 @@ class Discovered:
 
 
 def profile_for(caps: CapabilitiesConfig, model: Offered) -> tuple[ModelProfile, bool]:
-    names = (model.id, *model.aliases)
+    names = ids_of(model)  # a variant takes the profile of the model it is
     for profile in caps.profiles:
         if any(fnmatch.fnmatchcase(name, profile.match) for name in names):
             return profile, True
@@ -69,6 +86,37 @@ def card_for(
     )
 
 
+def ids_of(model: Offered) -> tuple[str, ...]:
+    """Every id benchmark evidence may use for this model, its identity first.
+
+    A variant (`x:free`) or alias (`~x-latest`) is the model it names, so that
+    one leads: two sources serving the same model agree on who owns its key.
+    """
+    return tuple(dict.fromkeys(i for i in (model.same_as, model.id, *model.aliases) if i))
+
+
+def _selected(source: DiscoverSource, model: Offered) -> bool:
+    """The source's include/exclude globs, over every id the model goes by."""
+    names = (model.id, *model.aliases)
+    if source.include and not any(fnmatch.fnmatchcase(n, g) for n in names for g in source.include):
+        return False
+    return not any(fnmatch.fnmatchcase(n, g) for n in names for g in source.exclude)
+
+
+def _body_for(source: DiscoverSource, effort: str | None) -> dict:
+    """The source's extra_body, with the effort written in where its effort_body says."""
+    body = dict(source.extra_body)
+    if effort is not None and source.effort_body is not None:
+
+        def fill(value):
+            if isinstance(value, dict):
+                return {k: fill(v) for k, v in value.items()}
+            return effort if value == "{effort}" else value
+
+        body.update(fill(source.effort_body))
+    return body
+
+
 def _usable(source: DiscoverSource, model: Offered, matched: bool, cli_version: str | None = None) -> bool:
     """Whether a served model can answer a chat request at all.
 
@@ -82,6 +130,8 @@ def _usable(source: DiscoverSource, model: Offered, matched: bool, cli_version: 
         return False
     if model.min_cli and cli_version and _older(cli_version, model.min_cli):
         return False  # the installed CLI would refuse it
+    if model.unpriceable:
+        return False  # priced per call by something unstated: never costable before it
     return True
 
 
@@ -134,14 +184,17 @@ def expand(
         if served is None:
             continue
         for model in served.models.values():
+            if not _selected(source, model):
+                continue
             profile, matched = profile_for(caps, model)
             if not _usable(source, model, matched, served.cli_version):
                 continue
-            if not matched:
-                unprofiled.append(f"{name}:{model.id}")
             # A model whose catalog lists no efforts (Haiku, a local model) is
-            # one tier at its own default.
+            # one tier at its own default. So is an API model when the source
+            # does not say how to send an effort.
             efforts: tuple[str | None, ...] = model.efforts or (None,)
+            if source.subscription is None and source.backend != "ollama" and source.effort_body is None:
+                efforts = (None,)
             if caps.max_effort is not None:
                 ceiling = EFFORTS.index(caps.max_effort)
                 efforts = tuple(e for e in efforts if e is None or e not in EFFORTS or EFFORTS.index(e) <= ceiling)
@@ -156,34 +209,80 @@ def expand(
                     backend=source.backend,  # type: ignore[arg-type]
                     model=model.id,
                     base_url=source.base_url,
-                    context_window=source.context_window,
-                    supports_tools=source.supports_tools,
+                    api_key_env=source.api_key_env,
+                    context_window=model.context_window or source.context_window,
+                    supports_tools=source.supports_tools if model.supports_tools is None else model.supports_tools,
+                    # The listing's own price, so the log costs what was billed;
+                    # the card's list_prices is the profile's guess.
+                    prices=Prices(**model.prices, configured=True) if model.prices else Prices(),
                     timeout_s=source.timeout_s,
+                    extra_body=_body_for(source, effort),
                     effort=effort,
                     subscription=source.subscription,
                 )
-                pending.append((tier_name, (model.id, *model.aliases), effort, profile, source))
+                pending.append((tier_name, ids_of(model), effort, profile, source))
                 found.append(Discovered(tier_name, name, model.id, effort, profile.match if matched else "*fallback*"))
-    pending += [(t, (m.id, *m.aliases), e, p, s) for t, m, e, p, s in _explicit(config, report)]
+    pending += [(t, ids_of(m), e, p, s) for t, m, e, p, s in _explicit(config, report)]
+    pending = _with_evidence(caps, scores, pending, tiers, found)
+    unprofiled += [f"{d.source}:{d.model}" for d in found if d.profile == "*fallback*"]
+    unprofiled = list(dict.fromkeys(unprofiled))
     if scores is None:
         for tier_name, _, effort, profile, source in pending:
             cards[tier_name] = card_for(caps, profile, effort, source)
     else:
-        keys, _ = served_keys(scores, {ids[0]: ids for _, ids, _, _, _ in pending})
+        keys, _ = served_keys(scores, _served(pending))
         weights = benchmark_weights(scores, caps)
-        line = line_for(caps, scores, [(keys[ids[0]], e, p) for _, ids, e, p, _ in pending], weights)
+        line = line_for(caps, scores, [(keys[_named(s, ids)], e, p) for _, ids, e, p, s in pending], weights)
         for tier_name, ids, effort, profile, source in pending:
-            derived = derive(caps, scores, keys[ids[0]], effort, profile, line, weights)
+            derived = derive(caps, scores, keys[_named(source, ids)], effort, profile, line, weights)
             cards[tier_name] = card_for(caps, profile, effort, source, derived)
     new_caps = replace(caps, cards=cards)
     new_router = replace(config.router, capabilities=new_caps)
     return replace(config, tiers=tiers, router=new_router), found, unprofiled
 
 
+def _named(source: DiscoverSource, ids: tuple[str, ...]) -> str:
+    """`<source>:<model>`: the served name `served_keys` scopes ambiguity by."""
+    return f"{source.name}:{ids[0]}"
+
+
+def _served(pending) -> dict[str, tuple[str, ...]]:
+    return {_named(source, ids): ids for _, ids, _, _, source in pending}
+
+
+def _with_evidence(caps, scores, pending, tiers, found):
+    """`pending` without the tiers of a `require_evidence` source that nothing speaks for.
+
+    Evidence is a profile that names the model, or a benchmark point under one
+    of its keys. The dropped tiers leave `tiers` and `found` too.
+    """
+    strict = {name for name, source in caps.discover.items() if source.require_evidence}
+    if not strict:
+        return pending
+    evidenced: set[str] = set()
+    if scores is not None:
+        keys, _ = served_keys(scores, _served(pending))
+        with_points = {scores.key(p.model) for p in scores.points}
+        evidenced = {name for name, own in keys.items() if set(own) & with_points}
+    source_of = {d.tier: d.source for d in found}
+    kept, dropped = [], set()
+    for entry in pending:
+        tier_name, ids, _, profile, source = entry
+        if (source_of.get(tier_name) in strict and profile is caps.fallback_profile
+                and _named(source, ids) not in evidenced):
+            dropped.add(tier_name)
+            continue
+        kept.append(entry)
+    for tier_name in dropped:
+        tiers.pop(tier_name, None)
+    found[:] = [d for d in found if d.tier not in dropped]
+    return kept
+
+
 def model_ids(report: CatalogReport) -> dict[str, tuple[str, ...]]:
-    """Served model id -> every id a benchmark point may use for it."""
+    """Served model id -> every id a benchmark point may use for it, its identity first."""
     return {
-        model.id: (model.id, *model.aliases)
+        model.id: ids_of(model)
         for served in report.discovered.values()
         for model in served.models.values()
     }
@@ -235,11 +334,11 @@ def served_ids(
     out: dict[str, tuple[str, ...]] = {}
     for f in found:
         model = report.discovered[f.source].models[f.model]
-        out[f"{f.source}:{f.model}"] = (model.id, *model.aliases)
+        out[f"{f.source}:{f.model}"] = ids_of(model)
     caps = config.router.capabilities if config is not None else None
     if caps is not None and caps.discover:
         for _, model, _, _, source in _explicit(config, report):
-            out.setdefault(f"{source.name}:{model.id}", (model.id, *model.aliases))
+            out.setdefault(f"{source.name}:{model.id}", ids_of(model))
     return out
 
 
