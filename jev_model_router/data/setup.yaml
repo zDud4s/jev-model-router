@@ -1,0 +1,143 @@
+# What `jev-model-router init` builds a config from. Data, not code: a new model, a
+# new provider or a better prior is an edit here, never in jev_model_router/*.py.
+#
+#   base      shared by every setup: the requirements Jev reads, the rule, the
+#             priors per model family. Copied as is.
+#   sources   providers init can detect and offer. Each is a `discover` entry,
+#             plus `label` (what the user is asked about) and, for a CLI,
+#             `executable` (the command to find). Detection is by backend:
+#             a CLI is found on PATH, Ollama by its tags, an API is offered
+#             always and chosen by default when its key is already set.
+#   judge     the Jev tier, with every provider that sells it; init puts the
+#             one the user picks first.
+#
+# Profiles are PRIORS, written 2026-09-24 from the vendors' pricing pages;
+# logged outcomes and `calibrate` refine them. Globs match a model's id on any
+# source: `*` for a vendor prefix (vendor/model), `[.-]` where catalogs spell a
+# version differently (5-5 on a CLI, 5.5 on an API).
+
+base:
+  router:
+    kind: capabilities
+    capabilities:
+      jev_tier: judge
+      rule: target
+      failure: {detected: 1.5, undetected: 4.0, stakes: {low: 0.5, normal: 1.0, high: 3.0}}
+      target: 0.8
+      miss: [0.9, 0.5, 0.2, 0.05]
+      miss_scale: 1.0
+      max_effort: high
+      subscriptions:
+        claude: {window_hours: 5}
+        codex: {window_hours: 5}
+      requirements:
+        reasoning: >-
+          The state is a task packet. Does doing this task well require deep,
+          multi-step reasoning or careful design judgement, rather than applying a
+          known recipe?
+        multi_file: >-
+          The state is a task packet. Does the task require coordinated changes
+          across several files, modules or components?
+        debugging: >-
+          The state is a task packet. Does the task involve finding the cause of a
+          bug, failure or unexpected behaviour whose cause is not already stated?
+        niche: >-
+          The state is a task packet. Does the task require specialised or niche
+          knowledge of a particular framework, platform, protocol or domain that a
+          general model may lack?
+        long_context: >-
+          The state is a task packet. Must the model keep a large amount of material
+          in mind at once, such as long files, logs, many documents or a long
+          conversation?
+        math: >-
+          The state is a task packet. Does the task require mathematical,
+          statistical or quantitative reasoning?
+        agentic: >-
+          The state is a task packet. Does the task require many steps of acting
+          with tools, such as running commands, reading and editing files and
+          checking results, rather than producing a single answer?
+        precision: >-
+          The state is a task packet. Would a small mistake be costly or hard to
+          notice, as with security, data loss, money or production systems, so the
+          result must be exactly right?
+        ambiguity: >-
+          The state is a task packet. Is the task ambiguous or underspecified, so
+          the model must infer what is really wanted?
+        orchestration: >-
+          The state is a task packet. Is the task to orchestrate other agents:
+          splitting a large goal into subtasks, dispatching them to other models
+          and judging and integrating what they return, rather than doing one
+          concrete piece of work itself?
+      profiles:
+        - {match: "*claude-fable-5[.-]1",  level: 3.0, levels: {orchestration: 3.0}, list_prices: {input: 10.0, output: 50.0}, output_tokens: 2500}
+        - {match: "*claude-fable-5",       level: 2.8, levels: {orchestration: 2.8}, list_prices: {input: 10.0, output: 50.0}, output_tokens: 2500}
+        - {match: "*claude-opus-5[.-]5",   level: 2.9, levels: {orchestration: 1.5, math: 2.6}, list_prices: {input: 4.0, output: 20.0}}
+        - {match: "*claude-opus-5",        level: 2.7, levels: {orchestration: 1.3, math: 2.4}, list_prices: {input: 5.0, output: 25.0}}
+        - {match: "*claude-opus-4[.-]8",   level: 2.5, levels: {orchestration: 1.6}, list_prices: {input: 5.0, output: 25.0}}
+        - {match: "*claude-opus-4[.-]7",   level: 2.3, levels: {orchestration: 1.4}, list_prices: {input: 5.0, output: 25.0}}
+        - {match: "*claude-opus-4[.-]6",   level: 2.1, levels: {orchestration: 1.2}, list_prices: {input: 5.0, output: 25.0}}
+        - {match: "*claude-sonnet-5",      level: 2.3, levels: {orchestration: 1.2}, list_prices: {input: 2.0, output: 10.0}}
+        - {match: "*claude-sonnet-4[.-]6", level: 2.0, levels: {orchestration: 1.0}, list_prices: {input: 3.0, output: 15.0}}
+        - {match: "*claude-haiku-4[.-]5*", level: 1.3, levels: {orchestration: 0.4}, list_prices: {input: 1.0, output: 5.0}, output_tokens: 1000}
+        - {match: "*gpt-6-astra",          level: 3.0, levels: {orchestration: 2.8}, list_prices: {input: 10.0, output: 50.0}, output_tokens: 2500}
+        - {match: "*gpt-6-sol",            level: 2.7, levels: {orchestration: 1.8, math: 2.9}, list_prices: {input: 2.0, output: 10.0}}
+        - {match: "*gpt-6-luna",           level: 1.8, levels: {orchestration: 0.6}, list_prices: {input: 0.10, output: 0.50}, output_tokens: 1500}
+        - {match: "*gpt-5.6-sol",          level: 2.5, levels: {orchestration: 1.6, math: 2.7}, list_prices: {input: 4.0, output: 20.0}}
+        - {match: "*gpt-5.6-terra",        level: 2.1, levels: {orchestration: 1.0}, list_prices: {input: 2.0, output: 12.0}}
+        - {match: "*gpt-5.6-luna",         level: 1.4, levels: {orchestration: 0.4}, list_prices: {input: 0.20, output: 1.20}, output_tokens: 1500}
+        - {match: "*gpt-5.5",              level: 2.2, levels: {orchestration: 1.2}, list_prices: {input: 5.0, output: 30.0}}
+        # Local Ollama names only (`qwen3:8b`), not an API's `qwen/...`: a
+        # shadow price for the machine and the wait, so "free" does not win
+        # every task it could scrape through.
+        - {match: "qwen[0-9]*",            level: 0.6, levels: {orchestration: 0.0, reasoning: 1.0, math: 1.0}, list_prices: {input: 0.10, output: 0.40}, output_tokens: 600}
+      fallback_profile: {level: 1.0, levels: {orchestration: 0.5}, list_prices: {input: 10.0, output: 50.0}}
+  catalog:
+    check_on_start: true
+
+sources:
+  claude:
+    label: Claude Code subscription
+    executable: claude
+    backend: claude_cli
+    context_window: 1000000
+    timeout_s: 900
+  codex:
+    label: Codex subscription
+    executable: codex
+    backend: codex_cli
+    context_window: 272000
+    timeout_s: 900
+    # codex exec adds ~12.5k tokens of its own to every call (measured
+    # 2026-09-24: 12499 in, 8960 cached) ~= 4.5k at full price.
+    input_overhead: 4500
+  local:
+    label: Ollama on this machine
+    backend: ollama
+    base_url: http://localhost:11434
+    context_window: 16384
+    supports_tools: true
+  or:
+    label: OpenRouter (every model it lists that some evidence speaks for; billed per token)
+    backend: openai_compatible
+    base_url: https://openrouter.ai/api/v1
+    api_key_env: OPENROUTER_API_KEY
+    effort_body: {reasoning: {effort: "{effort}"}}
+    exclude: ["*:batch", "openrouter/*"]
+    require_evidence: true
+
+judge:
+  backend: jev
+  model: jev-latest
+  context_window: 32000
+  supports_tools: false
+  timeout_s: 20
+  prices: {input: 0.042, output: 0.0}
+  endpoints:
+    - label: TypeSafe
+      base_url: https://api.typesafe.ai/v1
+      api_key_env: TYPESAFE_API_KEY
+    - label: OpenRouter
+      base_url: https://openrouter.ai/api/v1
+      model: "~typesafe/jev-latest"
+      api_key_env: OPENROUTER_API_KEY
+      key_url: https://openrouter.ai/keys

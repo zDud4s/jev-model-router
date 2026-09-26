@@ -1,0 +1,429 @@
+{
+  "jev": {
+    "aa-agentic-index": {
+      "hash": "15ee851337c31471",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.66,
+        "ambiguity": 0.82,
+        "debugging": 0.2,
+        "long_context": 0.12,
+        "math": 0.24,
+        "multi_file": 0.24,
+        "niche": 0.46,
+        "orchestration": 0.39,
+        "precision": 0.32,
+        "reasoning": 0.75
+      },
+      "read_at": "2026-09-25T22:05:40+00:00"
+    },
+    "aa-coding-index": {
+      "hash": "bf96cc499ec874c7",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.56,
+        "ambiguity": 0.85,
+        "debugging": 0.25,
+        "long_context": 0.11,
+        "math": 0.73,
+        "multi_file": 0.21,
+        "niche": 0.67,
+        "orchestration": 0.2,
+        "precision": 0.33,
+        "reasoning": 0.75
+      },
+      "read_at": "2026-09-25T22:05:39+00:00"
+    },
+    "aa-intelligence-index": {
+      "hash": "36e34effda33cf94",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.35,
+        "ambiguity": 0.78,
+        "debugging": 0.18,
+        "long_context": 0.12,
+        "math": 0.53,
+        "multi_file": 0.15,
+        "niche": 0.58,
+        "orchestration": 0.18,
+        "precision": 0.29,
+        "reasoning": 0.77
+      },
+      "read_at": "2026-09-25T22:05:39+00:00"
+    },
+    "apex-agents": {
+      "hash": "0f46f8b561cba463",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.51,
+        "ambiguity": 0.79,
+        "debugging": 0.1,
+        "long_context": 0.25,
+        "math": 0.29,
+        "multi_file": 0.28,
+        "niche": 0.74,
+        "orchestration": 0.28,
+        "precision": 0.55,
+        "reasoning": 0.79
+      },
+      "read_at": "2026-09-25T22:05:35+00:00"
+    },
+    "arc-agi-2": {
+      "hash": "646a1339ac6bb89d",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.04,
+        "ambiguity": 0.72,
+        "debugging": 0.04,
+        "long_context": 0.07,
+        "math": 0.53,
+        "multi_file": 0.03,
+        "niche": 0.12,
+        "orchestration": 0.04,
+        "precision": 0.13,
+        "reasoning": 0.9
+      },
+      "read_at": "2026-09-25T22:05:36+00:00"
+    },
+    "cursorbench": {
+      "hash": "95140ce4159ed1cb",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.54,
+        "ambiguity": 0.81,
+        "debugging": 0.39,
+        "long_context": 0.17,
+        "math": 0.17,
+        "multi_file": 0.5,
+        "niche": 0.3,
+        "orchestration": 0.11,
+        "precision": 0.28,
+        "reasoning": 0.78
+      },
+      "read_at": "2026-09-25T22:05:34+00:00"
+    },
+    "deepswe": {
+      "hash": "7ae083a6c8000090",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.86,
+        "ambiguity": 0.72,
+        "debugging": 0.63,
+        "long_context": 0.34,
+        "math": 0.14,
+        "multi_file": 0.56,
+        "niche": 0.58,
+        "orchestration": 0.19,
+        "precision": 0.46,
+        "reasoning": 0.91
+      },
+      "read_at": "2026-09-25T22:05:33+00:00"
+    },
+    "fiction-livebench": {
+      "hash": "f8151bbd334e7953",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.09,
+        "ambiguity": 0.79,
+        "debugging": 0.04,
+        "long_context": 0.7,
+        "math": 0.1,
+        "multi_file": 0.04,
+        "niche": 0.11,
+        "orchestration": 0.12,
+        "precision": 0.23,
+        "reasoning": 0.61
+      },
+      "read_at": "2026-09-25T22:05:39+00:00"
+    },
+    "frontiercode": {
+      "hash": "94fe97262aba1385",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.84,
+        "ambiguity": 0.72,
+        "debugging": 0.54,
+        "long_context": 0.48,
+        "math": 0.2,
+        "multi_file": 0.76,
+        "niche": 0.64,
+        "orchestration": 0.1,
+        "precision": 0.53,
+        "reasoning": 0.87
+      },
+      "read_at": "2026-09-25T22:05:33+00:00"
+    },
+    "frontiermath-tier-4": {
+      "hash": "3a0a00267298e2ec",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.13,
+        "ambiguity": 0.81,
+        "debugging": 0.03,
+        "long_context": 0.11,
+        "math": 0.98,
+        "multi_file": 0.04,
+        "niche": 0.95,
+        "orchestration": 0.1,
+        "precision": 0.5,
+        "reasoning": 0.94
+      },
+      "read_at": "2026-09-25T22:05:38+00:00"
+    },
+    "frontiermath-tiers-1-3": {
+      "hash": "ad14d97c9790118a",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.1,
+        "ambiguity": 0.77,
+        "debugging": 0.03,
+        "long_context": 0.08,
+        "math": 0.98,
+        "multi_file": 0.03,
+        "niche": 0.86,
+        "orchestration": 0.08,
+        "precision": 0.44,
+        "reasoning": 0.87
+      },
+      "read_at": "2026-09-25T22:05:37+00:00"
+    },
+    "gso": {
+      "hash": "4aece3fffc48e25c",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.89,
+        "ambiguity": 0.87,
+        "debugging": 0.11,
+        "long_context": 0.15,
+        "math": 0.79,
+        "multi_file": 0.48,
+        "niche": 0.48,
+        "orchestration": 0.16,
+        "precision": 0.41,
+        "reasoning": 0.81
+      },
+      "read_at": "2026-09-25T22:05:34+00:00"
+    },
+    "hle": {
+      "hash": "fbbd0f581096835d",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.06,
+        "ambiguity": 0.87,
+        "debugging": 0.04,
+        "long_context": 0.09,
+        "math": 0.7,
+        "multi_file": 0.04,
+        "niche": 0.81,
+        "orchestration": 0.12,
+        "precision": 0.2,
+        "reasoning": 0.92
+      },
+      "read_at": "2026-09-25T22:05:37+00:00"
+    },
+    "metr-time-horizons": {
+      "hash": "832518ee3cf4bc0f",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.47,
+        "ambiguity": 0.68,
+        "debugging": 0.22,
+        "long_context": 0.11,
+        "math": 0.28,
+        "multi_file": 0.19,
+        "niche": 0.4,
+        "orchestration": 0.14,
+        "precision": 0.28,
+        "reasoning": 0.7
+      },
+      "read_at": "2026-09-25T22:05:36+00:00"
+    },
+    "mirrorcode": {
+      "hash": "86224b5339566352",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.66,
+        "ambiguity": 0.75,
+        "debugging": 0.06,
+        "long_context": 0.13,
+        "math": 0.43,
+        "multi_file": 0.19,
+        "niche": 0.23,
+        "orchestration": 0.14,
+        "precision": 0.34,
+        "reasoning": 0.8
+      },
+      "read_at": "2026-09-25T22:05:34+00:00"
+    },
+    "mystery-game-puzzles": {
+      "hash": "75d3eb54385d38a2",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.07,
+        "ambiguity": 0.77,
+        "debugging": 0.04,
+        "long_context": 0.33,
+        "math": 0.35,
+        "multi_file": 0.04,
+        "niche": 0.1,
+        "orchestration": 0.06,
+        "precision": 0.31,
+        "reasoning": 0.89
+      },
+      "read_at": "2026-09-25T22:05:37+00:00"
+    },
+    "osworld-2": {
+      "hash": "c4963353e714f06f",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.55,
+        "ambiguity": 0.74,
+        "debugging": 0.11,
+        "long_context": 0.09,
+        "math": 0.12,
+        "multi_file": 0.11,
+        "niche": 0.24,
+        "orchestration": 0.12,
+        "precision": 0.22,
+        "reasoning": 0.54
+      },
+      "read_at": "2026-09-25T22:05:35+00:00"
+    },
+    "posttrainbench": {
+      "hash": "d8473cd17c2c6915",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.84,
+        "ambiguity": 0.85,
+        "debugging": 0.06,
+        "long_context": 0.11,
+        "math": 0.82,
+        "multi_file": 0.59,
+        "niche": 0.85,
+        "orchestration": 0.2,
+        "precision": 0.24,
+        "reasoning": 0.79
+      },
+      "read_at": "2026-09-25T22:05:35+00:00"
+    },
+    "proofbench": {
+      "hash": "01a616dfd482dafa",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.07,
+        "ambiguity": 0.86,
+        "debugging": 0.03,
+        "long_context": 0.1,
+        "math": 0.98,
+        "multi_file": 0.05,
+        "niche": 0.73,
+        "orchestration": 0.1,
+        "precision": 0.43,
+        "reasoning": 0.91
+      },
+      "read_at": "2026-09-25T22:05:38+00:00"
+    },
+    "remote-labor-index": {
+      "hash": "b7fca1e2dc46c8fd",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.28,
+        "ambiguity": 0.84,
+        "debugging": 0.09,
+        "long_context": 0.08,
+        "math": 0.17,
+        "multi_file": 0.15,
+        "niche": 0.32,
+        "orchestration": 0.17,
+        "precision": 0.31,
+        "reasoning": 0.73
+      },
+      "read_at": "2026-09-25T22:05:36+00:00"
+    },
+    "simplebench": {
+      "hash": "ad0eaa0d05de4cd1",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.03,
+        "ambiguity": 0.65,
+        "debugging": 0.04,
+        "long_context": 0.04,
+        "math": 0.06,
+        "multi_file": 0.02,
+        "niche": 0.05,
+        "orchestration": 0.04,
+        "precision": 0.09,
+        "reasoning": 0.53
+      },
+      "read_at": "2026-09-25T22:05:36+00:00"
+    },
+    "simpleqa-verified": {
+      "hash": "7cf8589be8cc3354",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.03,
+        "ambiguity": 0.52,
+        "debugging": 0.02,
+        "long_context": 0.06,
+        "math": 0.09,
+        "multi_file": 0.02,
+        "niche": 0.38,
+        "orchestration": 0.03,
+        "precision": 0.12,
+        "reasoning": 0.12
+      },
+      "read_at": "2026-09-25T22:05:38+00:00"
+    },
+    "terminal-bench": {
+      "hash": "63141ad997e60266",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.75,
+        "ambiguity": 0.7,
+        "debugging": 0.3,
+        "long_context": 0.13,
+        "math": 0.2,
+        "multi_file": 0.27,
+        "niche": 0.5,
+        "orchestration": 0.09,
+        "precision": 0.32,
+        "reasoning": 0.6
+      },
+      "read_at": "2026-09-25T22:05:34+00:00"
+    },
+    "terminal-bench-4": {
+      "hash": "56976774c22ee080",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.72,
+        "ambiguity": 0.71,
+        "debugging": 0.3,
+        "long_context": 0.12,
+        "math": 0.23,
+        "multi_file": 0.29,
+        "niche": 0.49,
+        "orchestration": 0.1,
+        "precision": 0.3,
+        "reasoning": 0.59
+      },
+      "read_at": "2026-09-25T22:05:40+00:00"
+    },
+    "weirdml": {
+      "hash": "5967f717912fcb42",
+      "jev_model": "jev-latest",
+      "needs": {
+        "agentic": 0.63,
+        "ambiguity": 0.85,
+        "debugging": 0.07,
+        "long_context": 0.09,
+        "math": 0.91,
+        "multi_file": 0.19,
+        "niche": 0.66,
+        "orchestration": 0.08,
+        "precision": 0.2,
+        "reasoning": 0.9
+      },
+      "read_at": "2026-09-25T22:05:38+00:00"
+    }
+  }
+}

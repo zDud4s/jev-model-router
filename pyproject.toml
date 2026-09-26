@@ -28,6 +28,10 @@ jev-model-router = "jev_model_router.cli:main"
 [tool.setuptools.packages.find]
 include = ["jev_model_router*"]
 
+[tool.setuptools.package-data]
+# What `jev-model-router init` builds a config from.
+jev_model_router = ["data/*.yaml", "data/*.json"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"

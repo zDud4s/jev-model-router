@@ -22,3 +22,5 @@ anchors.capabilities.yaml
 *.derived.json
 # Specs and plans stay local, never in the repository or its history.
 docs/
+# Shipped with the package for `jev-model-router init`: the benchmark readings, so a new setup skips `benchmarks read`.
+!jev_model_router/data/*.json

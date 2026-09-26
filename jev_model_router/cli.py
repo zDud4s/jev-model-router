@@ -1,4 +1,4 @@
-"""Command line: `jev-model-router serve`, `keys`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
+"""Command line: `jev-model-router init`, `serve`, `keys`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
 
 from __future__ import annotations
 
@@ -13,16 +13,39 @@ from .stats import collect, format_text
 from .training import TrainingError, format_report, train_from_log
 
 DEFAULT_CONFIG = "config.yaml"
+# Read when -c is not given, so commands run from any directory find the config.
+CONFIG_ENV = "JEV_MODEL_ROUTER_CONFIG"
+
+
+def default_config() -> str:
+    """$JEV_MODEL_ROUTER_CONFIG, else ./config.yaml, else the one `jev-model-router init` wrote, else ./config.yaml."""
+    if os.environ.get(CONFIG_ENV):
+        return os.environ[CONFIG_ENV]
+    if os.path.isfile(DEFAULT_CONFIG):
+        return DEFAULT_CONFIG
+    from .setup_wizard import default_config_path
+
+    home = default_config_path()
+    return str(home) if home.is_file() else DEFAULT_CONFIG
 
 
 def _build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="jev-model-router", description=__doc__)
-    parser.add_argument("-c", "--config", default=DEFAULT_CONFIG, help="path to the YAML config")
+    parser.add_argument(
+        "-c", "--config", default=default_config(),
+        help=f"path to the YAML config (default: ${CONFIG_ENV}, else ./{DEFAULT_CONFIG}, "
+             "else the one `jev-model-router init` wrote)",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     serve = sub.add_parser("serve", help="run the proxy")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
+
+    init = sub.add_parser("init", help="detect what this machine has and write a working config")
+    init.add_argument("--path", default=None, help="where to write it (default: the user's config directory)")
+    init.add_argument("--yes", action="store_true", help="accept every default; ask nothing, set no key")
+    init.add_argument("--force", action="store_true", help="replace an existing config")
 
     keys = sub.add_parser("keys", help="show the API keys the config needs, and set or unset them")
     keys.add_argument("action", nargs="?", choices=["list", "set", "unset"], default="list",
@@ -604,7 +627,8 @@ def _keys(args) -> int:
     try:
         config = load_config(args.config)
     except ConfigError as exc:
-        print(f"config error: {exc} (pass -c; `keys set NAME` needs no config)", file=sys.stderr)
+        print(f"config error: {exc} (pass -c, or set {CONFIG_ENV}; `keys set NAME` needs no config)",
+              file=sys.stderr)
         return 2
 
     keyed = _keyed(config)
@@ -674,11 +698,85 @@ def _store_key(name: str, key_url: str | None) -> int:
     return 0
 
 
+def _init(args) -> int:
+    from pathlib import Path
+
+    from . import keystore
+    from . import setup_wizard as wizard
+
+    path = Path(args.path).expanduser().resolve() if args.path else wizard.default_config_path()
+    if path.exists() and not args.force:
+        print(f"{path} already exists: pass --force to replace it, or edit it", file=sys.stderr)
+        return 2
+    setup = wizard.load_setup()
+    detected = wizard.detect(setup)
+    print("On this machine:")
+    for d in detected:
+        print(f"  [{'x' if d.found else ' '}] {d.label}: {(d.where if d.found else d.note) or ''}")
+
+    chosen = []
+    for d in detected:
+        use = d.found
+        if not args.yes:
+            answer = _ask(f"Route to {d.label}? [{'Y/n' if d.found else 'y/N'}]: ").strip().lower()
+            use = d.found if not answer else answer.startswith("y")
+        if use:
+            chosen.append(d)
+    if not chosen:
+        print("nothing chosen: at least one source must answer requests", file=sys.stderr)
+        return 2
+
+    # The judge: by default the provider whose key a chosen source already needs, else one with a key.
+    endpoints = setup["judge"].get("endpoints") or []
+    source_keys = {setup["sources"][d.name].get("api_key_env") for d in chosen}
+    preferred = (next((e for e in endpoints if e.get("api_key_env") in source_keys), None)
+                 or next((e for e in endpoints if keystore.lookup(e.get("api_key_env", ""))), None)
+                 or (endpoints[0] if endpoints else {}))
+    judge_first = preferred.get("label", "")
+    if not args.yes and len(endpoints) > 1:
+        print("Jev reads each task. Where do you reach it?")
+        for i, e in enumerate(endpoints, 1):
+            print(f"  {i}) {e['label']}  ({e.get('api_key_env')}){'  <- default' if e is preferred else ''}")
+        answer = _ask(f"[1-{len(endpoints)}]: ").strip()
+        if answer.isdigit() and 1 <= int(answer) <= len(endpoints):
+            judge_first = endpoints[int(answer) - 1]["label"]
+
+    raw = wizard.build_raw(setup, chosen, judge_first, path.parent)
+    print("Looking for models on the chosen sources (a few seconds)...")
+    try:
+        default = wizard.pick_default(raw)
+    except (ValueError, ConfigError) as exc:
+        print(f"cannot finish: {exc}", file=sys.stderr)
+        return 1
+    wizard.write(wizard.finish(raw, default), path)
+    wizard.copy_data(path.parent)
+    print(f"wrote {path}")
+    print(f"default tier (used when Jev cannot be asked): {default[0]}")
+
+    if not args.yes:
+        _keys(argparse.Namespace(config=str(path), action="set", name=None))
+    missing = _missing_keys(load_config(path))
+    for line in missing:
+        print(line, file=sys.stderr)
+
+    print("\nNext:")
+    read = Path(default_config())
+    if not (read.is_file() and os.path.samefile(read, path)):
+        print(f"  this is not the config commands read by default: set {CONFIG_ENV}={path}")
+    if missing:
+        print("  jev-model-router keys set        # the keys above")
+    print("  jev-model-router check           # validate; `check --catalog` lists every model found")
+    print("  jev-model-router serve           # the proxy; or add the Claude Code / Codex plugin (README)")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
     if args.command == "keys":
         return _keys(args)
+    if args.command == "init":
+        return _init(args)
 
     try:
         config = load_config(args.config)

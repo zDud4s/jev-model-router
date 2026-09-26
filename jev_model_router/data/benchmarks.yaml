@@ -1,0 +1,217 @@
+# Benchmark evidence: what cards are derived from.
+# See docs/superpowers/specs/2026-09-25-benchmark-derived-cards-design.md.
+#
+# A new model needs nothing here: `jev-model-router benchmarks import` brings its rows
+# from the sources below once they publish them. A new benchmark is an entry
+# with a description (Jev reads it) and a `data` mapping. A new source is an
+# entry under `sources`, if its format is one the importer reads.
+#
+# Curated `points` are for evidence no source carries yet: a benchmark owner's
+# leaderboard copied by hand (origin: independent), or a vendor launch page
+# (origin: vendor, counts for less, dropped once an independent point exists).
+#
+# After editing: `benchmarks import`, `benchmarks read`, then `benchmarks check`.
+
+sources:
+  epoch:
+    format: csv_zip
+    url: https://epoch.ai/data/benchmark_data.zip
+    model: Model version
+    origin: independent
+    cite: "Epoch AI, Capabilities & Benchmarking, https://epoch.ai/benchmarks (CC BY 4.0)"
+    metadata: {file: benchmark_metadata.csv, join: source_file, score: score_column, scale: scale,
+               baseline: random_baseline, ceiling: score_ceiling}
+  # Needs an API key in the environment variable AA_API_KEY; without it this
+  # source is skipped with a warning and keeps its previous points.
+  artificial-analysis:
+    format: json
+    url: https://artificialanalysis.ai/api/v2/language/models/free
+    api_key_env: AA_API_KEY
+    api_key_header: x-api-key
+    items: data
+    model: name        # not `slug`: a bare slug is the default effort, which differs per model
+    paging: {param: page, more: pagination.has_more}
+    origin: independent
+    cite: "Artificial Analysis, https://artificialanalysis.ai"
+
+efforts:
+  labels: {extra high: xhigh, x-high: xhigh, none: none, minimal: minimal}
+  patterns: ['^\d+k( thinking)?$']
+
+model_keys:
+  date_suffixes: ['[-_]\d{8}$', '-\d{4}-\d{2}-\d{2}$']
+
+# Source strings whose words do not match the served id. A value may end in an
+# effort, written as a source writes one. Both of the local model's variants
+# map to it at two efforts: served by Ollama as it is, it thinks, which is the
+# tier without an effort; with thinking off it is effort `none`.
+aliases:
+  "Qwen3.5 4B (Reasoning)": "qwen3.5:4b"
+  "Qwen3.5 4B (Non-reasoning)": "qwen3.5:4b (none)"
+
+benchmarks:
+  # ---- agentic coding
+  frontiercode:
+    description: >-
+      Agents implement features and fix bugs in large real-world codebases,
+      judged by hidden tests; tasks span many files and must follow the
+      codebase's own conventions.
+    data: {source: epoch, table: frontiercode_external.csv, effort: Reasoning effort, upstream: Source}
+  deepswe:
+    description: >-
+      Agents resolve hard, long software-engineering issues in real
+      repositories end to end, verified by the project's tests.
+    data: {source: epoch, table: deepswe_external.csv, effort: Reasoning effort, cost: Mean cost (USD),
+           upstream: Source}
+  cursorbench:
+    description: >-
+      Ambiguous, multi-file coding tasks taken from real editor sessions: edit,
+      refactor, investigate and follow a developer's intent, judged on
+      correctness.
+    data: {source: epoch, table: cursorbench_external.csv, score: Score, effort: Reasoning level,
+           cost: Cost per task, upstream: Source}
+  terminal-bench:
+    description: >-
+      Agents complete real tasks in a terminal: build, debug, configure and run
+      software and systems, verified by tests in a container.
+    data: {source: epoch, table: terminalbench_external.csv, date: Run date, upstream: Source Link}
+  gso:
+    description: >-
+      Agents make real software measurably faster: profile a codebase, find the
+      bottleneck and optimise it without breaking behaviour.
+    data: {source: epoch, table: gso_external.csv, date: Evaluation date, upstream: Source link}
+  mirrorcode:
+    description: >-
+      Agents reimplement an existing program from its behaviour alone, so that
+      the new code reproduces the original's outputs across many cases.
+    data: {source: epoch, table: mirrorcode.csv}
+  posttrainbench:
+    description: >-
+      Agents post-train a small language model to improve it on target tasks
+      within a compute budget: machine-learning engineering end to end.
+    data: {source: epoch, table: posttrainbench_external.csv}
+  # ---- long autonomous work
+  apex-agents:
+    description: >-
+      Agents carry out long professional workflows (investment banking,
+      consulting, law) across files and applications, judged against expert
+      rubrics.
+    data: {source: epoch, table: apex_agents_external.csv}
+  osworld-2:
+    description: >-
+      Agents operate a real computer through its screen, keyboard and mouse to
+      finish multi-step tasks across desktop applications.
+    data: {source: epoch, table: osworld_2_external.csv, effort: Reasoning}
+  remote-labor-index:
+    description: >-
+      Agents complete real freelance projects end to end (design, data, writing,
+      engineering) to the standard a paying client would accept.
+    data: {source: epoch, table: rli_external.csv}
+  metr-time-horizons:
+    description: >-
+      Agents attempt software and research tasks that take skilled humans from
+      minutes to many hours, measuring how long a task can be before the agent
+      fails.
+    data: {source: epoch, table: metr_time_horizons_external.csv, score: average_score,
+           where: {METR version: METR-Horizon-v1.1}, upstream: Source link}
+  # ---- reasoning
+  arc-agi-2:
+    description: >-
+      Novel visual puzzles: infer an abstract transformation rule from a few
+      examples and apply it to a new grid, with no prior knowledge to lean on.
+    data: {source: epoch, table: arc_agi_2_external.csv, cost: Cost per task}
+  simplebench:
+    description: >-
+      Short trick questions about everyday physical and social situations that
+      require careful common-sense reasoning rather than knowledge.
+    data: {source: epoch, table: simplebench_external.csv}
+  mystery-game-puzzles:
+    description: >-
+      Deduction puzzles: work out who did what from scattered clues, keeping
+      many constraints consistent across a long chain of inference.
+    data: {source: epoch, table: mystery_game_puzzles.csv}
+  hle:
+    description: >-
+      Very hard expert-written questions across mathematics, science and the
+      humanities, at the frontier of human knowledge.
+    data: {source: epoch, table: hle_external.csv}
+  # ---- mathematics
+  frontiermath-tiers-1-3:
+    description: >-
+      Research-level mathematics problems with exact answers, from advanced
+      undergraduate to early research difficulty.
+    data: {source: epoch, table: frontiermath_tiers_1_3_v2.csv}
+  frontiermath-tier-4:
+    description: >-
+      Exceptionally hard research mathematics problems that take professional
+      mathematicians days, with exact, checkable answers.
+    data: {source: epoch, table: frontiermath_tier_4_v2.csv}
+  proofbench:
+    description: >-
+      Write complete, rigorous mathematical proofs of competition and research
+      statements, graded for correctness.
+    data: {source: epoch, table: proofbench_external.csv, effort: Reasoning effort, cost: Cost per test (USD)}
+  # ---- knowledge
+  simpleqa-verified:
+    description: >-
+      Short factual questions about obscure topics, answered from memory
+      without tools: breadth and precision of knowledge.
+    data: {source: epoch, table: simpleqa_verified.csv}
+  weirdml:
+    description: >-
+      Unusual machine-learning problems that need a working model trained and
+      tuned from scratch in code, where standard recipes do not apply.
+    data: {source: epoch, table: weirdml_external.csv, cost: Cost per run, upstream: Source link}
+  # ---- long context
+  fiction-livebench:
+    description: >-
+      Answer questions that need tracking characters, events and changes
+      across a long story, far apart in the text.
+    data: {source: epoch, table: fictionlivebench_external.csv, score: 120k token score, upstream: Source link}
+  # ---- Artificial Analysis indices: one harness for every vendor, fast after a release
+  aa-intelligence-index:
+    description: >-
+      A composite of ten evaluations: agentic terminal and knowledge-work
+      tasks, scientific coding, expert reasoning and knowledge questions.
+    data: {source: artificial-analysis, score: evaluations.artificial_analysis_intelligence_index,
+           cost: artificial_analysis_intelligence_index_cost.cost_per_task.total_cost}
+    scale: 0.01
+  aa-coding-index:
+    description: >-
+      A composite of coding evaluations: agentic terminal work and scientific
+      programming problems.
+    data: {source: artificial-analysis, score: evaluations.artificial_analysis_coding_index}
+    scale: 0.01
+  aa-agentic-index:
+    description: >-
+      A composite of agentic evaluations: multi-step tool use in terminals and
+      in professional knowledge-work tasks.
+    data: {source: artificial-analysis, score: evaluations.artificial_analysis_agentic_index}
+    scale: 0.01
+  # ---- curated only
+  terminal-bench-4:
+    description: >-
+      Agents complete real tasks in a terminal: build, debug, configure and run
+      software and systems, verified by tests in a container (version 4.0).
+
+points:
+  # CursorBench 4.0, the owner's leaderboard (https://cursor.com/cursorbench),
+  # read 2026-09-25: exact scores and costs per task. Epoch will carry the same rows.
+  - {benchmark: cursorbench, model: claude-opus-5-5, effort: low,    score: 43.7, cost_usd: 1.17,  date: 2026-09-22, source: "https://cursor.com/cursorbench", origin: independent}
+  - {benchmark: cursorbench, model: claude-opus-5-5, effort: medium, score: 52.5, cost_usd: 2.91,  date: 2026-09-22, source: "https://cursor.com/cursorbench", origin: independent}
+  - {benchmark: cursorbench, model: claude-opus-5-5, effort: high,   score: 56.0, cost_usd: 3.97,  date: 2026-09-22, source: "https://cursor.com/cursorbench", origin: independent}
+  - {benchmark: cursorbench, model: claude-opus-5-5, effort: xhigh,  score: 56.0, cost_usd: 6.98,  date: 2026-09-22, source: "https://cursor.com/cursorbench", origin: independent}
+  - {benchmark: cursorbench, model: claude-opus-5-5, effort: max,    score: 57.8, cost_usd: 13.43, date: 2026-09-22, source: "https://cursor.com/cursorbench", origin: independent}
+  # The vendor's launch page, charts read 2026-09-25 (approx).
+  - {benchmark: frontiercode, model: claude-opus-5-5, effort: low,    score: 47.3, cost_usd: 0.40, date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  - {benchmark: frontiercode, model: claude-opus-5-5, effort: medium, score: 54.6, cost_usd: 0.80, date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  - {benchmark: frontiercode, model: claude-opus-5-5, effort: high,   score: 54.0, cost_usd: 1.10, date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  - {benchmark: frontiercode, model: claude-opus-5-5, effort: xhigh,  score: 51.4, cost_usd: 2.30, date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  - {benchmark: frontiercode, model: claude-opus-5-5, effort: max,    score: 54.4, cost_usd: 6.20, date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  - {benchmark: terminal-bench-4, model: claude-opus-5-5, effort: low,    score: 38.5, cost_usd: 1.5,  date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  - {benchmark: terminal-bench-4, model: claude-opus-5-5, effort: medium, score: 57.5, cost_usd: 3.0,  date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  - {benchmark: terminal-bench-4, model: claude-opus-5-5, effort: high,   score: 64.2, cost_usd: 4.0,  date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  - {benchmark: terminal-bench-4, model: claude-opus-5-5, effort: xhigh,  score: 66.5, cost_usd: 7.3,  date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  - {benchmark: terminal-bench-4, model: claude-opus-5-5, effort: max,    score: 65.0, cost_usd: 11.0, date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor, approx: true}
+  # The same page's table: exact, so it beats the chart reading of the same point.
+  - {benchmark: terminal-bench-4, model: claude-opus-5-5, effort: xhigh,  score: 66.4, date: 2026-09-22, source: "https://www.anthropic.com/claude-opus-5-5", origin: vendor}
