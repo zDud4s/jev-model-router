@@ -961,7 +961,7 @@ def main(argv: list[str] | None = None) -> int:
             print(line, file=sys.stderr)
         host = args.host or config.server.host
         port = args.port or config.server.port
-        uvicorn.run(create_app(config), host=host, port=port)
+        uvicorn.run(create_app(config, config_path=args.config), host=host, port=port)
         return 0
 
     return 1

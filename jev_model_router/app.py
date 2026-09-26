@@ -20,9 +20,12 @@ import sys
 import time
 import uuid
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any, AsyncIterator, Callable
+from urllib.parse import urlsplit
 
 import anyio
+import yaml
 from fastapi import FastAPI, Request
 from fastapi.responses import HTMLResponse, JSONResponse, StreamingResponse
 from pydantic import ValidationError
@@ -35,7 +38,7 @@ from .backends import (
     StreamEnd,
     build_backends,
 )
-from .config import Config
+from .config import Config, ConfigError
 from .db import LogEntry, RequestLog
 from .eligibility import evaluate
 from .pricing import cost_usd, counterfactuals
@@ -102,8 +105,13 @@ def create_app(
     verifier: Verifier | None = None,
     catalog_check: Callable[[Config], Any] | None = None,
     benchmark_fetch: Callable[[str, dict[str, str], float], bytes] | None = None,
+    config_path: str | Path | None = None,
 ) -> FastAPI:
-    """Build the app. Every collaborator is injectable, which is how tests avoid the network."""
+    """Build the app. Every collaborator is injectable, which is how tests avoid the network.
+
+    `config_path` is the file `config` was read from; with it the routing page
+    can edit that file (the running app keeps the config it started with).
+    """
 
     # The catalog check runs first: discovered tiers must exist before the
     # backends, router and verifier that serve them are built.
@@ -288,6 +296,97 @@ def create_app(
             traces.stage(trace, "route", **_route_view(decision, config, began))
             traces.finish(trace, "ok")
             return {"trace": trace["id"], "tier": decision.tier, "score": decision.score}
+
+        from . import config_edit
+
+        # What this process was started with, so the page can say a saved file
+        # is not yet the one being served.
+        started_digest = None
+        if config_path is not None:
+            try:
+                started_digest = config_edit.digest(Path(config_path).read_text(encoding="utf-8"))
+            except OSError:
+                pass
+
+        def config_guard(raw_request: Request) -> JSONResponse | None:
+            """Only this page may write the config: JSON (so a cross-site form cannot), same origin, a known file."""
+            if config_path is None:
+                return JSONResponse(status_code=404, content=error_body("the proxy was not started from a config file"))
+            origin = raw_request.headers.get("origin")
+            if origin and urlsplit(origin).netloc != raw_request.headers.get("host"):
+                return JSONResponse(status_code=403, content=error_body("config edits are accepted from this page only"))
+            if not raw_request.headers.get("content-type", "").startswith("application/json"):
+                return JSONResponse(status_code=415, content=error_body("send the edit as application/json"))
+            return None
+
+        async def edited(raw_request: Request) -> tuple[str, str, str | None]:
+            """(the file now, the text the edit makes of it, the digest the page read)."""
+            payload = await raw_request.json()
+            if not isinstance(payload, dict):
+                raise config_edit.EditError("send {text} or {changes}")
+            current = Path(config_path).read_text(encoding="utf-8")
+            if isinstance(payload.get("text"), str):
+                text = payload["text"]
+            elif isinstance(payload.get("changes"), list):
+                text = config_edit.apply_changes(current, payload["changes"])
+            else:
+                raise config_edit.EditError("send {text} or {changes}")
+            return current, text, payload.get("base")
+
+        @app.get("/routing/config")
+        async def routing_config() -> dict[str, Any]:
+            """The config file as text and as data, whether it validates, and what the form may offer."""
+            if config_path is None:
+                return {"path": None, "options": config_edit.options()}
+            try:
+                text = Path(config_path).read_text(encoding="utf-8")
+                data = yaml.safe_load(text) or {}
+            except (OSError, yaml.YAMLError) as exc:
+                return {"path": str(config_path), "error": f"{type(exc).__name__}: {exc}", "options": config_edit.options()}
+            digest = config_edit.digest(text)
+            return {"path": str(config_path), "text": text, "data": data, "digest": digest,
+                    "served": digest == started_digest, "check": config_edit.check(text),
+                    "options": config_edit.options()}
+
+        @app.get("/routing/config/sources")
+        async def routing_config_sources() -> Any:
+            """Providers the file could discover models from and does not yet: the list `init` offers."""
+            if config_path is None:
+                return JSONResponse(status_code=404, content=error_body("the proxy was not started from a config file"))
+            try:
+                data = yaml.safe_load(Path(config_path).read_text(encoding="utf-8")) or {}
+            except (OSError, yaml.YAMLError) as exc:
+                return JSONResponse(status_code=400, content=error_body(f"{type(exc).__name__}: {exc}"))
+            # detect() looks for executables and asks Ollama for its tags: blocking, so off the loop.
+            return {"sources": await anyio.to_thread.run_sync(config_edit.sources_on_offer, data)}
+
+        @app.post("/routing/config/check")
+        async def routing_config_check(raw_request: Request) -> Any:
+            """What a save would write: the new text, its diff, and whether it validates. Writes nothing."""
+            refused = config_guard(raw_request)
+            if refused is not None:
+                return refused
+            try:
+                current, text, _ = await edited(raw_request)
+            except (config_edit.EditError, json.JSONDecodeError, OSError) as exc:
+                return JSONResponse(status_code=400, content=error_body(str(exc)))
+            return {**config_edit.check(text), "text": text, "diff": config_edit.diff(current, text, Path(config_path).name)}
+
+        @app.put("/routing/config")
+        async def routing_config_save(raw_request: Request) -> Any:
+            """Validate and write the config atomically. It is served from the next start."""
+            refused = config_guard(raw_request)
+            if refused is not None:
+                return refused
+            try:
+                _, text, base = await edited(raw_request)
+                config_edit.write(config_path, text, base)
+            except config_edit.EditError as exc:
+                return JSONResponse(status_code=409 if "changed on disk" in str(exc) else 400, content=error_body(str(exc)))
+            except (ConfigError, json.JSONDecodeError, OSError) as exc:
+                return JSONResponse(status_code=400, content=error_body(str(exc)))
+            digest = config_edit.digest(text)
+            return {"saved": True, "path": str(config_path), "digest": digest, "served": digest == started_digest}
 
     @app.post("/v1/route")
     async def route_only(raw_request: Request) -> Any:
@@ -733,4 +832,4 @@ def app_from_config_path(path: str) -> FastAPI:
     """Entry point for `uvicorn`-style deployment."""
     from .config import load_config
 
-    return create_app(load_config(path))
+    return create_app(load_config(path), config_path=path)
