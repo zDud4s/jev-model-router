@@ -1,0 +1,19 @@
+{
+  "name": "jev-model-router",
+  "version": "0.1.0",
+  "description": "Ask jev-model-router which model and effort should do a task before delegating it, and report how it went.",
+  "author": {
+    "name": "zDud4s"
+  },
+  "repository": "https://github.com/zDud4s/jev-model-router",
+  "skills": "./codex/skills/",
+  "mcpServers": "./codex/mcp.json",
+  "interface": {
+    "displayName": "jev-model-router",
+    "shortDescription": "Pick the model and effort for each delegated task",
+    "longDescription": "Before delegating a task, ask jev-model-router which model and reasoning effort are cheapest while likely to succeed; after the task's check runs, report pass or fail so the router learns each model's real success rate.",
+    "developerName": "zDud4s",
+    "category": "Developer Tools",
+    "capabilities": ["Interactive"]
+  }
+}

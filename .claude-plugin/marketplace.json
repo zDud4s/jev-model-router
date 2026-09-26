@@ -1,0 +1,16 @@
+{
+  "name": "jev-model-router",
+  "owner": {
+    "name": "zDud4s"
+  },
+  "metadata": {
+    "description": "jev-model-router: pick the model and effort for each delegated task, and learn from the outcome."
+  },
+  "plugins": [
+    {
+      "name": "jev-model-router",
+      "source": "./plugin",
+      "description": "Ask jev-model-router which model and effort should do a task before delegating it, and report how it went."
+    }
+  ]
+}

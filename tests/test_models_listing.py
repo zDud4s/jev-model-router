@@ -20,6 +20,7 @@ from jev_model_router.config import parse_config
 from jev_model_router.db import RequestLog
 from jev_model_router.discovery import expand
 from jev_model_router.eligibility import evaluate
+from jev_model_router.mcp_server import TOOLS
 from jev_model_router.schemas import ChatCompletionRequest
 from jev_model_router.scores_derive import served_keys
 
@@ -252,3 +253,8 @@ def test_route_says_when_the_shortlist_left_nothing(backend_factory):
         bad = client.post("/v1/route", json={"task": "Fix it", "models": "cx"})
     assert r.status_code == 422 and "models/exclude left out" in r.json()["error"]["message"]
     assert bad.status_code == 400 and "list of globs" in bad.json()["error"]["message"]
+
+
+def test_the_mcp_route_tool_offers_the_shortlist():
+    props = next(t for t in TOOLS if t["name"] == "route")["inputSchema"]["properties"]
+    assert props["models"]["type"] == props["exclude"]["type"] == "array"

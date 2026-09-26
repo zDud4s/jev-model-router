@@ -1,4 +1,4 @@
-"""Command line: `jev-model-router init`, `serve`, `keys`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
+"""Command line: `jev-model-router init`, `serve`, `mcp`, `keys`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
 
 from __future__ import annotations
 
@@ -13,8 +13,11 @@ from .stats import collect, format_text
 from .training import TrainingError, format_report, train_from_log
 
 DEFAULT_CONFIG = "config.yaml"
-# Read when -c is not given, so commands run from any directory find the config.
+# Read when -c is not given: an agent launches `jev-model-router mcp` from whatever
+# project it has open, where no config.yaml is.
 CONFIG_ENV = "JEV_MODEL_ROUTER_CONFIG"
+# The same for `mcp --url`, whose arguments a plugin fixes.
+URL_ENV = "JEV_MODEL_ROUTER_URL"
 
 
 def default_config() -> str:
@@ -46,6 +49,13 @@ def _build_parser() -> argparse.ArgumentParser:
     init.add_argument("--path", default=None, help="where to write it (default: the user's config directory)")
     init.add_argument("--yes", action="store_true", help="accept every default; ask nothing, set no key")
     init.add_argument("--force", action="store_true", help="replace an existing config")
+
+    mcp = sub.add_parser("mcp", help="serve the route-only API as MCP tools over stdio, for an agent")
+    mcp.add_argument("--url", default=os.environ.get(URL_ENV) or None,
+                     help=f"use the proxy running here (jev-model-router serve) instead of routing in this process "
+                          f"(default: ${URL_ENV})")
+    mcp.add_argument("--runner", action="append", default=[],
+                     help="only offer tiers this CLI runs, e.g. claude or codex; repeatable")
 
     keys = sub.add_parser("keys", help="show the API keys the config needs, and set or unset them")
     keys.add_argument("action", nargs="?", choices=["list", "set", "unset"], default="list",
@@ -770,9 +780,42 @@ def _init(args) -> int:
     return 0
 
 
+def _mcp(args) -> int:
+    import asyncio
+    from pathlib import Path
+
+    from .mcp_server import run
+
+    # stdout is the protocol channel: anything else printed goes to stderr.
+    protocol_out, sys.stdout = sys.stdout, sys.stderr
+    try:
+        if args.url:
+            asyncio.run(run(url=args.url, runners=args.runner, stdout=protocol_out.buffer))
+            return 0
+        path = Path(args.config).resolve()
+        try:
+            config = load_config(path)
+        except ConfigError as exc:
+            print(f"config error: {exc} (pass -c, or set {CONFIG_ENV})", file=sys.stderr)
+            return 2
+        for line in _missing_keys(config):
+            print(line, file=sys.stderr)
+        # The config's relative paths (log, catalog, benchmarks) mean what they
+        # mean under `serve` run beside it, not under the agent's project.
+        os.chdir(path.parent)
+        from .app import create_app
+
+        asyncio.run(run(app=create_app(config), runners=args.runner, stdout=protocol_out.buffer))
+        return 0
+    finally:
+        sys.stdout = protocol_out
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
+    if args.command == "mcp":
+        return _mcp(args)
     if args.command == "keys":
         return _keys(args)
     if args.command == "init":

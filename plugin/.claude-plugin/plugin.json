@@ -1,0 +1,9 @@
+{
+  "name": "jev-model-router",
+  "version": "0.1.0",
+  "description": "Ask jev-model-router which model and effort should do a task before delegating it, and report how it went.",
+  "author": {
+    "name": "zDud4s"
+  },
+  "repository": "https://github.com/zDud4s/jev-model-router"
+}

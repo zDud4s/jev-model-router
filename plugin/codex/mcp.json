@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "jev-model-router": {
+      "command": "jev-model-router",
+      "args": ["mcp", "--runner", "codex"]
+    }
+  }
+}
