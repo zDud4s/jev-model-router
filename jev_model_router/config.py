@@ -178,6 +178,63 @@ def _jev_questions(raw: dict[str, Any], name: str, *, tier: str) -> dict[str, st
 
 
 @dataclass(frozen=True)
+class Endpoint:
+    """One way to reach a tier's model: a provider, its model id there, and its key.
+
+    The same model is often sold by more than one provider, under a different id
+    and behind a different key. A tier listing several serves through the first
+    whose key is set, so which provider a user has is a key they set, not an edit.
+    """
+
+    label: str
+    base_url: str
+    model: str
+    api_key_env: str | None = None
+    # Where to get the key; shown by `jev-model-router keys set`.
+    key_url: str | None = None
+    extra_body: dict[str, Any] = field(default_factory=dict)
+
+
+_ENDPOINT_FIELDS = {"label", "base_url", "model", "api_key_env", "key_url", "extra_body"}
+
+
+def _parse_endpoints(raw: Any, tier: str, entry: dict[str, Any]) -> tuple[Endpoint, ...]:
+    if raw is None:
+        return ()
+    if not isinstance(raw, list) or not raw:
+        raise ConfigError(f"tier {tier!r}: endpoints must be a non-empty list")
+    out: list[Endpoint] = []
+    for i, item in enumerate(raw):
+        where = f"tier {tier!r}: endpoints[{i}]"
+        if not isinstance(item, dict):
+            raise ConfigError(f"{where} must be a mapping")
+        extra = set(item) - _ENDPOINT_FIELDS
+        if extra:
+            raise ConfigError(f"{where}: unknown fields {sorted(extra)}; an endpoint sets {sorted(_ENDPOINT_FIELDS)}")
+        # An endpoint inherits what it does not set from the tier itself.
+        base_url = item.get("base_url") or entry.get("base_url")
+        model = item.get("model") or entry.get("model")
+        if not base_url or not model:
+            raise ConfigError(f"{where} needs a base_url and a model, its own or the tier's")
+        out.append(Endpoint(
+            label=str(item.get("label") or base_url),
+            base_url=str(base_url).rstrip("/"),
+            model=str(model),
+            api_key_env=item.get("api_key_env", entry.get("api_key_env")),
+            key_url=item.get("key_url", entry.get("key_url")),
+            extra_body={**dict(entry.get("extra_body") or {}), **dict(item.get("extra_body") or {})},
+        ))
+    return tuple(out)
+
+
+def _pick_endpoint(endpoints: tuple[Endpoint, ...]) -> Endpoint:
+    """The first endpoint whose key is set; the first one when none is, so errors name its key."""
+    from . import keystore
+
+    return next((e for e in endpoints if not e.api_key_env or keystore.lookup(e.api_key_env)), endpoints[0])
+
+
+@dataclass(frozen=True)
 class TierConfig:
     """One logical tier, mapped to one concrete backend model."""
 
@@ -205,6 +262,11 @@ class TierConfig:
     # token (or free). Defaults from the backend; two CLI tiers on different
     # accounts can name different pools.
     subscription: str | None = None
+    # Where to get this tier's key; shown by `jev-model-router keys set`.
+    key_url: str | None = None
+    # Every way to reach the model, when the config lists several. base_url,
+    # model, api_key_env and extra_body above are the one picked at load time.
+    endpoints: tuple[Endpoint, ...] = ()
 
     @property
     def can_serve(self) -> bool:
@@ -222,14 +284,16 @@ class TierConfig:
 
     @property
     def api_key(self) -> str | None:
-        """Read the key from the environment at call time.
+        """Read the key at call time: the environment, else the user's secrets file.
 
         Keys are named in config but never stored in it, so a config file can be
         committed and shared without carrying a credential.
         """
         if not self.api_key_env:
             return None
-        return os.environ.get(self.api_key_env)
+        from . import keystore
+
+        return keystore.lookup(self.api_key_env)
 
 
 @dataclass(frozen=True)
@@ -955,10 +1019,12 @@ def parse_config(raw: dict[str, Any]) -> Config:
             raise ConfigError(
                 f"tier {name!r}: 'jev' settings on a {backend!r} tier do nothing"
             )
-        model = entry.get("model")
+        endpoints = _parse_endpoints(entry.get("endpoints"), name, entry)
+        chosen = _pick_endpoint(endpoints) if endpoints else None
+        model = chosen.model if chosen else entry.get("model")
         if not model:
             raise ConfigError(f"tier {name!r}: 'model' is required")
-        base_url = entry.get("base_url") or _DEFAULT_BASE_URLS.get(backend)
+        base_url = chosen.base_url if chosen else entry.get("base_url") or _DEFAULT_BASE_URLS.get(backend)
         if not base_url:
             raise ConfigError(f"tier {name!r}: 'base_url' is required for {backend}")
         tiers[name] = TierConfig(
@@ -966,12 +1032,14 @@ def parse_config(raw: dict[str, Any]) -> Config:
             backend=backend,
             model=str(model),
             base_url=str(base_url).rstrip("/"),
-            api_key_env=entry.get("api_key_env"),
+            api_key_env=chosen.api_key_env if chosen else entry.get("api_key_env"),
+            key_url=chosen.key_url if chosen else entry.get("key_url"),
+            endpoints=endpoints,
             context_window=int(entry.get("context_window", 8192)),
             supports_tools=bool(entry.get("supports_tools", False)),
             prices=Prices.parse(entry.get("prices")),
             timeout_s=float(entry.get("timeout_s", 600.0)),
-            extra_body=dict(entry.get("extra_body") or {}),
+            extra_body=chosen.extra_body if chosen else dict(entry.get("extra_body") or {}),
             jev=JevConfig.parse(entry.get("jev"), tier=name),
             effort=effort,
             subscription=str(subscription) if subscription else None,

@@ -1,4 +1,4 @@
-"""Command line: `jev-model-router serve`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
+"""Command line: `jev-model-router serve`, `keys`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
 
 from __future__ import annotations
 
@@ -23,6 +23,11 @@ def _build_parser() -> argparse.ArgumentParser:
     serve = sub.add_parser("serve", help="run the proxy")
     serve.add_argument("--host", default=None)
     serve.add_argument("--port", type=int, default=None)
+
+    keys = sub.add_parser("keys", help="show the API keys the config needs, and set or unset them")
+    keys.add_argument("action", nargs="?", choices=["list", "set", "unset"], default="list",
+                      help="list (default); set: prompt for the missing keys, or for NAME; unset NAME")
+    keys.add_argument("name", nargs="?", help="the variable, e.g. the api_key_env a tier names")
 
     stats = sub.add_parser("stats", help="read the request log back")
     stats.add_argument("--json", action="store_true", help="emit JSON instead of text")
@@ -535,8 +540,139 @@ def _benchmarks_fit(config, scores, args) -> int:
     return 0
 
 
+def _keyed(config) -> list[tuple[str, list[tuple[str | None, str, str | None]]]]:
+    """(what needs it, its key options) for every tier that takes a key."""
+    return [(name, _key_options(tier)) for name, tier in config.tiers.items() if _key_options(tier)]
+
+
+def _key_options(tier) -> list[tuple[str | None, str, str | None]]:
+    """(label, variable, key_url) for each way this tier can be keyed; [] when it takes no key."""
+    if tier.endpoints:
+        return [(e.label, e.api_key_env, e.key_url) for e in tier.endpoints if e.api_key_env]
+    return [(None, tier.api_key_env, tier.key_url)] if tier.api_key_env else []
+
+
+def _missing_keys(config) -> list[str]:
+    """One line per tier that takes a key and has none set, naming what to set."""
+    from . import keystore
+
+    lines = []
+    for name, options in _keyed(config):
+        if not any(keystore.lookup(var) for _, var, _ in options):
+            wanted = " or ".join(var for _, var, _ in options)
+            lines.append(f"tier {name!r} has no key: set {wanted} (run `jev-model-router keys set`)")
+    return lines
+
+
+def _read_secret(prompt: str) -> str:
+    """A key typed without echo, or one line of piped input."""
+    if sys.stdin.isatty():
+        import getpass
+
+        return getpass.getpass(prompt).strip()
+    print(prompt, end="", file=sys.stderr, flush=True)
+    return sys.stdin.readline().strip()
+
+
+def _ask(prompt: str) -> str:
+    print(prompt, end="", file=sys.stderr, flush=True)
+    return sys.stdin.readline().strip()
+
+
+def _keys(args) -> int:
+    from . import keystore
+
+    if args.action == "unset":
+        if not args.name:
+            print("keys unset needs the variable's name", file=sys.stderr)
+            return 2
+        if keystore.remove(args.name):
+            print(f"removed {args.name} from {keystore.path()}")
+            return 0
+        print(f"{args.name} is not in {keystore.path()}", file=sys.stderr)
+        return 1
+
+    if args.action == "set" and args.name:
+        return _store_key(args.name, None)
+
+    try:
+        config = load_config(args.config)
+    except ConfigError as exc:
+        print(f"config error: {exc} (pass -c; `keys set NAME` needs no config)", file=sys.stderr)
+        return 2
+
+    keyed = _keyed(config)
+    if args.action == "list":
+        if not keyed:
+            print("no tier in this config takes a key")
+        width = max((len(var) for _, options in keyed for _, var, _ in options), default=0)
+        missing = 0
+        for name, options in keyed:
+            print(name + ("  (the first provider with a key is used)" if len(options) > 1 else ""))
+            where = [keystore.source(var) for _, var, _ in options]
+            # The provider this tier was loaded on: the first one with a key.
+            used = next((i for i, w in enumerate(where) if w), None)
+            for i, (label, var, _) in enumerate(options):
+                mark = "*" if i == used else " "
+                print(f"  {mark} {var:{width}}  {where[i] or 'missing':7}  {label or ''}".rstrip())
+            missing += used is None
+        print(f"secrets file: {keystore.path()}")
+        if missing:
+            print(f"{missing} tier(s) have no key: run `jev-model-router keys set`", file=sys.stderr)
+        return 1 if missing else 0
+
+    # set, no name: ask for each tier that has no key, the provider first when there is a choice.
+    todo = [(name, options) for name, options in keyed
+            if not any(keystore.lookup(var) for _, var, _ in options)]
+    if not todo:
+        print("every key the config names is set; `jev-model-router keys set NAME` replaces one")
+        return 0
+    failed = 0
+    for name, options in todo:
+        if any(keystore.lookup(var) for _, var, _ in options):
+            continue  # an earlier answer set the key this one shares
+        choice = options[0]
+        if len(options) > 1:
+            print(f"{name}: which provider?", file=sys.stderr)
+            for i, (label, var, _) in enumerate(options, 1):
+                print(f"  {i}) {label}  ({var})", file=sys.stderr)
+            answer = _ask(f"provider [1-{len(options)}, default 1]: ")
+            if answer:
+                if not answer.isdigit() or not 1 <= int(answer) <= len(options):
+                    print(f"no provider {answer!r}; {name} left without a key", file=sys.stderr)
+                    failed += 1
+                    continue
+                choice = options[int(answer) - 1]
+        failed += _store_key(choice[1], choice[2]) != 0
+    print("a running server picks its provider at start: restart it to use a new key")
+    return 1 if failed else 0
+
+
+def _store_key(name: str, key_url: str | None) -> int:
+    from . import keystore
+
+    if key_url:
+        print(f"get a key at {key_url}", file=sys.stderr)
+    value = _read_secret(f"{name}: ")
+    if not value:
+        print(f"nothing entered; {name} unchanged", file=sys.stderr)
+        return 1
+    try:
+        written = keystore.store(name, value)
+    except (ValueError, OSError) as exc:
+        print(f"not saved: {exc}", file=sys.stderr)
+        return 1
+    print(f"saved {name} to {written}")
+    if keystore.source(name) == "env":
+        print(f"note: {name} is also set in the environment, which wins over the file", file=sys.stderr)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
+
+    if args.command == "keys":
+        return _keys(args)
 
     try:
         config = load_config(args.config)
@@ -554,6 +690,8 @@ def main(argv: list[str] | None = None) -> int:
         quiet = args.json and (args.prices or args.catalog)
         if not quiet:
             print(f"config OK: {len(config.tiers)} tier(s): {', '.join(config.tiers)}")
+            for line in _missing_keys(config):
+                print(line, file=sys.stderr)
         if args.catalog:
             from .catalog import check_catalog, write_if_changed
 
@@ -672,6 +810,8 @@ def main(argv: list[str] | None = None) -> int:
 
         from .app import create_app
 
+        for line in _missing_keys(config):
+            print(line, file=sys.stderr)
         host = args.host or config.server.host
         port = args.port or config.server.port
         uvicorn.run(create_app(config), host=host, port=port)

@@ -336,6 +336,9 @@ def create_app(
             "success": decision.score,
             "estimated_cost_usd": picked.get("cost"),
             "rule": detail.get("rule") or decision.reason,
+            # Why a fallback fell back (Jev unreachable, no key...): the caller
+            # cannot see the router's stderr.
+            **({"why": detail["why"]} if detail.get("why") else {}),
             "router": decision.model,
             "unknown_failed": list(ask.unknown_failed),
         }

@@ -154,3 +154,9 @@ def make_request(**overrides: Any) -> ChatCompletionRequest:
     }
     payload.update(overrides)
     return ChatCompletionRequest.model_validate(payload)
+
+
+@pytest.fixture(autouse=True)
+def _own_secrets_file(tmp_path_factory, monkeypatch):
+    """Every test gets an empty secrets file of its own, never the user's real one."""
+    monkeypatch.setenv("JEV_MODEL_ROUTER_HOME", str(tmp_path_factory.mktemp("jev-model-router-home")))
