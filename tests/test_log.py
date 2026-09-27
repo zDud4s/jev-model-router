@@ -10,12 +10,14 @@ from fastapi.testclient import TestClient
 
 from jev_model_router.app import create_app
 from jev_model_router.backends.base import BackendError
+from jev_model_router.calls import MIN_EVIDENCE
 from jev_model_router.config import TaskShape
 from jev_model_router.db import _MIGRATIONS, SCHEMA_VERSION, LogEntry, RequestLog, sha256_hex
 from jev_model_router.schemas import Usage
 from jev_model_router.stats import collect, format_text
 
 from conftest import FakeBackend
+from test_calls import calls as build_call_router
 
 
 def _app_with_log(config, log, *, backend_error: BackendError | None = None, usage: Usage | None = None):
@@ -322,3 +324,33 @@ def test_the_task_cost_block_shows_each_tiers_shape_the_flips_and_the_gap() -> N
     text = format_text(stats)
     assert "task cost" in text and "b over a: 1" in text and "no cache tokens" in text
     assert collect(RequestLog(":memory:")).task_cost is None  # no route decisions, no block
+
+
+def test_a_row_whose_cache_exceeds_its_input_is_rejected_not_counted_as_no_cache() -> None:
+    log = RequestLog(":memory:")
+    decided(log, 0, "c", Usage(prompt_tokens=1000, completion_tokens=100, cached_tokens=900, cache_write_tokens=200))
+    stats = collect(log)
+    row = {r.tier: r for r in stats.task_cost.tiers}["c"]
+    assert row.rejected == 1 and row.without_cache == 0
+    assert "don't add up" in format_text(stats)
+
+
+def test_stats_pools_the_same_shape_the_router_does() -> None:
+    """The same rows, replayed into a CallRouter and into the log: `collect` must agree with `shape_for`."""
+    router = build_call_router()
+    log = RequestLog(":memory:")
+    cold_before = Usage(prompt_tokens=1000, completion_tokens=100)  # before "sub" has shown it reports cache
+    cached = Usage(prompt_tokens=30_000, completion_tokens=100, cached_tokens=29_000, cache_write_tokens=500)
+    cold_after = Usage(prompt_tokens=1000, completion_tokens=100)  # after: a real cold task, not silence
+
+    for i, usage in enumerate([cold_before, *([cached] * MIN_EVIDENCE), cold_after]):
+        decided(log, i, "sub", usage)
+        router.record_task("sub", usage)
+
+    stats = collect(log)
+    row = {r.tier: r for r in stats.task_cost.tiers}["sub"]
+    shape = router.shape_for("sub")
+    assert row.source == shape.source
+    assert (row.input_per_output, row.cache_read, row.cache_write) == (
+        round(shape.input_per_output, 1), round(shape.cache_read, 3), round(shape.cache_write, 3),
+    )

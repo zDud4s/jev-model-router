@@ -176,8 +176,9 @@ DRIFT_TOLERANCE = 0.05
 @dataclass
 class TierShape:
     tier: str
-    evidence: int  # outcomes that reported cache tokens
+    evidence: int  # outcomes accepted as shape evidence
     without_cache: int  # outcomes with usage but no cache tokens: a caller that never reports them
+    rejected: int  # outcomes accepts_task_row refuses for another reason: cache over input, or negative fields
     source: str  # "observed:<n>" | "config" | "none"
     input_per_output: float | None = None
     cache_read: float | None = None
@@ -363,41 +364,42 @@ def _format_billing(b: BillingStats) -> list[str]:
 
 def _task_cost(log: RequestLog, task_shape: TaskShape | None) -> TaskCostStats | None:
     """None when the log has no route-only decisions at all, so the report stays silent about it."""
-    rows = log.query(
-        "SELECT tier, route_reason, outcome_input_tokens AS input, outcome_output_tokens AS output, "
-        "outcome_cached_tokens AS cached, outcome_cache_write_tokens AS written FROM route_decisions ORDER BY id"
-    )
-    if not rows:
+    decided_tiers = log.query("SELECT DISTINCT tier FROM route_decisions")
+    if not decided_tiers:
         return None
-    evidence: dict[str, list[tuple[int, int, int, int]]] = {}
+    evidence: dict[str, list[tuple[int, int, int, int]]] = {row["tier"]: [] for row in decided_tiers}
     without: Counter[str] = Counter()
-    flips: Counter[str] = Counter()
-    # Pooling replays the log in order and applies the same row rule `CallRouter.record_task`
-    # applies live, tracked here rather than through a `CallRouter` -- stats has no config, prices
-    # or ledger to build one, only the log.
+    rejected: Counter[str] = Counter()
+    # Replays the same rows startup seeding does (`log.task_usage()`), applying the same row rule
+    # `CallRouter.record_task` applies live -- tracked here rather than through a `CallRouter`,
+    # since stats has no config, prices or ledger to build one, only the log.
     reports_cache: set[str] = set()
-    for row in rows:
-        tier = row["tier"]
-        evidence.setdefault(tier, [])
-        if row["input"] is not None and row["output"] is not None:
-            cached, written = row["cached"] or 0, row["written"] or 0
-            if accepts_task_row(row["input"], row["output"], cached, written, tier in reports_cache):
-                if cached + written > 0:
-                    reports_cache.add(tier)
-                evidence[tier].append((row["input"], cached, written, row["output"]))
-            else:
-                without[tier] += 1
+    for row in log.task_usage():
+        tier, cached, written = row["tier"], row["cached"], row["written"]
+        if accepts_task_row(row["input"], row["output"], cached, written, tier in reports_cache):
+            if cached + written > 0:
+                reports_cache.add(tier)
+            evidence.setdefault(tier, []).append((row["input"], cached, written, row["output"]))
+        elif accepts_task_row(row["input"], row["output"], cached, written, True):
+            without[tier] += 1  # would be fine, except this tier has not shown it reports the cache yet
+        else:
+            rejected[tier] += 1  # doesn't add up on its own: cache over input, or a negative field
+
+    flips: Counter[str] = Counter()
+    for row in log.query("SELECT tier, route_reason FROM route_decisions WHERE route_reason IS NOT NULL"):
         try:
-            reason = json.loads(row["route_reason"] or "")
-        except ValueError:
+            reason = json.loads(row["route_reason"])
+        except (ValueError, TypeError):
             continue
         if isinstance(reason, dict) and reason.get("shapeless_pick"):
-            flips[f"{tier} over {reason['shapeless_pick']}"] += 1
+            flips[f"{row['tier']} over {reason['shapeless_pick']}"] += 1
+
     tiers = []
     for tier, seen in sorted(evidence.items()):
         shape = pooled_shape(seen[-WINDOW:]) if len(seen) >= MIN_EVIDENCE else task_shape
         tiers.append(TierShape(
-            tier=tier, evidence=len(seen), without_cache=without[tier], source=shape.source if shape else "none",
+            tier=tier, evidence=len(seen), without_cache=without[tier], rejected=rejected[tier],
+            source=shape.source if shape else "none",
             input_per_output=round(shape.input_per_output, 1) if shape else None,
             cache_read=round(shape.cache_read, 3) if shape else None,
             cache_write=round(shape.cache_write, 3) if shape else None,
@@ -409,14 +411,19 @@ def _format_task_cost(t: TaskCostStats) -> list[str]:
     lines = ["", "task cost (route-only decisions): the shape each tier's task is priced by"]
     if t.config_shape:
         c = t.config_shape
-        lines.append(f"  config          {c['input_per_output']:g} in/out, read {c['cache_read']:.3f}, "
-                     f"write {c['cache_write']:.3f}")
+        shape = f"{c['input_per_output']:g} in/out, read {c['cache_read']:.3f}, write {c['cache_write']:.3f}"
+        lines.append(f"  {'config':<28} {'':<12} {shape}")
     for row in t.tiers:
         shape = (f"{row.input_per_output:g} in/out, read {row.cache_read:.3f}, write {row.cache_write:.3f}"
                  if row.input_per_output is not None else "one call")
         lines.append(f"  {row.tier:<28} {row.source:<12} {shape}")
         if row.without_cache:
             lines.append(f"      note: {row.without_cache} outcome(s) with usage but no cache tokens")
+        if row.rejected:
+            lines.append(
+                f"      note: {row.rejected} outcome(s) whose tokens don't add up "
+                "(cache over input, or zero/negative)"
+            )
     for pair, n in sorted(t.flips.items(), key=lambda kv: -kv[1]):
         lines.append(f"  shape flipped   {pair}: {n}")
     lines.append("  note: an observed shape is the traffic a tier was sent as much as the model")
