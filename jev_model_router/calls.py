@@ -5,6 +5,12 @@ the cards, calibration) and what will it cost. This module answers the second,
 and only that: prices -- what the tier bills, else its card's list prices --
 and the subscription ledger, whose 429 lock makes a tier cost `inf` until its
 window turns. It never imports the model router; the model router is given one.
+
+A route-only decision is a whole task, not one call: an agent loop that
+re-sends a growing context every turn, mostly from the provider's prompt cache.
+`task_cost` prices it by a task shape (`config.TaskShape`): observed on the
+tier from reported outcomes, else the config's. Scaled to one answer's output,
+it orders tiers; it does not budget a task.
 """
 
 from __future__ import annotations
@@ -12,9 +18,9 @@ from __future__ import annotations
 import math
 import time
 from collections import deque
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
-from .config import CapabilitiesConfig, Config, Prices
+from .config import CapabilitiesConfig, Config, Prices, TaskShape
 from .schemas import Usage
 
 
@@ -69,6 +75,24 @@ def _usd(prices: Prices, prompt_tokens: int, output_tokens: int) -> float:
     return (prompt_tokens * prices.input + output_tokens * prices.output) / 1_000_000
 
 
+# Outcomes with cache tokens a tier needs before its own shape replaces the
+# config's, and how many of the latest it is pooled over.
+MIN_EVIDENCE = 5
+WINDOW = 200
+
+
+def pooled_shape(rows: Sequence[tuple[int, int, int, int]]) -> TaskShape | None:
+    """(input, cached, written, output) per task, pooled: sums, not a mean of ratios, so long tasks weigh more."""
+    total_in = sum(r[0] for r in rows)
+    total_out = sum(r[3] for r in rows)
+    if total_in <= 0 or total_out <= 0:
+        return None
+    read = min(sum(r[1] for r in rows) / total_in, 1.0)
+    # A provider that counts writes outside the prompt could push the sum past 1.
+    write = min(sum(r[2] for r in rows) / total_in, 1.0 - read)
+    return TaskShape(total_in / total_out, read, write, f"observed:{len(rows)}")
+
+
 class CallRouter:
     """Prices and availability per tier. `CapabilityRouter` weighs them; it does not keep them."""
 
@@ -83,6 +107,8 @@ class CallRouter:
         self._config = config
         self._list_prices = dict(list_prices)
         self.ledger = QuotaLedger(caps, clock)
+        self._shape = caps.task_shape
+        self._tasks: dict[str, deque[tuple[int, int, int, int]]] = {}
 
     def prices(self, tier_name: str) -> Prices:
         """What a tier really bills wins; its card's list prices stand in where it bills nothing."""
@@ -109,8 +135,52 @@ class CallRouter:
         if status < 400:
             self.ledger.record(tier.subscription, _usd(spend_prices, usage.prompt_tokens, usage.completion_tokens))
 
+    def record_task(self, tier_name: str, usage: Usage) -> bool:
+        """One routed task's whole usage, as evidence of the tier's shape. Without cache tokens it is none."""
+        if usage.prompt_tokens <= 0 or usage.completion_tokens <= 0:
+            return False
+        if usage.cached_tokens + usage.cache_write_tokens <= 0:
+            return False  # a caller that does not report the cache, not a task that never cached
+        self._tasks.setdefault(tier_name, deque(maxlen=WINDOW)).append(
+            (usage.prompt_tokens, usage.cached_tokens, usage.cache_write_tokens, usage.completion_tokens)
+        )
+        return True
+
+    def shape_for(self, tier_name: str) -> TaskShape | None:
+        """This tier's observed shape once it has `MIN_EVIDENCE` outcomes, else the config's, else None."""
+        seen = self._tasks.get(tier_name)
+        if seen is not None and len(seen) >= MIN_EVIDENCE:
+            return pooled_shape(list(seen))
+        return self._shape
+
+    def task_cost(self, tier_name: str, input_tokens: int, output_tokens: int) -> float:
+        """A whole task by its shape, scaled to `output_tokens` of output; `cost(...)` when the tier has no shape."""
+        shape = self.shape_for(tier_name)
+        if shape is None:  # `input_tokens` is used only here: a shape states its own input
+            return self.cost(tier_name, input_tokens, output_tokens)
+        if self.locked(tier_name):
+            return math.inf
+        p = self.prices(tier_name)
+        total_in = shape.input_per_output * output_tokens
+        fresh = max(0.0, 1.0 - shape.cache_read - shape.cache_write)
+        # Unwritten, a cache write is billed as the input it is; its 0.0 default would make it free.
+        write = p.cache_write if p.cache_write_configured else p.input
+        per_input = fresh * p.input + shape.cache_read * p.cache_read + shape.cache_write * write
+        return (total_in * per_input + output_tokens * p.output) / 1_000_000
+
+    def uncached(self) -> list[str]:
+        """Carded tiers with no cache discount, while a shape is in use: priced as if they cached nothing."""
+        if self._shape is None and not any(len(seen) >= MIN_EVIDENCE for seen in self._tasks.values()):
+            return []
+        out = []
+        for tier_name in sorted(self._list_prices):
+            p = self.prices(tier_name)
+            if p.input > 0 and p.cache_read >= p.input:
+                out.append(tier_name)
+        return out
+
     def state(self) -> dict[str, Any]:
         return {"subscriptions": self.ledger.state()}
 
 
-__all__ = ["CallRouter", "QuotaLedger"]
+__all__ = ["CallRouter", "MIN_EVIDENCE", "QuotaLedger", "TaskShape", "WINDOW", "pooled_shape"]
