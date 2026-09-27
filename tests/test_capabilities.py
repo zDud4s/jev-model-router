@@ -323,6 +323,27 @@ def test_the_app_awaits_the_decision_logs_it_and_charges_the_subscription(backen
     assert row["route_model"] == r.fingerprint
 
 
+@pytest.mark.parametrize("stream", [False, True])
+def test_under_reject_a_jev_failure_is_a_logged_503_and_nothing_runs(backend_factory, fake_backends, stream):
+    config = parse_config(raw_config(on_jev_failure="reject"))
+    log = RequestLog(":memory:")
+    r = CapabilityRouter(config, ask=Ask(error=RuntimeError("jev timed out")))
+    app = create_app(config, backend_factory=backend_factory, log=log, router=r)
+    with TestClient(app) as client:
+        response = client.post("/v1/chat/completions", json={
+            "model": "auto", "stream": stream, "messages": [{"role": "user", "content": "refactor it"}]})
+        row = log.query("SELECT tier, http_status, error, route_model, route_reason FROM requests")[0]
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["type"] == error["code"] == "jev_unavailable"
+    assert "on_jev_failure is reject" in error["message"] and "jev timed out" in error["message"]
+    assert all(not b.calls for b in fake_backends.values())
+    assert row["tier"] is None and row["http_status"] == 503 and "jev timed out" in row["error"]
+    assert row["route_model"] == r.fingerprint
+    assert json.loads(row["route_reason"]) == {"rule": "jev_failure", "on_jev_failure": "reject",
+                                               "why": "jev error: RuntimeError: jev timed out"}
+
+
 def test_a_free_tier_costs_its_shadow_price_and_a_billed_tier_its_real_one():
     r = router(Ask(EASY), cards={**CAPS["cards"], "cheap": {"levels": {"reasoning": 1, "code": 1},
                                                              "list_prices": {"input": 1.0, "output": 1.0}}})

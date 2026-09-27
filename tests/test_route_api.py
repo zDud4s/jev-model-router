@@ -29,6 +29,21 @@ def client_for(backend_factory, ask=None, log=None, **caps):
     return TestClient(app), log, router
 
 
+def test_under_reject_a_jev_failure_is_a_503_kept_as_a_rejection_not_a_decision(backend_factory):
+    client, log, router = client_for(backend_factory, Ask(error=RuntimeError("jev timed out")),
+                                     on_jev_failure="reject")
+    with client:
+        response = client.post("/v1/route", json=TASK)
+        decisions = log.query("SELECT COUNT(*) AS n FROM route_decisions")[0]["n"]
+        [row] = log.query("SELECT request_id, stage, route_model, route_reason FROM route_rejections")
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "jev_unavailable" and "jev timed out" in error["message"]
+    assert row["request_id"].startswith("rj_") and row["request_id"] in error["message"]
+    assert decisions == 0 and row["stage"] == "implement" and row["route_model"] == router.fingerprint
+    assert '"on_jev_failure":"reject"' in row["route_reason"]
+
+
 def test_a_task_gets_a_model_an_effort_and_a_runner_and_nothing_runs(backend_factory, fake_backends):
     ask = Ask(HARD)
     client, log, _ = client_for(backend_factory, ask)

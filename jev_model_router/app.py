@@ -42,7 +42,7 @@ from .config import Config, ConfigError
 from .db import LogEntry, RequestLog
 from .eligibility import evaluate
 from .pricing import cost_usd, counterfactuals
-from .routing import Router, build_router
+from .routing import JevUnavailable, Router, build_router
 from .schemas import ChatCompletionRequest, ModelList, Usage, error_body, model_card
 from .route_api import OUTCOMES, parse_route_ask, runner_of
 from .trace import PREVIEW_CHARS, TraceStore, prompt_preview
@@ -326,9 +326,13 @@ def create_app(
                 traces.finish(trace, "error")
                 return {"trace": trace["id"], "tier": None}
             began = time.perf_counter()
-            decision = active_router.decide(request, list(eligibility.eligible))
-            if inspect.isawaitable(decision):
-                decision = await decision
+            try:
+                decision = active_router.decide(request, list(eligibility.eligible))
+                if inspect.isawaitable(decision):
+                    decision = await decision
+            except JevUnavailable as exc:
+                traces.finish(trace, "error")
+                return {"trace": trace["id"], "tier": None, "error": f"jev_unavailable: {exc.why}"}
             traces.stage(trace, "route", **_route_view(decision, config, began))
             traces.finish(trace, "ok")
             return {"trace": trace["id"], "tier": decision.tier, "score": decision.score}
@@ -452,9 +456,20 @@ def create_app(
             return JSONResponse(status_code=422, content=error_body(
                 f"no eligible tier runs on {runners}{left_out}"))
         began = time.perf_counter()
-        decision = active_router.decide(request, eligible, **route_task)
-        if inspect.isawaitable(decision):
-            decision = await decision
+        try:
+            decision = active_router.decide(request, eligible, **route_task)
+            if inspect.isawaitable(decision):
+                decision = await decision
+        except JevUnavailable as exc:
+            if trace is not None:
+                traces.finish(trace, "error")
+            # Not a decision: nothing to report an outcome on, so no decision_id.
+            rejection_id = f"rj_{uuid.uuid4().hex[:16]}"
+            await asyncio.to_thread(
+                request_log.record_rejection, rejection_id, task=_prompt_text(request), stage=ask.stage,
+                route_model=exc.router, route_reason=exc.reason,
+            )
+            return _jev_unavailable(exc, rejection_id)
         tier = config.tiers[decision.tier]
         detail = decision.detail or {}
         picked = next((o for o in detail.get("options", []) if o.get("tier") == decision.tier), {})
@@ -602,9 +617,20 @@ def create_app(
 
         # --- route ------------------------------------------------------------
         route_began = time.perf_counter()
-        decision = active_router.decide(request, list(eligibility.eligible))
-        if inspect.isawaitable(decision):
-            decision = await decision
+        try:
+            decision = active_router.decide(request, list(eligibility.eligible))
+            if inspect.isawaitable(decision):
+                decision = await decision
+        except JevUnavailable as exc:
+            if trace is not None:
+                traces.finish(trace, "error")
+            base_entry.http_status = 503
+            base_entry.route_model = exc.router
+            base_entry.route_reason = exc.reason
+            base_entry.error = f"jev_unavailable: {exc.why}"
+            base_entry.latency_ms = _elapsed_ms(started)
+            await request_log.record_async(base_entry)
+            return _jev_unavailable(exc)
         stage("route", **_route_view(decision, config, route_began))
         tier_name = decision.tier
         tier = config.tier(tier_name)
@@ -873,6 +899,14 @@ def billed_total(usage: Usage, verification: VerificationOutcome | None) -> floa
 
 def _elapsed_ms(started: float) -> int:
     return int((time.perf_counter() - started) * 1000)
+
+
+def _jev_unavailable(exc: JevUnavailable, ref: str | None = None) -> JSONResponse:
+    """The 503 for a request refused because Jev did not answer under `on_jev_failure: reject`."""
+    message = f"jev did not answer and router.capabilities.on_jev_failure is reject: {exc.why}"
+    if ref:
+        message += f" (logged as {ref})"
+    return JSONResponse(status_code=503, content=error_body(message, kind="jev_unavailable", code="jev_unavailable"))
 
 
 def app_from_config_path(path: str) -> FastAPI:

@@ -59,6 +59,16 @@ def test_route_only_asks_the_router_and_runs_no_model(backend_factory, fake_back
     assert all(not backend.calls for backend in fake_backends.values())
 
 
+def test_a_dry_run_under_reject_with_jev_down_shows_the_refusal(backend_factory):
+    app = app_with(backend_factory, raw=raw_config(on_jev_failure="reject"),
+                   router_ask=Ask(error=RuntimeError("jev timed out")))
+    with TestClient(app) as client:
+        body = client.post("/routing/dry-run", json={"messages": CHAT["messages"]}).json()
+        [trace] = client.get("/routing/traces").json()["traces"]
+    assert body["tier"] is None and "jev timed out" in body["error"]
+    assert trace["status"] == "error"
+
+
 def test_polling_after_a_sequence_returns_only_what_moved(backend_factory):
     with TestClient(app_with(backend_factory)) as client:
         client.post("/routing/dry-run", json={"messages": CHAT["messages"]})
