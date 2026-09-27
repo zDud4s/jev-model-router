@@ -115,6 +115,15 @@ def test_the_page_reads_the_file_it_was_started_from(tmp_path, backend_factory):
     assert "claude_cli" in body["options"]["backends"]
 
 
+def test_the_form_offers_the_jev_failure_modes_the_parser_accepts(tmp_path, backend_factory):
+    client, _ = served(tmp_path, backend_factory)
+    with client:
+        body = client.get("/routing/config").json()
+        page = client.get("/routing").text
+    assert body["options"]["jev_failure_modes"] == ["fallback", "reject"]
+    assert '"on_jev_failure"' in page and "o.jev_failure_modes" in page
+
+
 def test_a_review_writes_nothing_and_a_save_writes_in_place(tmp_path, backend_factory):
     client, path = served(tmp_path, backend_factory)
     change = {"changes": [{"path": ["router", "default_tier"], "value": "top"}]}

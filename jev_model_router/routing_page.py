@@ -697,6 +697,7 @@ const KIND_LABELS = { static: "Always the default model", classifier: "A trained
   capabilities: "Jev reads each task and picks a model" };
 const RULE_LABELS = { target: "The cheapest model likely to succeed", expected_cost: "Weigh price against the cost of failing" };
 const POLICY_LABELS = { accept: "Keep the answer", escalate: "Ask a stronger model" };
+const JEV_FAILURE_LABELS = { fallback: "Answer with the default model", reject: "Refuse the request (503)" };
 const labelled = (values, labels) => values.map((v) => [v, labels[v] || v]);
 
 async function loadConfig() {
@@ -842,7 +843,7 @@ function choosingSection(kind, caps, tiers, answering, o) {
     field(["router", "kind"], "select", "How a model is chosen", null,
       { choices: labelled(o.router_kinds, KIND_LABELS), none: `(default) ${KIND_LABELS.static}`, rerender: true }),
     field(["router", "default_tier"], "select", kind === "capabilities" ? "Fallback model" : "Default model",
-      kind === "capabilities" ? "Not where requests go: Jev picks among every model below for each one. This answers only when Jev cannot: unreachable, every subscription locked, or nothing else fits. It must be a model written in the file."
+      kind === "capabilities" ? "Not where requests go: Jev picks among every model below for each one. This answers only when Jev cannot (unless set to refuse then, under Advanced), every subscription is locked, or nothing else fits. It must be a model written in the file."
         : kind === "classifier" ? "The cheaper model tried first; the classifier sends harder tasks to the stronger one."
         : "Serves every request that does not name a model.", { choices: answering }),
   ];
@@ -864,6 +865,9 @@ function choosingSection(kind, caps, tiers, answering, o) {
     adv = [field([...C, "jev_tier"], "select", "Judge that reads each task",
       "Reads every request and says how much it needs each requirement (reasoning, several files, debugging...); the model is chosen from that. One cheap call per request. Must be a model with backend jev.", { choices: tiers }),
       rule === "target" ? null : field([...C, "target"], "percent", "Target for the redo estimate", "Picks the model a failed task would be redone on.", { min: 50, def: 0.8 }),
+      field([...C, "on_jev_failure"], "select", "When the judge does not answer",
+        "Error, timeout or an unreadable answer. The default model answers blind, or the caller is told and nothing runs.",
+        { choices: labelled(o.jev_failure_modes, JEV_FAILURE_LABELS), none: `(default) ${JEV_FAILURE_LABELS.fallback}` }),
       field([...C, "floor"], "number", "Floor", "A requirement the judge rates at or below this counts as absent.", { def: 0.2 }),
       field([...C, "miss_scale"], "number", "Miss scale", "Written by `calibrate`. Above 1 makes every model look less likely to succeed.", { def: 1.0 })];
   } else if (kind === "capabilities") {

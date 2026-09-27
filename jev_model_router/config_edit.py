@@ -24,7 +24,7 @@ from typing import Any
 import yaml
 
 from .calibration import _replace
-from .config import _FALLBACK_POLICIES, _RULES, _SUBSCRIPTION_BACKENDS, EFFORTS, ConfigError, parse_config
+from .config import _FALLBACK_POLICIES, _JEV_FAILURE_MODES, _RULES, _SUBSCRIPTION_BACKENDS, EFFORTS, ConfigError, parse_config
 
 BACKENDS = ("ollama", "openai_compatible", "jev", "claude_cli", "codex_cli")
 ROUTER_KINDS = ("static", "classifier", "capabilities")
@@ -47,6 +47,7 @@ def options() -> dict[str, Any]:
         "router_kinds": list(ROUTER_KINDS),
         "rules": list(_RULES),
         "fallback_policies": list(_FALLBACK_POLICIES),
+        "jev_failure_modes": list(_JEV_FAILURE_MODES),
     }
 
 
