@@ -80,7 +80,11 @@ _OUTCOME_SCHEMA: dict[str, Any] = {
         "usage": {
             "type": "object",
             "properties": {
-                "prompt_tokens": {"type": "integer"},
+                "prompt_tokens": {
+                    "type": "integer",
+                    "description": "All input tokens for the run, cached and cache-write tokens included, "
+                                   "not only the fresh part.",
+                },
                 "completion_tokens": {"type": "integer"},
                 "cached_tokens": {"type": "integer", "description": "Input tokens read from the prompt cache."},
                 "cache_write_tokens": {"type": "integer", "description": "Input tokens written to the prompt cache."},

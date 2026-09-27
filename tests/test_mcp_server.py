@@ -152,6 +152,7 @@ def test_mcp_uses_a_running_proxy_when_the_env_var_names_one(monkeypatch):
 async def test_an_outcome_carries_cache_tokens_through(server):
     props = next(t for t in TOOLS if t["name"] == "report_outcome")["inputSchema"]["properties"]["usage"]["properties"]
     assert {"cached_tokens", "cache_write_tokens"} <= set(props)
+    assert "cache" in props["prompt_tokens"]["description"].lower()
     routed = json.loads(text_of(await server.handle(call(1, "route", {"task": "Fix it"}))))
     assert routed["cost_basis"] in ("one_call", "task_shape")
     usage = {"prompt_tokens": 3000, "completion_tokens": 10, "cached_tokens": 2900, "cache_write_tokens": 60}

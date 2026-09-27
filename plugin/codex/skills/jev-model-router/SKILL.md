@@ -58,6 +58,8 @@ If you know the run's tokens, pass `usage`: `prompt_tokens` and `completion_toke
 `cached_tokens` and `cache_write_tokens` when the runner reports them. They tell the router
 how much of a task's input its cache served. Most runs will not know them: leave out what
 you do not know rather than guessing.
+`prompt_tokens` is the whole input with cached and cache-write tokens included; if the
+runner reports fresh input separately from cache reads/writes, add them together.
 
 On `fail`, route the retry with `attempt`, `gate_output` and `failed` filled in: the router
 never offers a choice it rates below the one that failed.
