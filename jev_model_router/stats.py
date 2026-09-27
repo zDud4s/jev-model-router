@@ -199,6 +199,28 @@ class TaskCostStats:
 
 
 @dataclass
+class UnsureStats:
+    """Decisions where Jev read a requirement inside the unsure band, and what the floor did.
+
+    There is no outcome for the tier the floor passed over, so whether it pays is
+    read by comparing the raised decisions' pass rate with the unsure ones it left alone.
+    """
+
+    band: str  # "[0.30, 0.70]", or "mixed" when the log spans a band change
+    decisions: int = 0
+    raised: int = 0
+    unmet: int = 0
+    estimated_extra_usd: float = 0.0  # what the router believed the floor cost, summed `extra` (signed)
+    measured_extra_usd: float = 0.0  # proxied rows: route cost minus the passed-over tier's counterfactual
+    measured_rows: int = 0
+    raised_pass: int = 0
+    raised_fail: int = 0
+    kept_pass: int = 0
+    kept_fail: int = 0
+    by_requirement: dict[str, int] = field(default_factory=dict)
+
+
+@dataclass
 class Stats:
     requests: int
     errors: int
@@ -212,6 +234,7 @@ class Stats:
     classifier: ClassifierStats | None = None
     billing: BillingStats | None = None
     task_cost: TaskCostStats | None = None
+    unsure: UnsureStats | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -285,6 +308,7 @@ def collect(log: RequestLog, task_shape: TaskShape | None = None) -> Stats:
         classifier=_classifier(log),
         billing=_billing(log),
         task_cost=_task_cost(log, task_shape),
+        unsure=_unsure(log),
         requests=totals["requests"],
         errors=totals["errors"],
         total_cost_usd=totals["cost"],
@@ -427,6 +451,76 @@ def _format_task_cost(t: TaskCostStats) -> list[str]:
     for pair, n in sorted(t.flips.items(), key=lambda kv: -kv[1]):
         lines.append(f"  shape flipped   {pair}: {n}")
     lines.append("  note: an observed shape is the traffic a tier was sent as much as the model")
+    return lines
+
+
+def _unsure(log: RequestLog) -> UnsureStats | None:
+    """None when no decision in the log read a requirement as unsure, so the report stays silent about it."""
+    rows = [
+        (row["route_reason"], row["outcome"], None, None)
+        for row in log.query(
+            "SELECT route_reason, outcome FROM route_decisions WHERE route_reason LIKE '%\"unsure\"%'"
+        )
+    ] + [
+        (row["route_reason"], row["outcome"], row["id"], row["cost"])
+        for row in log.query(
+            "SELECT r.id AS id, r.route_reason AS route_reason, r.route_cost_usd AS cost, v.verdict AS outcome "
+            "FROM requests r LEFT JOIN verifications v ON v.request_row_id = r.id "
+            "WHERE r.route_reason LIKE '%\"unsure\"%'"
+        )
+    ]
+    stats = UnsureStats(band="")
+    bands: set[tuple[float, ...]] = set()
+    reqs: Counter[str] = Counter()
+    for text, outcome, row_id, cost in rows:
+        try:
+            unsure = json.loads(text).get("unsure")
+        except (ValueError, TypeError, AttributeError):
+            continue
+        if not isinstance(unsure, dict):
+            continue
+        stats.decisions += 1
+        bands.add(tuple(unsure.get("band") or ()))
+        reqs.update(unsure.get("reqs") or [])
+        raised_from = unsure.get("raised_from")
+        if unsure.get("unmet"):
+            stats.unmet += 1
+        if raised_from:
+            stats.raised += 1
+            if isinstance(unsure.get("extra"), (int, float)):
+                stats.estimated_extra_usd += unsure["extra"]
+            if row_id is not None:
+                passed_over = log.query(
+                    "SELECT cost_usd FROM counterfactuals WHERE request_row_id = ? AND tier = ? AND priced = 1",
+                    (row_id, raised_from[0]),
+                )
+                if passed_over:
+                    stats.measured_extra_usd += cost - passed_over[0]["cost_usd"]
+                    stats.measured_rows += 1
+        if outcome in ("pass", "fail"):
+            key = f"{'raised' if raised_from else 'kept'}_{outcome}"
+            setattr(stats, key, getattr(stats, key) + 1)
+    if not stats.decisions:
+        return None
+    band = next(iter(bands)) if len(bands) == 1 else ()
+    stats.band = f"[{band[0]:.2f}, {band[1]:.2f}]" if len(band) == 2 else "mixed"
+    stats.by_requirement = dict(reqs.most_common())
+    return stats
+
+
+def _format_unsure(u: UnsureStats) -> list[str]:
+    lines = ["", f"unsure floor: a requirement Jev read inside {u.band}"]
+    lines.append(f"  unsure decisions {u.decisions:>6}   raised {u.raised}   unmet {u.unmet}")
+    lines.append(f"  raised: estimated extra  ${u.estimated_extra_usd:.6f}")
+    if u.measured_rows:
+        lines.append(
+            f"  raised: measured extra   ${u.measured_extra_usd:.6f}  over {u.measured_rows} proxied "
+            "request(s) with a priced counterfactual"
+        )
+    lines.append(f"  raised outcomes      pass {u.raised_pass}  fail {u.raised_fail}")
+    lines.append(f"  unsure, not raised   pass {u.kept_pass}  fail {u.kept_fail}")
+    lines.append("  by requirement       " + "  ".join(f"{k} {n}" for k, n in u.by_requirement.items()))
+    lines.append("  note: the tier the floor passed over has no outcome; compare the two pass rates")
     return lines
 
 
@@ -620,6 +714,9 @@ def format_text(stats: Stats) -> str:
 
     if stats.task_cost is not None:
         lines.extend(_format_task_cost(stats.task_cost))
+
+    if stats.unsure is not None:
+        lines.extend(_format_unsure(stats.unsure))
 
     lines.append("")
     lines.append("counterfactual baselines: what everything would have cost at one tier")

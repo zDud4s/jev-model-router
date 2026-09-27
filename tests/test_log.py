@@ -13,8 +13,10 @@ from jev_model_router.backends.base import BackendError
 from jev_model_router.calls import MIN_EVIDENCE
 from jev_model_router.config import TaskShape
 from jev_model_router.db import _MIGRATIONS, SCHEMA_VERSION, LogEntry, RequestLog, sha256_hex
+from jev_model_router.pricing import Counterfactual
 from jev_model_router.schemas import Usage
 from jev_model_router.stats import collect, format_text
+from jev_model_router.verification import Verdict, VerificationOutcome
 
 from conftest import FakeBackend
 from test_calls import calls as build_call_router
@@ -354,3 +356,41 @@ def test_stats_pools_the_same_shape_the_router_does() -> None:
     assert (row.input_per_output, row.cache_read, row.cache_write) == (
         round(shape.input_per_output, 1), round(shape.cache_read, 3), round(shape.cache_write, 3),
     )
+
+
+def _unsure_reason(**extra) -> str:
+    return json.dumps({"rule": "x", "unsure": {"band": [0.3, 0.7], "min_level": 2.0, **extra}})
+
+
+def test_the_unsure_block_counts_what_the_floor_raised_and_what_it_cost() -> None:
+    log = RequestLog(":memory:")
+    raised = {"reqs": ["reasoning"], "raised_from": ["a", 0.81, 0.001], "extra": 0.004}
+    decided(log, 1, "b", reason=_unsure_reason(**raised))
+    log.set_outcome("rt_1", "pass", None, None)
+    decided(log, 2, "a", reason=_unsure_reason(reqs=["reasoning", "code"]))
+    log.set_outcome("rt_2", "fail", None, None)
+    decided(log, 3, "a", reason=_unsure_reason(reqs=["code"], unmet=True))
+    decided(log, 4, "a", reason=json.dumps({"rule": "x"}))  # Jev was sure: not counted
+    # A proxied request the floor raised: $0.010 on b, where a would have cost $0.002.
+    log.record(LogEntry(
+        request_id="r1", prompt_text="p", tier="b", cost_usd=0.010, route_reason=_unsure_reason(**raised),
+        counterfactuals=[Counterfactual("a", 0.002, True, True), Counterfactual("b", 0.010, True, True)],
+        verification=VerificationOutcome(verdict=Verdict.FAIL),
+    ))
+    u = collect(log).unsure
+    assert (u.decisions, u.raised, u.unmet) == (4, 2, 1)
+    assert u.estimated_extra_usd == pytest.approx(0.008)
+    assert u.measured_extra_usd == pytest.approx(0.008) and u.measured_rows == 1
+    assert (u.raised_pass, u.raised_fail, u.kept_pass, u.kept_fail) == (1, 1, 0, 1)
+    assert u.by_requirement == {"reasoning": 3, "code": 2}
+    assert u.band == "[0.30, 0.70]"
+    text = format_text(collect(log))
+    assert "unsure floor" in text and "raised 2" in text and "measured extra" in text
+    assert collect(RequestLog(":memory:")).unsure is None
+
+
+def test_an_unsure_block_over_two_bands_says_mixed() -> None:
+    log = RequestLog(":memory:")
+    decided(log, 1, "a", reason=_unsure_reason(reqs=["code"]))
+    decided(log, 2, "a", reason=json.dumps({"rule": "x", "unsure": {"reqs": ["code"], "band": [0.4, 0.6]}}))
+    assert collect(log).unsure.band == "mixed"
