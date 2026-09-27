@@ -9,14 +9,16 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import math
 from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
 
 from jev_model_router.app import create_app
+from jev_model_router.calls import CallRouter
 from jev_model_router.capabilities import CapabilityRouter, build_packet, failed_tiers
-from jev_model_router.config import ConfigError, parse_config
+from jev_model_router.config import ConfigError, Prices, parse_config
 from jev_model_router.db import RequestLog
 from jev_model_router.routing import build_router
 from jev_model_router.schemas import Usage
@@ -210,6 +212,16 @@ def test_every_subscription_spent_falls_back_to_the_default():
     r.observe("cx", Usage(), 429)
     d = decide(r, candidates=["sub", "cx", "mid"])
     assert d.tier == "mid"
+
+
+def test_an_injected_call_router_is_the_one_the_router_prices_with():
+    config = parse_config(raw_config())
+    caps = config.router.capabilities
+    calls = CallRouter(config, caps, list_prices={n: c.list_prices for n, c in caps.cards.items()})
+    r = CapabilityRouter(config, ask=Ask(HARD), calls=calls)
+    calls.record_spend("sub", Usage(), 429, Prices())
+    assert math.isinf(r.cost("sub", 1000))
+    assert r.ledger is calls.ledger
 
 
 # ---------------------------------------------------------------- the packet
