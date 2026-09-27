@@ -17,7 +17,7 @@ from jev_model_router import cli
 from jev_model_router.capabilities import CapabilityRouter
 from jev_model_router.config import parse_config
 from jev_model_router.db import RequestLog
-from jev_model_router.mcp_server import PROTOCOL_VERSIONS, McpServer, run
+from jev_model_router.mcp_server import PROTOCOL_VERSIONS, TOOLS, McpServer, run
 
 from test_capabilities import HARD, Ask, raw_config
 
@@ -147,3 +147,14 @@ def test_mcp_uses_a_running_proxy_when_the_env_var_names_one(monkeypatch):
     assert cli._build_parser().parse_args(["mcp"]).url == "http://127.0.0.1:8080"
     monkeypatch.delenv(cli.URL_ENV)
     assert cli._build_parser().parse_args(["mcp"]).url is None
+
+
+async def test_an_outcome_carries_cache_tokens_through(server):
+    props = next(t for t in TOOLS if t["name"] == "report_outcome")["inputSchema"]["properties"]["usage"]["properties"]
+    assert {"cached_tokens", "cache_write_tokens"} <= set(props)
+    routed = json.loads(text_of(await server.handle(call(1, "route", {"task": "Fix it"}))))
+    assert routed["cost_basis"] in ("one_call", "task_shape")
+    usage = {"prompt_tokens": 3000, "completion_tokens": 10, "cached_tokens": 2900, "cache_write_tokens": 60}
+    response = await server.handle(call(2, "report_outcome",
+                                        {"decision_id": routed["decision_id"], "status": "pass", "usage": usage}))
+    assert response["result"]["isError"] is False

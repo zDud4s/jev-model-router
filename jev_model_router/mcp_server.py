@@ -79,8 +79,13 @@ _OUTCOME_SCHEMA: dict[str, Any] = {
         "detail": {"type": "string", "description": "Optional: one line on why."},
         "usage": {
             "type": "object",
-            "properties": {"prompt_tokens": {"type": "integer"}, "completion_tokens": {"type": "integer"}},
-            "description": "Optional: tokens the run used, if known.",
+            "properties": {
+                "prompt_tokens": {"type": "integer"},
+                "completion_tokens": {"type": "integer"},
+                "cached_tokens": {"type": "integer", "description": "Input tokens read from the prompt cache."},
+                "cache_write_tokens": {"type": "integer", "description": "Input tokens written to the prompt cache."},
+            },
+            "description": "Optional: tokens the whole run used, if known. Leave out what you do not know.",
         },
     },
     "required": ["decision_id", "status"],

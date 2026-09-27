@@ -25,6 +25,10 @@ The answer has `model`, `effort`, `runner`, `success` (the router's estimate) an
 `decision_id`. Keep the `decision_id`. If it has a `why`, the router fell back to its
 default (for instance the judge could not be reached): mention it to the user.
 
+`estimated_cost_usd` compares the tiers with each other; it is not a budget for the task.
+`cost_basis` says whether it priced the whole task by its cache-aware shape (`task_shape`)
+or as one call (`one_call`).
+
 ## 2. Run it on what was chosen
 
 - Delegating to a subagent that takes a model and reasoning effort: give it the returned
@@ -49,6 +53,11 @@ with the `decision_id`:
 - `rate_limited`: the model refused for quota or rate limits.
 - `error`: the run broke for a reason that says nothing about the model (tool crash,
   interruption, the choice could not be followed).
+
+If you know the run's tokens, pass `usage`: `prompt_tokens` and `completion_tokens`, and
+`cached_tokens` and `cache_write_tokens` when the runner reports them. They tell the router
+how much of a task's input its cache served. Most runs will not know them: leave out what
+you do not know rather than guessing.
 
 On `fail`, route the retry with `attempt`, `gate_output` and `failed` filled in: the router
 never offers a choice it rates below the one that failed.
