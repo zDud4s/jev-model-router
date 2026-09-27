@@ -715,6 +715,48 @@ choice while the tier that dominates it is eligible and available, which usually
 card is wrong. It can still be picked on an exact tie (config order decides), by a retry after
 the dominating tier failed, while that tier's subscription is locked, or by the fallback.
 
+### When Jev cannot tell: a level floor
+
+A p of 0.5 is Jev saying it does not know. The arithmetic reads it as half a need: about
+0.375 once `floor` is taken off. A level-1 card can absorb that and still reach `target`,
+so the cheapest pick can rest on a reading Jev itself marked as a coin toss. `unsure`
+separates "Jev is sure this is easy" from "Jev does not know":
+
+```yaml
+router:
+  capabilities:
+    unsure:
+      band: [0.30, 0.70]   # p inside, inclusive: Jev could not read this requirement
+      min_level: 2         # card level each such requirement must have on the pick
+```
+
+The idea is Switchboard's ("below 0.70 confidence, never under the balanced tier"). Here
+"balanced" is a card level and not a tier name: discovered tier names change with the
+catalog, and a model released tomorrow gets a card, so the floor covers it with no edit.
+The floor is per requirement, so an unsure reading on one does not force a strong tier on
+the others. It narrows the candidates and leaves the success estimate alone. When no tier
+reaches the level, the pick stands and the log says `unmet`.
+
+Two consequences follow from narrowing instead of re-scoring. First, with the covered
+cheap tiers gone, the rule can end at "none >= target, most likely". Second, the floored
+pick is not always dearer than the one it replaced, so `extra` is signed.
+
+What it does not catch: the judge misses measured above came at p=0.93, confidently. A rule
+keyed on uncertainty never fires on those. Verification, retries and calibration still carry
+them.
+
+Every decision with an unsure requirement logs `reason.unsure`. When the floor changed the
+tier, it also logs the tier that would have won (`raised_from`) and the estimated difference
+(`extra`). `stats` prints an `unsure floor` block with:
+
+- the counts;
+- the estimated extra;
+- for proxied requests, the measured extra, against the passed-over tier's counterfactual row;
+- pass/fail for the raised decisions beside the unsure ones the floor left alone.
+
+The tier that was not called has no outcome, so those two pass rates are all the evidence
+the log can give on whether the floor pays for itself.
+
 ### Every model on an API: OpenRouter
 
 A `discover` source can be any API with an OpenAI-compatible `GET /models`. Every model

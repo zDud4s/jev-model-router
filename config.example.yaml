@@ -46,6 +46,11 @@ router:
   #     input_per_output: 295
   #     cache_read: 0.971
   #     cache_write: 0.026
+  #   # A requirement Jev reads inside `band` (it cannot tell) admits only tiers
+  #   # whose card is at `min_level` on it. `unsure: {}` takes these defaults.
+  #   unsure:
+  #     band: [0.30, 0.70]
+  #     min_level: 2
 
 tiers:
   # Local model. No prices means it costs zero.
