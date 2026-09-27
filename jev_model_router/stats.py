@@ -470,7 +470,8 @@ def _unsure(log: RequestLog) -> UnsureStats | None:
         )
     ]
     stats = UnsureStats(band="")
-    bands: set[tuple[float, ...]] = set()
+    bands: set[tuple[float, float]] = set()
+    mixed = False
     reqs: Counter[str] = Counter()
     for text, outcome, row_id, cost in rows:
         try:
@@ -480,12 +481,27 @@ def _unsure(log: RequestLog) -> UnsureStats | None:
         if not isinstance(unsure, dict):
             continue
         stats.decisions += 1
-        bands.add(tuple(unsure.get("band") or ()))
-        reqs.update(unsure.get("reqs") or [])
+
+        band = unsure.get("band")
+        if (
+            isinstance(band, list)
+            and len(band) == 2
+            and all(isinstance(b, (int, float)) for b in band)
+        ):
+            bands.add((float(band[0]), float(band[1])))
+        else:
+            mixed = True
+
+        req_list = unsure.get("reqs")
+        if isinstance(req_list, list):
+            reqs.update(r for r in req_list if isinstance(r, str))
+
         raised_from = unsure.get("raised_from")
+        raised = isinstance(raised_from, list) and bool(raised_from) and isinstance(raised_from[0], str)
+
         if unsure.get("unmet"):
             stats.unmet += 1
-        if raised_from:
+        if raised:
             stats.raised += 1
             if isinstance(unsure.get("extra"), (int, float)):
                 stats.estimated_extra_usd += unsure["extra"]
@@ -497,13 +513,23 @@ def _unsure(log: RequestLog) -> UnsureStats | None:
                 if passed_over:
                     stats.measured_extra_usd += cost - passed_over[0]["cost_usd"]
                     stats.measured_rows += 1
-        if outcome in ("pass", "fail"):
-            key = f"{'raised' if raised_from else 'kept'}_{outcome}"
-            setattr(stats, key, getattr(stats, key) + 1)
+        if outcome == "pass":
+            if raised:
+                stats.raised_pass += 1
+            else:
+                stats.kept_pass += 1
+        elif outcome == "fail":
+            if raised:
+                stats.raised_fail += 1
+            else:
+                stats.kept_fail += 1
     if not stats.decisions:
         return None
-    band = next(iter(bands)) if len(bands) == 1 else ()
-    stats.band = f"[{band[0]:.2f}, {band[1]:.2f}]" if len(band) == 2 else "mixed"
+    if not mixed and len(bands) == 1:
+        low, high = next(iter(bands))
+        stats.band = f"[{low:.2f}, {high:.2f}]"
+    else:
+        stats.band = "mixed"
     stats.by_requirement = dict(reqs.most_common())
     return stats
 
@@ -519,7 +545,8 @@ def _format_unsure(u: UnsureStats) -> list[str]:
         )
     lines.append(f"  raised outcomes      pass {u.raised_pass}  fail {u.raised_fail}")
     lines.append(f"  unsure, not raised   pass {u.kept_pass}  fail {u.kept_fail}")
-    lines.append("  by requirement       " + "  ".join(f"{k} {n}" for k, n in u.by_requirement.items()))
+    if u.by_requirement:
+        lines.append("  by requirement       " + "  ".join(f"{k} {n}" for k, n in u.by_requirement.items()))
     lines.append("  note: the tier the floor passed over has no outcome; compare the two pass rates")
     return lines
 

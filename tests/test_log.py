@@ -394,3 +394,35 @@ def test_an_unsure_block_over_two_bands_says_mixed() -> None:
     decided(log, 1, "a", reason=_unsure_reason(reqs=["code"]))
     decided(log, 2, "a", reason=json.dumps({"rule": "x", "unsure": {"reqs": ["code"], "band": [0.4, 0.6]}}))
     assert collect(log).unsure.band == "mixed"
+
+
+def test_the_unsure_block_ignores_what_it_cannot_read() -> None:
+    log = RequestLog(":memory:")
+    raised = {"reqs": ["reasoning"], "raised_from": ["a", 0.81, 0.001], "extra": 0.004}
+    # An unpriced counterfactual for the raised-from tier: no known cost, so not measured.
+    log.record(LogEntry(
+        request_id="r1", prompt_text="p", tier="b", cost_usd=0.010, route_reason=_unsure_reason(**raised),
+        counterfactuals=[Counterfactual("a", 0.002, False, True)],
+    ))
+    # Route outcomes that are neither pass nor fail.
+    decided(log, 1, "a", reason=_unsure_reason(reqs=["code"]))
+    log.set_outcome("rt_1", "rate_limited", None, None)
+    decided(log, 2, "a", reason=_unsure_reason(reqs=["code"]))
+    log.set_outcome("rt_2", "error", None, None)
+    # A verification verdict of ERROR: the verifier itself broke, not a judgement.
+    log.record(LogEntry(
+        request_id="r2", prompt_text="p", tier="a", cost_usd=0.001, route_reason=_unsure_reason(reqs=["code"]),
+        verification=VerificationOutcome(verdict=Verdict.ERROR),
+    ))
+    # Malformed `unsure` fields: must not crash, and must not be read as raised.
+    decided(log, 3, "a", reason=json.dumps(
+        {"rule": "x", "unsure": {"raised_from": 5, "band": 0.5, "reqs": "code"}}
+    ))
+
+    u = collect(log).unsure
+    assert u.decisions == 5
+    assert u.measured_rows == 0 and u.measured_extra_usd == 0.0
+    assert (u.raised_pass, u.raised_fail, u.kept_pass, u.kept_fail) == (0, 0, 0, 0)
+    assert u.raised == 1  # only the first entry has a well-formed raised_from
+    assert u.band == "mixed"  # the malformed band forces it
+    assert isinstance(collect(log).to_dict()["unsure"], dict)
