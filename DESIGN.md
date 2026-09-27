@@ -1129,9 +1129,10 @@ tiers, and comparing the order against the router's one-call formula: the cheape
 nine never changes, on any of the 1461 tasks. What changes is which of a pair is cheaper —
 three pairs, and only under `rule: target`, which picks the cheapest tier that still clears
 the target rather than the outright cheapest. The cause is not the tiers' list prices, which
-differ modestly; it is their cache prices, which differ by an order of magnitude (a 2.5% cache
-discount against a 90% one) and which the one-call formula never looks at, since a single call
-carries almost no cache.
+differ modestly; it is their cache-read prices, each measured as a share of that tier's own
+input rate: fable-5.1 reads its cache at 2.5% of its input rate, opus-5 at 10% of its — a
+four-fold gap the one-call formula never looks at, since a single call carries almost no
+cache.
 
 **The split.** `calls.py` is a new module that owns what a call costs right now: prices, the
 subscription ledger (a 429 lock already made a tier's cost `inf`; that was moved here
@@ -1155,8 +1156,8 @@ preview row — is never used this way either; it is not a real price for anythi
 explicit tier, written under `tiers:`, is never repriced by this rule: the operator wrote it
 by hand. Where the listing does reprice a card, and a configured profile disagrees with it,
 startup prints one line naming the profile and the listed model it was checked against
-(`profile gpt-5.6-sol list_prices 4/20; listing says 2/10`) — this is how a stale profile
-stops being invisible.
+(`profile gpt-5.6-sol list_prices 4/20; listing says 2/10 (openai/gpt-5.6-sol)`) — this is
+how a stale profile stops being invisible.
 
 **The shape orders tiers; it does not budget a task.** `CallRouter.task_cost` prices a task
 by its shape, scaled to `card.output_tokens` — one card-sized answer's worth of output — not
