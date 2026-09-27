@@ -10,6 +10,7 @@ import asyncio
 import copy
 import json
 import math
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -17,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from jev_model_router.app import create_app
 from jev_model_router.calls import CallRouter
-from jev_model_router.capabilities import CapabilityRouter, build_packet, failed_tiers
+from jev_model_router.capabilities import CapabilityRouter, Option, build_packet, failed_tiers
 from jev_model_router.config import ConfigError, Prices, parse_config
 from jev_model_router.db import RequestLog
 from jev_model_router.routing import build_router
@@ -368,3 +369,64 @@ def test_a_tier_the_catalog_finds_unavailable_dominates_nothing_in_healthz(backe
                      router=CapabilityRouter(config, ask=Ask()), catalog_check=lambda config: report)
     with TestClient(app) as client:
         assert client.get("/healthz").json()["routing"]["dominated"] == {"top": ["sub"]}
+
+
+# ---------------------------------------------------------------- a whole task
+# Two tiers that both cover a hard task: one dearer per token but reading its
+# cache at 2.5% of input, one cheaper per token reading it at 10%. Invented names;
+# the prices are the shape of two real listings measured on 2026-09-26.
+CACHEY = {"input": 10.0, "output": 50.0, "cache_read": 0.25, "cache_write": 12.5}
+PLAIN = {"input": 5.0, "output": 25.0, "cache_read": 0.5, "cache_write": 6.25}
+CACHE_HEAVY = {"input_per_output": 295, "cache_read": 0.99, "cache_write": 0.005}
+POOLED = {"input_per_output": 295, "cache_read": 0.971, "cache_write": 0.026}
+PAIR = ["sub", "cx", "top"]
+
+
+def cache_router(**caps):
+    cards = copy.deepcopy(CAPS["cards"])
+    cards["sub"]["list_prices"] = CACHEY
+    cards["cx"] = {"levels": {"reasoning": 3, "code": 3}, "list_prices": PLAIN}
+    return router(Ask(HARD), cards=cards, **caps)
+
+
+def decide_task(r, candidates=PAIR, task=True):
+    return asyncio.run(r.decide(make_request(), list(candidates), task=task))
+
+
+def test_a_task_goes_to_the_tier_whose_cache_makes_it_cheaper():
+    r = cache_router(task_shape=CACHE_HEAVY)
+    assert decide_task(r, task=False).tier == "cx"  # one call: cheaper per token wins
+    d = decide_task(r)
+    assert d.tier == "sub" and d.detail["cost_basis"] == "task_shape"
+    reason = json.loads(d.reason)
+    assert reason["shape_flipped"] is True and reason["shapeless_pick"] == "cx"
+    assert d.detail["shapeless_pick"] == "cx"
+
+
+def test_a_shape_too_weak_to_reorder_leaves_the_pick():
+    d = decide_task(cache_router(task_shape=POOLED))
+    assert d.tier == "cx" and d.detail["cost_basis"] == "task_shape"
+    assert "shape_flipped" not in json.loads(d.reason)
+
+
+def test_without_task_the_price_is_todays():
+    shaped, plain = cache_router(task_shape=CACHE_HEAVY), cache_router()
+    a, b = decide_task(shaped, task=False), decide_task(plain, task=False)
+    assert a.tier == b.tier and a.detail["options"] == b.detail["options"]
+    assert a.detail["cost_basis"] == "one_call"
+
+
+def test_expected_cost_picks_the_same_tier_when_every_cost_is_scaled_alike():
+    r = router(Ask(HARD), rule="expected_cost")
+    live = [Option("cheap", 0.4, 0.001), Option("mid", 0.75, 0.01), Option("top", 0.95, 0.05)]
+    request = make_request()
+    first = r._pick(live, HARD, request)[0].tier
+    assert r._pick([replace(o, cost=o.cost * 37) for o in live], HARD, request)[0].tier == first
+
+
+def test_one_observed_tier_without_a_config_shape_prices_the_whole_decision_as_one_call():
+    r = cache_router()
+    for _ in range(5):
+        r.calls.record_task("sub", Usage(prompt_tokens=300_000, completion_tokens=1000, cached_tokens=299_000))
+    d = decide_task(r)
+    assert d.detail["cost_basis"] == "one_call" and d.tier == "cx"

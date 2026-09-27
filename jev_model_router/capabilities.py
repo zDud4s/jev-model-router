@@ -46,7 +46,7 @@ import json
 import math
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, replace
 from typing import Any, Awaitable, Callable
 
 import httpx
@@ -238,6 +238,8 @@ class CapabilityRouter:
             "failure": asdict(caps.failure),
             "family_scales": caps.family_scales,
         }
+        if caps.task_shape is not None:  # only when set, so configs without one keep their fingerprint
+            spec["task_shape"] = asdict(caps.task_shape)
         self.fingerprint = "capabilities:" + hashlib.sha256(
             json.dumps(spec, sort_keys=True).encode()
         ).hexdigest()[:12]
@@ -298,8 +300,14 @@ class CapabilityRouter:
         card = self._caps.cards[tier_name]
         return self.calls.cost(tier_name, prompt_tokens + card.input_overhead, card.output_tokens)
 
+    def task_cost(self, tier_name: str, prompt_tokens: int) -> float:
+        """A whole task on this tier by its shape, scaled to one answer's output; `cost` when it has none."""
+        card = self._caps.cards[tier_name]
+        return self.calls.task_cost(tier_name, prompt_tokens + card.input_overhead, card.output_tokens)
+
     async def decide(
-        self, request: ChatCompletionRequest, candidates: list[str], *, also_failed: frozenset[str] = frozenset()
+        self, request: ChatCompletionRequest, candidates: list[str], *, also_failed: frozenset[str] = frozenset(),
+        task: bool = False,
     ) -> RouteDecision:
         explicit = _explicit_preference(self._config, request)
         if explicit and explicit in candidates and not also_failed:
@@ -342,8 +350,20 @@ class CapabilityRouter:
                     jev_ms=jev_ms, escalation=True,
                 )
             live = stronger
+        # A whole task is priced by its shape only when every tier left has one.
+        # Mixed, a measured tier (input ~ 300 x output) would sit beside one priced
+        # as a single call (~5k input) and look 10-50x dearer for having been measured.
+        basis, one_call = "one_call", live
+        if task and all(self.calls.shape_for(o.tier) is not None for o in live):
+            basis = "task_shape"
+            repriced = {o.tier: replace(o, cost=self.task_cost(o.tier, tokens)) for o in live}
+            live = [repriced[o.tier] for o in live]
+            # Tiers already out (locked, below a failed tier) keep their one-call figure in the trace.
+            options = [repriced.get(o.tier, o) for o in options]
         pick, rule, weighed = self._pick(live, needs, request)
         expected = weighed.pop("expected", {})
+        # What one-call prices would have picked, by the same rule on the same tiers.
+        shapeless = self._pick(one_call, needs, request)[0] if basis == "task_shape" else pick
         # The cheaper tiers it passed over, and why: that is what a wrong card
         # looks like in the log, and what recalibration reads.
         cheaper = sorted((o for o in live if o.cost < pick.cost), key=lambda o: -o.cost)[:3]
@@ -356,6 +376,9 @@ class CapabilityRouter:
         }
         if failed:
             reason["skipped_failed"] = sorted(failed)
+        if shapeless.tier != pick.tier:
+            reason["shape_flipped"] = True
+            reason["shapeless_pick"] = shapeless.tier
         return RouteDecision(
             tier=pick.tier,
             score=pick.success,
@@ -363,6 +386,8 @@ class CapabilityRouter:
             reason=json.dumps(reason, separators=(",", ":")),
             detail={
                 "rule": rule,
+                "cost_basis": basis,
+                "shapeless_pick": shapeless.tier if shapeless.tier != pick.tier else None,
                 "packet": packet,
                 "needs": needs,
                 "jev_ms": jev_ms,

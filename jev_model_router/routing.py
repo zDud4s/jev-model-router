@@ -56,13 +56,16 @@ class Router(Protocol):
     name: str
 
     def decide(
-        self, request: ChatCompletionRequest, candidates: list[str]
+        self, request: ChatCompletionRequest, candidates: list[str], *, task: bool = False
     ) -> RouteDecision | Awaitable[RouteDecision]:
         """Return a decision naming one of `candidates`. Never called with an empty list.
 
         May be a coroutine: a router that asks a service before it decides (the
         capabilities router asks Jev) cannot answer synchronously, and the app
         awaits whatever it gets back.
+
+        `task`: the request is a whole routed task (`/v1/route`), not one call.
+        A router that weighs cost may price it as one; the others ignore it.
         """
         ...
 
@@ -95,7 +98,7 @@ class StaticRouter:
         self._default = config.router.default_tier or next(iter(config.tiers))
 
     def decide(
-        self, request: ChatCompletionRequest, candidates: list[str]
+        self, request: ChatCompletionRequest, candidates: list[str], *, task: bool = False
     ) -> RouteDecision:
         explicit = _explicit_preference(self._config, request)
         preferred = explicit or self._default
@@ -186,7 +189,7 @@ class ClassifierRouter:
         return self._threshold
 
     def decide(
-        self, request: ChatCompletionRequest, candidates: list[str]
+        self, request: ChatCompletionRequest, candidates: list[str], *, task: bool = False
     ) -> RouteDecision:
         explicit = _explicit_preference(self._config, request)
         if explicit and explicit in candidates:
