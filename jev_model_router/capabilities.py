@@ -448,11 +448,25 @@ class CapabilityRouter:
         return sorted(key for key, p in needs.items() if low <= p <= high)
 
     def _floored(self, options: list[Option], unsure: list[str]) -> list[Option]:
-        """The options whose card is at `min_level` on every requirement Jev could not read."""
+        """The options whose calibrated miss is at or below `min_level`'s, on every requirement Jev could not read.
+
+        Read on the card's level as calibrated -- its effective miss, capped and
+        scaled the same way `success()` (and `dominance.py`) cap and scale it --
+        not the raw level. A family whose fitted scale makes a lower level miss
+        as little as `min_level` still passes: the floor never excludes a tier
+        that dominates one it keeps. Without fitted `family_scales` this reduces
+        to the level comparison, since `_miss` is non-increasing in the level.
+        """
         if not unsure:
             return options
-        bar = self._caps.unsure.min_level  # type: ignore[union-attr] - unsure is empty without it
-        return [o for o in options if all(self._caps.cards[o.tier].levels.get(r, 0.0) >= bar for r in unsure)]
+        bar_level = self._caps.unsure.min_level  # type: ignore[union-attr] - unsure is empty without it
+        bar = min(1.0, self._caps.miss_scale * self._miss(bar_level))
+        return [
+            o for o in options
+            if all(min(1.0, self.scale_for(o.tier) * self._miss(self._caps.cards[o.tier].levels.get(r, 0.0)))
+                   <= bar + 1e-12
+                   for r in unsure)
+        ]
 
     def _pick(
         self, live: list[Option], needs: dict[str, float], request: ChatCompletionRequest

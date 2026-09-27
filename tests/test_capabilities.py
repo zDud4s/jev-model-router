@@ -540,6 +540,36 @@ def test_under_expected_cost_the_redo_tier_also_clears_the_floor():
     assert cards[d.detail["redo_tier"]].levels["reasoning"] >= 2
 
 
+def _with_flo(**caps_overrides: Any) -> Any:
+    """raw_config with an extra tier 'flo', a level-1 card, for a fitted-scale scenario."""
+    raw = raw_config(cards={**CAPS["cards"], "flo": {"levels": {"reasoning": 1, "code": 1},
+                                                       "list_prices": {"input": 1.0, "output": 5.0}}},
+                      **caps_overrides)
+    raw["tiers"]["flo"] = {"backend": "openai_compatible", "model": "flo-model",
+                            "base_url": "https://example.invalid/v1", "context_window": 200000,
+                            "supports_tools": True}
+    return raw
+
+
+def test_the_floor_reads_a_fitted_scales_calibrated_miss_not_the_raw_level():
+    # flo's card is level 1 on reasoning, but its fitted family scale (0.3) makes
+    # its effective miss (0.3 * 0.5 = 0.15) as good as the level-2 bar (1.0 * 0.2).
+    r = CapabilityRouter(parse_config(_with_flo(family_scales={"flo": 0.3}, unsure={})), ask=Ask(UNSURE))
+    options = [Option("cheap", 0.0, 0.0), Option("mid", 0.0, 0.0), Option("flo", 0.0, 0.0)]
+    floored = {o.tier for o in r._floored(options, ["reasoning"])}
+    assert floored == {"mid", "flo"}  # cheap (scale 1.0) still misses the bar; flo, calibrated, clears it
+
+
+def test_the_floor_never_drops_a_tier_that_dominates_one_it_keeps():
+    config = parse_config(_with_flo(family_scales={"flo": 0.3}, unsure={}))
+    r = CapabilityRouter(config, ask=Ask(UNSURE))
+    # flo's calibrated miss beats mid's on every requirement at no more cost: it dominates mid.
+    assert "flo" in r.dominated.get("mid", [])
+    d = decide(r, candidates=["cheap", "mid", "flo"])
+    # The floor must not exclude flo (a dominator) while mid (what it dominates) stays eligible.
+    assert d.tier == "flo"
+
+
 def test_a_shape_flip_is_measured_on_the_floored_tiers():
     cards = copy.deepcopy(CAPS["cards"])
     cards["sub"]["list_prices"] = CACHEY

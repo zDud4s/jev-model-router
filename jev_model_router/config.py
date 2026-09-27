@@ -641,9 +641,12 @@ class UnsureFloor:
 
     A requirement whose p lies inside `band` (inclusive) is one Jev could not
     tell either way, and the cheapest tier that reaches `target` may then rest
-    on a coin toss. The floor keeps only tiers whose card level on that
-    requirement is at least `min_level`. It is a level, not a tier name, so a
-    model released tomorrow is covered by the card it gets.
+    on a coin toss. The floor keeps only tiers whose card reads at least as
+    well as `min_level` on that requirement, read as the card is calibrated --
+    its effective miss (level and family scale together), not the raw level --
+    so a family whose fitted scale makes a lower level miss as little as
+    `min_level` still passes. It is a level, not a tier name, so a model
+    released tomorrow is covered by the card it gets.
     """
 
     band: tuple[float, float] = (0.30, 0.70)

@@ -737,6 +737,14 @@ The floor is per requirement, so an unsure reading on one does not force a stron
 the others. It narrows the candidates and leaves the success estimate alone. When no tier
 reaches the level, the pick stands and the log says `unmet`.
 
+The floor is read on the card's level as calibrated, not the raw number: a tier passes when
+its effective miss (level and fitted `family_scales` together, capped the same way
+`success()` and `dominance.py` cap it) is no worse than `min_level`'s. A family whose fitted
+scale makes level 1 miss as little as `min_level` passes at level 1. Comparing raw levels
+would break the promise `dominance.py` makes -- that a dominated tier is never the cheapest
+adequate choice while its dominator is eligible -- whenever a fitted scale separates two
+tiers that share a level, or puts a lower level ahead of a higher one.
+
 Two consequences follow from narrowing instead of re-scoring. First, with the covered
 cheap tiers gone, the rule can end at "none >= target, most likely". Second, the floored
 pick is not always dearer than the one it replaced, so `extra` is signed.
