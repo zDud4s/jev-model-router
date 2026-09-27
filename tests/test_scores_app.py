@@ -527,6 +527,17 @@ def test_the_tiers_view_shows_each_level_its_source_evidence_and_the_profile_it_
     assert set(g["evidence"]["benchmarks"]) == {"thin", "detached", "unlinked"}
 
 
+def test_the_tiers_view_shows_a_billed_tiers_own_prices(backend_factory):
+    raw = raw_config()
+    raw["catalog"] = {"check_on_start": True, "path": None}
+    raw["tiers"]["billed"] = {"backend": "claude_cli", "model": "acme-large", "effort": "high",
+                              "base_url": "C:/bin/cli.exe", "prices": {"input": 5.0, "output": 25.0}}
+    app = create_app(parse_config(raw), backend_factory=backend_factory, log=RequestLog(":memory:"),
+                     catalog_check=lambda c: REPORT)
+    rows = {row["name"]: row for row in _tiers(app)["tiers"]}
+    assert rows["billed"]["prices_from"] == "tier"
+
+
 def test_the_tiers_view_without_benchmarks_is_the_profile_cards(tmp_path, backend_factory):
     raw = raw_config()
     del raw["router"]["capabilities"]["benchmarks"]

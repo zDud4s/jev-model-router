@@ -182,6 +182,8 @@ def listing_index(
         for model in served.models.values():
             if not model.prices or model.same_as is not None or model.unpriceable:
                 continue
+            if not model.prices.get("input") and not model.prices.get("output"):
+                continue  # a promo/preview 0/0 entry is not a real price for anything
             index.setdefault(key(model.id), []).append((source.base_url, model.id, Prices.parse(model.prices)))
     return index
 
@@ -415,8 +417,11 @@ def stale_profiles(config: Config) -> list[str]:
         mine, listed = profile.list_prices, card.list_prices
         if (mine.input, mine.output) == (listed.input, listed.output):
             continue
+        # A profile is usually a glob over several models, so the line names
+        # the one the listing actually contradicts it about.
+        model_id = card.list_prices_from.split(" ", 1)[1]
         line = (f"profile {profile.match} list_prices {mine.input:g}/{mine.output:g}; "
-                f"listing says {listed.input:g}/{listed.output:g}")
+                f"listing says {listed.input:g}/{listed.output:g} ({model_id})")
         if line not in lines:
             lines.append(line)
     return lines

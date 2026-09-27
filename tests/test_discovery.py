@@ -249,8 +249,24 @@ def test_a_hand_written_card_says_it_came_from_the_config():
 
 def test_a_profile_the_listing_contradicts_is_named_once():
     cheaper, _, _ = with_listing(or_entry("anthropic/claude-opus-5.5", prompt=4.0, completion=20.0))
-    assert stale_profiles(cheaper) == ["profile claude-opus-* list_prices 5/25; listing says 4/20"]
+    assert stale_profiles(cheaper) == [
+        "profile claude-opus-* list_prices 5/25; listing says 4/20 (anthropic/claude-opus-5.5)"
+    ]
     assert stale_profiles(with_listing(LISTED)[0]) == []
+
+
+def test_a_profile_covering_two_models_is_named_once_per_model():
+    claude_models = {**REPORT.discovered["claude"].models,
+                     "claude-opus-6": Offered("claude-opus-6", efforts=EFFORTS, min_cli="2.1.280")}
+    rep = report(**{**REPORT.discovered,
+                     "claude": Source(name="claude", models=claude_models, cli_version="2.1.280"),
+                     "or": or_listing(or_entry("anthropic/claude-opus-5.5", prompt=4.0, completion=20.0),
+                                      or_entry("anthropic/claude-opus-6", prompt=6.0, completion=30.0))})
+    config, _, _ = expand(parse_config(listing_raw()), rep, None)
+    assert stale_profiles(config) == [
+        "profile claude-opus-* list_prices 5/25; listing says 4/20 (anthropic/claude-opus-5.5)",
+        "profile claude-opus-* list_prices 5/25; listing says 6/30 (anthropic/claude-opus-6)",
+    ]
 
 
 def test_startup_names_a_stale_profile(backend_factory, capsys):
@@ -260,7 +276,15 @@ def test_startup_names_a_stale_profile(backend_factory, capsys):
                                                                      completion=20.0))})
     create_app(parse_config(raw), backend_factory=backend_factory, log=RequestLog(":memory:"),
                catalog_check=lambda config: rep)
-    assert "profile claude-opus-* list_prices 5/25; listing says 4/20" in capsys.readouterr().err
+    assert "profile claude-opus-* list_prices 5/25; listing says 4/20 (anthropic/claude-opus-5.5)" in \
+        capsys.readouterr().err
+
+
+def test_a_zero_priced_listing_entry_does_not_free_a_subscription_tier():
+    config, _, _ = with_listing(or_entry("anthropic/claude-opus-5.5", prompt=0.0, completion=0.0))
+    card = config.router.capabilities.cards[OPUS]
+    assert (card.list_prices.input, card.list_prices.output) == (5.0, 25.0)
+    assert card.list_prices_from == "profile:claude-opus-*"
 
 
 # ---------------------------------------------------------------- config
