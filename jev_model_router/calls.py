@@ -81,6 +81,27 @@ MIN_EVIDENCE = 5
 WINDOW = 200
 
 
+def accepts_task_row(
+    prompt_tokens: int, completion_tokens: int, cached_tokens: int, cache_write_tokens: int, reports_cache: bool,
+) -> bool:
+    """Whether one outcome's tokens count as task-shape evidence.
+
+    The rule `CallRouter.record_task` applies to a live call; `stats._task_cost` pools the same
+    log rows without a `CallRouter` in hand, and shares this function so the two never disagree
+    about what counts.
+    """
+    if prompt_tokens <= 0 or completion_tokens <= 0:
+        return False
+    if cached_tokens < 0 or cache_write_tokens < 0:
+        return False
+    cache = cached_tokens + cache_write_tokens
+    if cache > prompt_tokens:
+        return False  # doesn't add up: e.g. a caller reporting fresh input only, not on top
+    if cache <= 0 and not reports_cache:
+        return False  # a caller that does not report the cache, not a task that never cached
+    return True
+
+
 def pooled_shape(rows: Sequence[tuple[int, int, int, int]]) -> TaskShape | None:
     """(input, cached, written, output) per task, pooled: sums, not a mean of ratios, so long tasks weigh more."""
     total_in = sum(r[0] for r in rows)
@@ -144,16 +165,12 @@ class CallRouter:
         Without cache tokens it is none -- unless this tier has already shown it reports the
         cache, in which case a cold task is real evidence too, not a caller staying silent.
         """
-        if usage.prompt_tokens <= 0 or usage.completion_tokens <= 0:
+        if not accepts_task_row(
+            usage.prompt_tokens, usage.completion_tokens, usage.cached_tokens, usage.cache_write_tokens,
+            tier_name in self._reports_cache,
+        ):
             return False
-        if usage.cached_tokens < 0 or usage.cache_write_tokens < 0:
-            return False
-        cache = usage.cached_tokens + usage.cache_write_tokens
-        if cache > usage.prompt_tokens:
-            return False  # doesn't add up: e.g. a caller reporting fresh input only, not on top
-        if cache <= 0 and tier_name not in self._reports_cache:
-            return False  # a caller that does not report the cache, not a task that never cached
-        if cache > 0:
+        if usage.cached_tokens + usage.cache_write_tokens > 0:
             self._reports_cache.add(tier_name)
         self._tasks.setdefault(tier_name, deque(maxlen=WINDOW)).append(
             (usage.prompt_tokens, usage.cached_tokens, usage.cache_write_tokens, usage.completion_tokens)
@@ -200,4 +217,4 @@ class CallRouter:
         return {"subscriptions": self.ledger.state()}
 
 
-__all__ = ["CallRouter", "MIN_EVIDENCE", "QuotaLedger", "TaskShape", "WINDOW", "pooled_shape"]
+__all__ = ["CallRouter", "MIN_EVIDENCE", "QuotaLedger", "TaskShape", "WINDOW", "accepts_task_row", "pooled_shape"]

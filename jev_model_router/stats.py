@@ -29,10 +29,13 @@ by-tier table.
 
 from __future__ import annotations
 
+import json
 from collections import Counter
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .calls import MIN_EVIDENCE, WINDOW, accepts_task_row, pooled_shape
+from .config import TaskShape
 from .db import RequestLog
 
 
@@ -171,6 +174,30 @@ DRIFT_TOLERANCE = 0.05
 
 
 @dataclass
+class TierShape:
+    tier: str
+    evidence: int  # outcomes that reported cache tokens
+    without_cache: int  # outcomes with usage but no cache tokens: a caller that never reports them
+    source: str  # "observed:<n>" | "config" | "none"
+    input_per_output: float | None = None
+    cache_read: float | None = None
+    cache_write: float | None = None
+
+
+@dataclass
+class TaskCostStats:
+    """Route-only decisions: the shape each tier is priced by, and which decisions it changed.
+
+    An observed shape is the traffic a tier was sent as much as the model: a tier
+    routed harder tasks runs longer loops and looks dearer per output token.
+    """
+
+    config_shape: dict[str, Any] | None
+    tiers: list[TierShape] = field(default_factory=list)
+    flips: dict[str, int] = field(default_factory=dict)  # "<chosen> over <shapeless pick>" -> decisions
+
+
+@dataclass
 class Stats:
     requests: int
     errors: int
@@ -183,12 +210,13 @@ class Stats:
     verification: VerificationStats | None = None
     classifier: ClassifierStats | None = None
     billing: BillingStats | None = None
+    task_cost: TaskCostStats | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
 
 
-def collect(log: RequestLog) -> Stats:
+def collect(log: RequestLog, task_shape: TaskShape | None = None) -> Stats:
     totals = log.query(
         """
         SELECT COUNT(*)                                       AS requests,
@@ -255,6 +283,7 @@ def collect(log: RequestLog) -> Stats:
         verification=_verification(log),
         classifier=_classifier(log),
         billing=_billing(log),
+        task_cost=_task_cost(log, task_shape),
         requests=totals["requests"],
         errors=totals["errors"],
         total_cost_usd=totals["cost"],
@@ -329,6 +358,68 @@ def _format_billing(b: BillingStats) -> list[str]:
             f"  RECOVERABLE {b.recoverable_rows} row(s) with zero tokens and a provider id -- "
             "abandoned streams, costed at nothing: run `jev-model-router reconcile`"
         )
+    return lines
+
+
+def _task_cost(log: RequestLog, task_shape: TaskShape | None) -> TaskCostStats | None:
+    """None when the log has no route-only decisions at all, so the report stays silent about it."""
+    rows = log.query(
+        "SELECT tier, route_reason, outcome_input_tokens AS input, outcome_output_tokens AS output, "
+        "outcome_cached_tokens AS cached, outcome_cache_write_tokens AS written FROM route_decisions ORDER BY id"
+    )
+    if not rows:
+        return None
+    evidence: dict[str, list[tuple[int, int, int, int]]] = {}
+    without: Counter[str] = Counter()
+    flips: Counter[str] = Counter()
+    # Pooling replays the log in order and applies the same row rule `CallRouter.record_task`
+    # applies live, tracked here rather than through a `CallRouter` -- stats has no config, prices
+    # or ledger to build one, only the log.
+    reports_cache: set[str] = set()
+    for row in rows:
+        tier = row["tier"]
+        evidence.setdefault(tier, [])
+        if row["input"] is not None and row["output"] is not None:
+            cached, written = row["cached"] or 0, row["written"] or 0
+            if accepts_task_row(row["input"], row["output"], cached, written, tier in reports_cache):
+                if cached + written > 0:
+                    reports_cache.add(tier)
+                evidence[tier].append((row["input"], cached, written, row["output"]))
+            else:
+                without[tier] += 1
+        try:
+            reason = json.loads(row["route_reason"] or "")
+        except ValueError:
+            continue
+        if isinstance(reason, dict) and reason.get("shapeless_pick"):
+            flips[f"{tier} over {reason['shapeless_pick']}"] += 1
+    tiers = []
+    for tier, seen in sorted(evidence.items()):
+        shape = pooled_shape(seen[-WINDOW:]) if len(seen) >= MIN_EVIDENCE else task_shape
+        tiers.append(TierShape(
+            tier=tier, evidence=len(seen), without_cache=without[tier], source=shape.source if shape else "none",
+            input_per_output=round(shape.input_per_output, 1) if shape else None,
+            cache_read=round(shape.cache_read, 3) if shape else None,
+            cache_write=round(shape.cache_write, 3) if shape else None,
+        ))
+    return TaskCostStats(config_shape=asdict(task_shape) if task_shape else None, tiers=tiers, flips=dict(flips))
+
+
+def _format_task_cost(t: TaskCostStats) -> list[str]:
+    lines = ["", "task cost (route-only decisions): the shape each tier's task is priced by"]
+    if t.config_shape:
+        c = t.config_shape
+        lines.append(f"  config          {c['input_per_output']:g} in/out, read {c['cache_read']:.3f}, "
+                     f"write {c['cache_write']:.3f}")
+    for row in t.tiers:
+        shape = (f"{row.input_per_output:g} in/out, read {row.cache_read:.3f}, write {row.cache_write:.3f}"
+                 if row.input_per_output is not None else "one call")
+        lines.append(f"  {row.tier:<28} {row.source:<12} {shape}")
+        if row.without_cache:
+            lines.append(f"      note: {row.without_cache} outcome(s) with usage but no cache tokens")
+    for pair, n in sorted(t.flips.items(), key=lambda kv: -kv[1]):
+        lines.append(f"  shape flipped   {pair}: {n}")
+    lines.append("  note: an observed shape is the traffic a tier was sent as much as the model")
     return lines
 
 
@@ -519,6 +610,9 @@ def format_text(stats: Stats) -> str:
 
     if stats.verification is not None:
         lines.extend(_format_verification(stats.verification, stats.total_cost_usd))
+
+    if stats.task_cost is not None:
+        lines.extend(_format_task_cost(stats.task_cost))
 
     lines.append("")
     lines.append("counterfactual baselines: what everything would have cost at one tier")

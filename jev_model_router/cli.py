@@ -896,7 +896,8 @@ def main(argv: list[str] | None = None) -> int:
         # against a database created by an older version of the binary.
         log = RequestLog(config.log.path, store_prompts=config.log.store_prompts)
         try:
-            report = collect(log)
+            shape = config.router.capabilities.task_shape if config.router.capabilities else None
+            report = collect(log, task_shape=shape)
             print(json.dumps(report.to_dict(), indent=2) if args.json else format_text(report))
         finally:
             log.close()

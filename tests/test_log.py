@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -9,6 +10,7 @@ from fastapi.testclient import TestClient
 
 from jev_model_router.app import create_app
 from jev_model_router.backends.base import BackendError
+from jev_model_router.config import TaskShape
 from jev_model_router.db import _MIGRATIONS, SCHEMA_VERSION, LogEntry, RequestLog, sha256_hex
 from jev_model_router.schemas import Usage
 from jev_model_router.stats import collect, format_text
@@ -304,3 +306,19 @@ def test_a_route_outcome_keeps_its_cache_tokens() -> None:
     assert (row["outcome_cached_tokens"], row["outcome_cache_write_tokens"]) == (7, 1)
     # Every outcome with usage comes back, cold or cached: record_task decides which count.
     assert [(r["tier"], r["cached"]) for r in log.task_usage()] == [("a", 7), ("a", 0)]
+
+
+def test_the_task_cost_block_shows_each_tiers_shape_the_flips_and_the_gap() -> None:
+    log = RequestLog(":memory:")
+    for i in range(5):
+        decided(log, i, "a", Usage(prompt_tokens=3000, completion_tokens=10, cached_tokens=2900, cache_write_tokens=60))
+    flipped = json.dumps({"rule": "x", "shape_flipped": True, "shapeless_pick": "a"})
+    decided(log, 5, "b", Usage(prompt_tokens=3000, completion_tokens=10), reason=flipped)
+    stats = collect(log, task_shape=TaskShape(295, 0.971, 0.026))
+    rows = {r.tier: r for r in stats.task_cost.tiers}
+    assert rows["a"].source == "observed:5" and rows["a"].input_per_output == 300.0
+    assert rows["b"].source == "config" and rows["b"].without_cache == 1
+    assert stats.task_cost.flips == {"b over a": 1}
+    text = format_text(stats)
+    assert "task cost" in text and "b over a: 1" in text and "no cache tokens" in text
+    assert collect(RequestLog(":memory:")).task_cost is None  # no route decisions, no block
