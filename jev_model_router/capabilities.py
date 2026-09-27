@@ -28,7 +28,7 @@ so pricing it any other way would weigh the same model twice, by two methods.
 A local model's list price is a shadow price for the machine and the wait, so
 "free" does not win every task it could scrape through.
 
-A subscription is still watched, for availability only: one that has answered
+A subscription is still watched, for availability only (`calls.py`): one that has answered
 429 is off the table until its window turns.
 
 A tier's family scale (`family_scales`) and level caps (`level_caps`) are kept
@@ -46,13 +46,13 @@ import json
 import math
 import re
 import time
-from collections import deque
 from dataclasses import asdict, dataclass
 from typing import Any, Awaitable, Callable
 
 import httpx
 
-from .config import CapabilitiesConfig, Config, Prices, TierConfig
+from .calls import CallRouter, QuotaLedger
+from .config import Config, Prices, TierConfig
 from .routing import RouteDecision, _explicit_preference
 from .schemas import ChatCompletionRequest, Usage
 from .tokens import estimate_prompt_tokens
@@ -193,57 +193,6 @@ def jev_asker(tier: TierConfig, client: httpx.AsyncClient | None = None) -> Ask:
     return ask
 
 
-# ---------------------------------------------------------------- quota
-class QuotaLedger:
-    """Per subscription: 429 lockouts, and list-price spend over the window for display.
-
-    The spend never moves a decision -- cost is the price per token, the same
-    for a subscription as for the API. A 429 does: that subscription is not
-    available until its window turns.
-    """
-
-    def __init__(self, config: CapabilitiesConfig, clock: Callable[[], float] = time.time) -> None:
-        self._budgets = config.subscriptions
-        self._clock = clock
-        self._spent: dict[str, deque[tuple[float, float]]] = {}
-        self._locked_until: dict[str, float] = {}
-
-    def record(self, subscription: str, usd: float) -> None:
-        self._spent.setdefault(subscription, deque()).append((self._clock(), usd))
-
-    def lock(self, subscription: str) -> None:
-        budget = self._budgets.get(subscription)
-        hours = budget.window_hours if budget else 1.0
-        self._locked_until[subscription] = self._clock() + hours * 3600
-
-    def used(self, subscription: str) -> float:
-        budget = self._budgets.get(subscription)
-        entries = self._spent.get(subscription)
-        if not entries:
-            return 0.0
-        horizon = self._clock() - (budget.window_hours if budget else 5.0) * 3600
-        while entries and entries[0][0] < horizon:
-            entries.popleft()
-        return sum(usd for _, usd in entries)
-
-    def locked(self, subscription: str) -> bool:
-        return self._clock() < self._locked_until.get(subscription, 0.0)
-
-    def state(self) -> dict[str, Any]:
-        names = set(self._budgets) | set(self._spent) | set(self._locked_until)
-        return {
-            name: {
-                "used_usd": round(self.used(name), 4),
-                "locked": self.locked(name),
-            }
-            for name in sorted(names)
-        }
-
-
-def _usd(prices: Prices, prompt_tokens: int, output_tokens: int) -> float:
-    return (prompt_tokens * prices.input + output_tokens * prices.output) / 1_000_000
-
-
 # ---------------------------------------------------------------- the router
 @dataclass(frozen=True)
 class Option:
@@ -263,6 +212,7 @@ class CapabilityRouter:
         *,
         ask: Ask | None = None,
         clock: Callable[[], float] = time.time,
+        calls: CallRouter | None = None,
     ) -> None:
         caps = config.router.capabilities
         assert caps is not None, "parse_config guarantees a capabilities block for this kind"
@@ -270,7 +220,11 @@ class CapabilityRouter:
         self._caps = caps
         self._ask = ask or jev_asker(config.tier(caps.jev_tier))
         self._default = config.router.default_tier or next(iter(config.tiers))
-        self.ledger = QuotaLedger(caps, clock)
+        # Prices and the quota ledger are the call router's. Built here when not
+        # given, on this router's clock, so offline builders need not know it exists.
+        self.calls = calls or CallRouter(
+            config, caps, list_prices={name: card.list_prices for name, card in caps.cards.items()}, clock=clock
+        )
         # Everything a decision depends on besides the task, so two log rows
         # with the same fingerprint were decided by the same rules.
         spec = {
@@ -325,10 +279,13 @@ class CapabilityRouter:
         fallback = self._caps.miss_scale if default is None else default
         return self._caps.family_scales.get(self.family_key(tier), fallback)
 
+    @property
+    def ledger(self) -> QuotaLedger:
+        return self.calls.ledger
+
     def prices(self, tier_name: str) -> Prices:
         """What a tier really bills wins; the card's list prices stand in where it bills nothing."""
-        tier = self._config.tier(tier_name)
-        return tier.prices if tier.prices.configured else self._caps.cards[tier_name].list_prices
+        return self.calls.prices(tier_name)
 
     def _miss(self, level: float) -> float:
         """`miss` at a level between the table's points, linearly."""
@@ -338,11 +295,8 @@ class CapabilityRouter:
         return self._caps.miss[low] * (1 - frac) + self._caps.miss[low + 1] * frac
 
     def cost(self, tier_name: str, prompt_tokens: int) -> float:
-        tier = self._config.tier(tier_name)
         card = self._caps.cards[tier_name]
-        if tier.subscription and self.ledger.locked(tier.subscription):
-            return math.inf  # answered 429: not available until the window turns
-        return _usd(self.prices(tier_name), prompt_tokens + card.input_overhead, card.output_tokens)
+        return self.calls.cost(tier_name, prompt_tokens + card.input_overhead, card.output_tokens)
 
     async def decide(
         self, request: ChatCompletionRequest, candidates: list[str], *, also_failed: frozenset[str] = frozenset()
@@ -516,18 +470,11 @@ class CapabilityRouter:
         )
 
     def observe(self, tier_name: str, usage: Usage, status: int) -> None:
-        """Charge a finished call to its subscription, or lock it on a 429."""
-        tier = self._config.tiers.get(tier_name)
-        if tier is None or not tier.subscription:
-            return
-        if status == 429:
-            self.ledger.lock(tier.subscription)
-            return
+        """Charge a finished call to its subscription at the card's list prices, or lock it on a 429."""
         card = self._caps.cards.get(tier_name)
-        if card is not None and status < 400:
-            self.ledger.record(
-                tier.subscription, _usd(card.list_prices, usage.prompt_tokens, usage.completion_tokens)
-            )
+        if card is None and status != 429:
+            return
+        self.calls.record_spend(tier_name, usage, status, card.list_prices if card is not None else Prices())
 
     def state(self) -> dict[str, Any]:
         return {
@@ -538,7 +485,7 @@ class CapabilityRouter:
             "family_scales": self._caps.family_scales,
             "cards": sorted(self._caps.cards),
             "dominated": self.dominated,
-            "subscriptions": self.ledger.state(),
+            "subscriptions": self.calls.state()["subscriptions"],
         }
 
     async def aclose(self) -> None:
