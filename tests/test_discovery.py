@@ -14,7 +14,7 @@ from fastapi.testclient import TestClient
 
 from jev_model_router.app import create_app
 from jev_model_router.capabilities import CapabilityRouter
-from jev_model_router.catalog import CatalogReport, Offered, Source
+from jev_model_router.catalog import CatalogReport, Offered, Source, models_source
 from jev_model_router.config import ConfigError, parse_config
 from jev_model_router.db import RequestLog
 from jev_model_router.discovery import expand
@@ -79,6 +79,37 @@ REPORT = report(
         "nomic-embed-text:latest": Offered("nomic-embed-text:latest"),
     }),
 )
+
+
+OR = "https://listing.example/v1"
+
+
+def or_entry(model_id: str, **pricing: float) -> dict[str, Any]:
+    """One listing entry; prices in USD per 1M tokens, written the way the listing writes them (per token)."""
+    extra = pricing.pop("extra", {})
+    return {
+        "id": model_id, "context_length": 200000, "supported_parameters": ["tools"],
+        "architecture": {"output_modalities": ["text"]},
+        "pricing": {k: str(v / 1_000_000) for k, v in pricing.items()},
+        **extra,
+    }
+
+
+def or_listing(*entries: dict[str, Any]) -> Source:
+    return models_source(OR, get=lambda url: {"data": list(entries)})
+
+
+def listing_raw(**caps: Any) -> dict[str, Any]:
+    raw = raw_config(**caps)
+    raw["router"]["capabilities"]["discover"]["or"] = {
+        "backend": "openai_compatible", "base_url": OR, "api_key_env": "OR_KEY",
+    }
+    return raw
+
+
+def with_listing(*entries: dict[str, Any], raw: dict[str, Any] | None = None, scores=None):
+    rep = report(**{**REPORT.discovered, "or": or_listing(*entries)})
+    return expand(parse_config(raw or listing_raw()), rep, scores)
 
 
 def expanded(**caps: Any):
@@ -153,6 +184,15 @@ def test_levels_between_the_table_points_are_interpolated():
     assert router._miss(2.5) == pytest.approx(0.1)
     assert router._miss(0.25) == pytest.approx(0.8)
     assert router._miss(3.0) == 0.0
+
+
+# ---------------------------------------------------------------- listing prices
+def test_a_listed_price_the_listing_leaves_out_is_not_free():
+    config, _, _ = with_listing(or_entry("vendor/plain", prompt=2.0, completion=10.0))
+    prices = config.tiers["or:vendor/plain"].prices
+    assert prices.configured and prices.input == 2.0
+    assert prices.cache_read == 2.0  # the input rate: a cache discount has to be stated to be claimed
+    assert prices.cache_write_configured is False
 
 
 # ---------------------------------------------------------------- config

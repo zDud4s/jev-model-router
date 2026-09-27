@@ -1079,6 +1079,12 @@ generating when the client left) and its reconciled bill.
 What this cannot do is make a counterfactual exact. The column for a tier that never answered
 is that tier's price times *this* tier's tokens; no invoice will ever exist for it.
 
+A listed model's prices go through the same parser as hand-written ones. Until
+2026-09-26 they did not, and a listing entry with no `input_cache_read` (167 of
+the 458 models OpenRouter listed that day) got a cache-read price of 0: every
+cached token on it was logged as free. Omitted now means the input rate, as it
+does in a config file: a cache discount has to be stated to be claimed.
+
 ### Checking the price table before the money is spent
 
 Drift in `stats` shows up only after the traffic has run. The price table itself can be

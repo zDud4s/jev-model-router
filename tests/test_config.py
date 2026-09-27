@@ -5,7 +5,7 @@ from __future__ import annotations
 import pytest
 import yaml
 
-from jev_model_router.config import ConfigError, load_config, parse_config
+from jev_model_router.config import ConfigError, Prices, load_config, parse_config
 
 from conftest import BASE_CONFIG
 
@@ -95,6 +95,13 @@ def test_prices_reject_an_unknown_field() -> None:
 
     with pytest.raises(ConfigError, match="unknown price fields"):
         parse_config(raw)
+
+
+def test_cache_write_is_marked_configured_only_when_written():
+    assert Prices.parse({"input": 1.0, "cache_write": 1.25}).cache_write_configured is True
+    assert Prices.parse({"input": 1.0, "cache_write": 0}).cache_write_configured is True
+    assert Prices.parse({"input": 1.0}).cache_write_configured is False
+    assert Prices().cache_write_configured is False
 
 
 def test_a_missing_config_file_is_refused(tmp_path) -> None:

@@ -41,6 +41,10 @@ class Prices:
     output: float = 0.0
     cache_read: float = 0.0
     cache_write: float = 0.0
+    # Whether `cache_write` was written down. Its 0.0 default cannot say "not
+    # stated", and a task cost that read it as free would favour exactly the
+    # tiers nobody priced; unwritten, a cache write costs the input rate there.
+    cache_write_configured: bool = False
 
     # Whether the operator supplied any price at all. Stats needs to tell "this
     # baseline is genuinely free" apart from "nobody configured this baseline",
@@ -66,6 +70,7 @@ class Prices:
             # cache discount has to be written down to be claimed.
             cache_read=float(raw.get("cache_read", input_price)),
             cache_write=float(raw.get("cache_write", 0.0)),
+            cache_write_configured="cache_write" in raw,
             configured=True,
         )
 

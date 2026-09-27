@@ -213,8 +213,10 @@ def expand(
                     context_window=model.context_window or source.context_window,
                     supports_tools=source.supports_tools if model.supports_tools is None else model.supports_tools,
                     # The listing's own price, so the log costs what was billed;
-                    # the card's list_prices is the profile's guess.
-                    prices=Prices(**model.prices, configured=True) if model.prices else Prices(),
+                    # the card's list_prices is the profile's guess. Through
+                    # `Prices.parse`, so a cache price the listing leaves out is
+                    # the input rate, not free.
+                    prices=Prices.parse(model.prices) if model.prices else Prices(),
                     timeout_s=source.timeout_s,
                     extra_body=_body_for(source, effort),
                     effort=effort,
