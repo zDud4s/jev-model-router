@@ -5,22 +5,24 @@ Jev is never called: the router answers from a scripted `Ask`.
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 
 from jev_model_router.calibration import log_outcomes
 from jev_model_router.capabilities import CapabilityRouter
 from jev_model_router.config import parse_config
 from jev_model_router.db import RequestLog
+from jev_model_router.schemas import Usage
 
 from test_capabilities import HARD, Ask, raw_config
 
 TASK = {"task": "Fix the race in the scheduler", "stage": "implement", "files": ["core/src/scheduler.rs"]}
 
 
-def client_for(backend_factory, ask=None, log=None):
+def client_for(backend_factory, ask=None, log=None, **caps):
     from jev_model_router.app import create_app
 
-    config = parse_config(raw_config())
+    config = parse_config(raw_config(**caps))
     router = CapabilityRouter(config, ask=ask or Ask(HARD))
     log = log or RequestLog(":memory:")
     app = create_app(config, backend_factory=backend_factory, log=log, router=router)
@@ -102,3 +104,38 @@ def test_a_rate_limit_the_runner_saw_takes_that_subscription_off_the_table(backe
         client.post(f"/v1/route/{decision}/outcome", json={"status": "rate_limited"})
         again = client.post("/v1/route", json=TASK).json()
     assert router.ledger.locked("claude") and again["runner"] != "claude"
+
+
+SHAPE = {"input_per_output": 295, "cache_read": 0.971, "cache_write": 0.026}
+CACHED = {"prompt_tokens": 300_000, "completion_tokens": 1000, "cached_tokens": 290_000, "cache_write_tokens": 8000}
+
+
+def test_a_route_says_which_cost_basis_it_used(backend_factory):
+    plain, _, _ = client_for(backend_factory)
+    with plain:
+        assert plain.post("/v1/route", json=TASK).json()["cost_basis"] == "one_call"
+    shaped, _, _ = client_for(backend_factory, task_shape=SHAPE)
+    with shaped:
+        assert shaped.post("/v1/route", json=TASK).json()["cost_basis"] == "task_shape"
+
+
+def test_outcomes_with_cache_tokens_become_the_tiers_observed_shape(backend_factory):
+    client, log, router = client_for(backend_factory)
+    with client:
+        for _ in range(5):
+            body = client.post("/v1/route", json=TASK).json()
+            client.post(f"/v1/route/{body['decision_id']}/outcome", json={"status": "pass", "usage": CACHED})
+        row = log.decision(body["decision_id"])
+    assert (row["outcome_cached_tokens"], row["outcome_cache_write_tokens"]) == (290_000, 8000)
+    shape = router.calls.shape_for(body["tier"])
+    assert shape.source == "observed:5" and shape.input_per_output == pytest.approx(300.0)
+
+
+def test_observed_shapes_are_read_back_from_the_log_at_startup(backend_factory):
+    log = RequestLog(":memory:")
+    for i in range(5):
+        log.record_decision(f"rt_{i}", task="t", tier="sub", model=None, effort=None, runner=None, stage=None,
+                            route_score=None, route_model=None, route_reason=None)
+        log.set_outcome(f"rt_{i}", "pass", None, Usage(prompt_tokens=3000, completion_tokens=10, cached_tokens=2900))
+    _, _, router = client_for(backend_factory, log=log)
+    assert router.calls.shape_for("sub").source == "observed:5"

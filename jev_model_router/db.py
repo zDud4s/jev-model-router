@@ -31,7 +31,7 @@ from .pricing import Counterfactual
 from .schemas import Usage
 from .verification import VerificationOutcome
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 # Each entry is one forward migration, applied in order. Never edit a migration
 # that has shipped; append a new one. The list index + 1 is its version.
@@ -175,6 +175,12 @@ _MIGRATIONS: list[str] = [
     );
 
     CREATE INDEX IF NOT EXISTS idx_route_decisions_ts ON route_decisions(ts);
+    """,
+    # v6: the cache tokens a routed task's caller reports, the evidence its
+    # tier's task shape is observed from (see calls.py).
+    """
+    ALTER TABLE route_decisions ADD COLUMN outcome_cached_tokens      INTEGER;
+    ALTER TABLE route_decisions ADD COLUMN outcome_cache_write_tokens INTEGER;
     """,
 ]
 
@@ -503,11 +509,13 @@ class RequestLog:
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE route_decisions SET outcome = ?, outcome_ts = ?, outcome_detail = ?, "
-                "outcome_input_tokens = ?, outcome_output_tokens = ? "
+                "outcome_input_tokens = ?, outcome_output_tokens = ?, "
+                "outcome_cached_tokens = ?, outcome_cache_write_tokens = ? "
                 "WHERE decision_id = ? AND outcome IS NULL",
                 (
                     status, datetime.now(timezone.utc).isoformat(), detail,
                     usage.prompt_tokens if usage else None, usage.completion_tokens if usage else None,
+                    usage.cached_tokens if usage else None, usage.cache_write_tokens if usage else None,
                     decision_id,
                 ),
             )
@@ -518,6 +526,14 @@ class RequestLog:
                 "SELECT 1 FROM route_decisions WHERE decision_id = ?", (decision_id,)
             ).fetchone()
             return "exists" if found else "missing"
+
+    def task_usage(self) -> list[sqlite3.Row]:
+        """Route outcomes that reported cache tokens, oldest first: what each tier's task shape is observed from."""
+        return self.query(
+            "SELECT tier, outcome_input_tokens AS input, outcome_cached_tokens AS cached, "
+            "outcome_cache_write_tokens AS written, outcome_output_tokens AS output FROM route_decisions "
+            "WHERE COALESCE(outcome_cached_tokens, 0) + COALESCE(outcome_cache_write_tokens, 0) > 0 ORDER BY id"
+        )
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:
         with self._lock:

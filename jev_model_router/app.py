@@ -76,6 +76,14 @@ def _sse(chunk: dict[str, Any]) -> str:
     return f"data: {json.dumps(chunk, ensure_ascii=False)}\n\n"
 
 
+def _takes_task(router: Any) -> bool:
+    """Whether this router's `decide` can be told the request is a whole task (injected test routers may not)."""
+    try:
+        return "task" in inspect.signature(router.decide).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _benchmark_scores(config: Config, fetch: Callable[[str, dict[str, str], float], bytes] | None) -> Any:
     """The benchmark evidence for discovered cards, refreshed when stale. None: cards are the profiles alone."""
     caps = config.router.capabilities
@@ -181,6 +189,24 @@ def create_app(
 
         for line in summary(active_router.dominated, len(config.router.capabilities.cards)):
             print(line, file=sys.stderr)
+    # A route-only decision is a whole task; a router that can price one is told so.
+    route_task = {"task": True} if _takes_task(active_router) else {}
+    calls = getattr(active_router, "calls", None)
+    if calls is not None:
+        try:  # the log's outcomes seed each tier's shape; a log it cannot read leaves the config's
+            for row in request_log.task_usage():
+                calls.record_task(row["tier"], Usage(
+                    prompt_tokens=row["input"] or 0, completion_tokens=row["output"] or 0,
+                    cached_tokens=row["cached"] or 0, cache_write_tokens=row["written"] or 0,
+                ))
+        except Exception as exc:  # noqa: BLE001
+            print(f"task shapes: cannot read them from the log: {type(exc).__name__}: {exc}", file=sys.stderr)
+        uncached = calls.uncached()
+        if uncached:
+            from .scores_derive import some
+
+            print(f"task_shape: {len(uncached)} tier(s) have no cache price and are priced as if they cached "
+                  f"nothing: {some(uncached)}", file=sys.stderr)
     # None when verification is off, so the request path has one branch rather
     # than a cascade of `if config.verification.enabled` checks.
     active_verifier: Verifier | None = verifier or build_verifier(config, backends, active_router)
@@ -420,7 +446,7 @@ def create_app(
             return JSONResponse(status_code=422, content=error_body(
                 f"no eligible tier runs on {runners}{left_out}"))
         began = time.perf_counter()
-        decision = active_router.decide(request, eligible)
+        decision = active_router.decide(request, eligible, **route_task)
         if inspect.isawaitable(decision):
             decision = await decision
         tier = config.tiers[decision.tier]
@@ -443,6 +469,9 @@ def create_app(
             "effort": tier.effort,
             "success": decision.score,
             "estimated_cost_usd": picked.get("cost"),
+            # Whether that figure prices a whole task by its shape or one call. Either way it
+            # compares tiers; it is not a budget.
+            "cost_basis": detail.get("cost_basis", "one_call"),
             "rule": detail.get("rule") or decision.reason,
             # Why a fallback fell back (Jev unreachable, no key...): the caller
             # cannot see the router's stderr.
@@ -483,6 +512,12 @@ def create_app(
                 elif usage is not None:
                     observe(row["tier"], usage, 200)
             except Exception:  # noqa: BLE001 - accounting must not fail the report
+                pass
+        calls = getattr(active_router, "calls", None)
+        if calls is not None and usage is not None and row is not None:
+            try:
+                calls.record_task(row["tier"], usage)
+            except Exception:  # noqa: BLE001 - a shape must not fail the report
                 pass
         return {"decision_id": decision_id, "status": status, "tier": row["tier"] if row else None}
 

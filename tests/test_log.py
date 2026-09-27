@@ -287,3 +287,19 @@ def test_the_schema_rejects_a_counterfactual_without_a_request(tmp_path) -> None
             (999, "ghost", 1.0, 1, 1),
         )
     log.close()
+
+
+def decided(log, i, tier, usage=None, reason=None):
+    log.record_decision(f"rt_{i}", task="t", tier=tier, model=None, effort=None, runner=None, stage=None,
+                        route_score=None, route_model=None, route_reason=reason)
+    if usage is not None:
+        log.set_outcome(f"rt_{i}", "pass", None, usage)
+
+
+def test_a_route_outcome_keeps_its_cache_tokens() -> None:
+    log = RequestLog(":memory:")
+    decided(log, 1, "a", Usage(prompt_tokens=10, completion_tokens=2, cached_tokens=7, cache_write_tokens=1))
+    decided(log, 2, "a", Usage(prompt_tokens=10, completion_tokens=2))
+    row = log.decision("rt_1")
+    assert (row["outcome_cached_tokens"], row["outcome_cache_write_tokens"]) == (7, 1)
+    assert [(r["tier"], r["cached"]) for r in log.task_usage()] == [("a", 7)]  # only outcomes that cached
