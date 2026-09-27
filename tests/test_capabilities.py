@@ -124,6 +124,16 @@ def test_a_capabilities_block_on_another_router_kind_is_refused():
         parse_config(raw)
 
 
+def test_the_jev_failure_mode_defaults_to_fallback_and_accepts_reject():
+    assert parse_config(raw_config()).router.capabilities.on_jev_failure == "fallback"
+    assert parse_config(raw_config(on_jev_failure="reject")).router.capabilities.on_jev_failure == "reject"
+
+
+def test_an_unknown_jev_failure_mode_is_refused():
+    with pytest.raises(ConfigError, match=r"on_jev_failure must be one of \['fallback', 'reject'\], got 'retry'"):
+        parse_config(raw_config(on_jev_failure="retry"))
+
+
 # ---------------------------------------------------------------- choosing
 def test_an_easy_task_goes_to_the_cheapest_tier_that_covers_it():
     ask = Ask(EASY)

@@ -598,6 +598,8 @@ class FailureCost:
 
 _RULES = ("target", "expected_cost")
 
+_JEV_FAILURE_MODES = ("fallback", "reject")
+
 
 @dataclass(frozen=True)
 class TaskShape:
@@ -695,6 +697,11 @@ class CapabilitiesConfig:
     # cache write, per output token. Prices route-only decisions when every tier
     # left has a shape (`calls.py`); `measure-shape` prints one.
     task_shape: TaskShape | None = None
+    # What a decision does when the Jev call fails (error, timeout, an answer
+    # with no probability). `fallback`: the default tier serves, blind, and the
+    # log says why. `reject`: the request is refused with a 503 instead, for an
+    # operator who would rather be told than pay the default's price.
+    on_jev_failure: str = "fallback"
 
     @classmethod
     def parse(cls, raw: Any, tiers: dict[str, "TierConfig"], must_serve: Any) -> "CapabilitiesConfig":
@@ -703,7 +710,7 @@ class CapabilitiesConfig:
         unknown = set(raw) - {
             "jev_tier", "requirements", "cards", "target", "miss", "floor", "subscriptions", "max_packet_chars",
             "discover", "profiles", "fallback_profile", "effort_rules", "thinking", "miss_scale", "max_effort",
-            "rule", "failure", "family_scales", "benchmarks", "level_caps", "task_shape",
+            "rule", "failure", "family_scales", "benchmarks", "level_caps", "task_shape", "on_jev_failure",
         }
         if unknown:
             raise ConfigError(f"unknown router.capabilities fields: {sorted(unknown)}")
@@ -820,6 +827,12 @@ class CapabilitiesConfig:
         stray = set(thinking) - set(requirements)
         if stray:
             raise ConfigError(f"router.capabilities.thinking names unknown requirements {sorted(stray)}")
+        on_jev_failure = raw.get("on_jev_failure", "fallback")
+        if on_jev_failure not in _JEV_FAILURE_MODES:
+            raise ConfigError(
+                f"router.capabilities.on_jev_failure must be one of {list(_JEV_FAILURE_MODES)}, "
+                f"got {on_jev_failure!r}"
+            )
         return cls(
             jev_tier=str(jev_tier),
             requirements=requirements,
@@ -842,6 +855,7 @@ class CapabilitiesConfig:
             benchmarks=_parse_benchmarks(raw.get("benchmarks")),
             level_caps=level_caps,
             task_shape=_parse_task_shape(raw.get("task_shape")),
+            on_jev_failure=on_jev_failure,
         )
 
 
