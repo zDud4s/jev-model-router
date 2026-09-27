@@ -18,6 +18,7 @@ from jev_model_router.catalog import check_catalog
 from jev_model_router.config import load_config
 from jev_model_router.discovery import expand
 from jev_model_router.eligibility import evaluate
+from jev_model_router.routing import JevUnavailable
 from jev_model_router.schemas import ChatCompletionRequest
 
 SAMPLE = [
@@ -58,9 +59,13 @@ async def main() -> None:
         for task in tasks:
             request = ChatCompletionRequest.model_validate({"model": "auto", **task})
             eligible = list(evaluate(config, request).eligible)
-            decision = await router.decide(request, eligible)
-            reason = json.loads(decision.reason)
             goal = task["messages"][-1]["content"].replace("\n", " ")[:70]
+            try:
+                decision = await router.decide(request, eligible)
+            except JevUnavailable as exc:  # on_jev_failure: reject
+                print(f"\n{goal}\n  -> refused: {exc.why}")
+                continue
+            reason = json.loads(decision.reason)
             need = " ".join(f"{k[:5]}={v:.2f}" for k, v in reason.get("need", {}).items())
             print(f"\n{goal}\n  -> {decision.tier}  P={decision.score if decision.score is None else round(decision.score, 3)}  "
                   f"{reason.get('rule')}\n  need: {need}\n  passed over: {reason.get('passed_over')}")
