@@ -1,4 +1,4 @@
-"""Command line: `jev-model-router init`, `serve`, `mcp`, `keys`, `stats`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
+"""Command line: `jev-model-router init`, `serve`, `mcp`, `keys`, `stats`, `measure-shape`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
 
 from __future__ import annotations
 
@@ -64,6 +64,15 @@ def _build_parser() -> argparse.ArgumentParser:
 
     stats = sub.add_parser("stats", help="read the request log back")
     stats.add_argument("--json", action="store_true", help="emit JSON instead of text")
+
+    measure = sub.add_parser("measure-shape",
+                             help="measure a task shape from this machine's agent transcripts (read-only)")
+    measure.add_argument("--match", default=None, help="only transcripts whose project directory or cwd contains this")
+    measure.add_argument("--since", default=None, help="only activity from this date on, e.g. 2026-09-01")
+    measure.add_argument("--claude-dir", default=os.path.join(os.path.expanduser("~"), ".claude", "projects"),
+                         help=argparse.SUPPRESS)
+    measure.add_argument("--codex-dir", default=os.path.join(os.path.expanduser("~"), ".codex", "sessions"),
+                         help=argparse.SUPPRESS)
 
     train = sub.add_parser(
         "train", help="fit a difficulty model from the verdicts in the request log"
@@ -811,6 +820,29 @@ def _mcp(args) -> int:
         sys.stdout = protocol_out
 
 
+def _measure_shape(args: argparse.Namespace) -> int:
+    """Read-only: no config, no network, nothing written."""
+    from datetime import datetime, timezone
+    from pathlib import Path
+
+    from .shape import Scan, claude_tasks, codex_tasks, report
+
+    since = None
+    if args.since:
+        try:
+            since = datetime.fromisoformat(args.since)
+        except ValueError:
+            print(f"--since: not a date: {args.since!r}", file=sys.stderr)
+            return 2
+        if since.tzinfo is None:
+            since = since.replace(tzinfo=timezone.utc)
+    scan = Scan()
+    claude_tasks(Path(args.claude_dir), match=args.match, since=since, scan=scan)
+    codex_tasks(Path(args.codex_dir), match=args.match, since=since, scan=scan)
+    print(report(scan))
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     args = _build_parser().parse_args(argv)
 
@@ -820,6 +852,8 @@ def main(argv: list[str] | None = None) -> int:
         return _keys(args)
     if args.command == "init":
         return _init(args)
+    if args.command == "measure-shape":
+        return _measure_shape(args)
 
     try:
         config = load_config(args.config)
