@@ -398,6 +398,7 @@ class CapabilityRouter:
         if shapeless.tier != pick.tier:
             reason["shape_flipped"] = True
             reason["shapeless_pick"] = shapeless.tier
+        floored_tiers = {o.tier for o in floored} if unsure else None
         unsure_view: dict[str, Any] | None = None
         if unsure:
             floor = self._caps.unsure
@@ -428,7 +429,8 @@ class CapabilityRouter:
                 "failed_bar": failed_bar,
                 "unsure": unsure_view,
                 **weighed,
-                "options": [self._option_view(o, expected.get(o.tier)) for o in sorted(options, key=lambda o: o.cost)],
+                "options": [self._option_view(o, expected.get(o.tier), floored_tiers)
+                            for o in sorted(options, key=lambda o: o.cost)],
             },
         )
 
@@ -517,7 +519,9 @@ class CapabilityRouter:
         settings = self._config.verification
         return settings.sample_rate if settings.verifies(tier) else 0.0
 
-    def _option_view(self, option: Option, expected: float | None = None) -> dict[str, Any]:
+    def _option_view(
+        self, option: Option, expected: float | None = None, floored_tiers: set[str] | None = None
+    ) -> dict[str, Any]:
         tier = self._config.tier(option.tier)
         return {
             "tier": option.tier,
@@ -528,6 +532,9 @@ class CapabilityRouter:
             "cost": option.cost if math.isfinite(option.cost) else None,
             "covered": option.success >= self._caps.target,
             "expected": expected if expected is None or math.isfinite(expected) else None,
+            # None when the unsure floor did not apply; else whether this tier
+            # cleared it, so a trace can tell "not covered" from "floored out".
+            "meets_floor": None if floored_tiers is None else option.tier in floored_tiers,
         }
 
     def _fallback(

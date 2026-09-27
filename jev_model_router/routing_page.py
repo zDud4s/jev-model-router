@@ -420,15 +420,24 @@ function renderDetail() {
 
 function decisionCard(route, d) {
   const pickOpt = (d.options || []).find((o) => o.tier === route.tier);
+  const u = d.unsure;
+  // A tier's raw success can clear the target and still be floor-excluded: count
+  // only tiers the unsure floor actually left standing, or "covered" overstates
+  // the field and "none reached the target" can be said of a target it did reach.
+  const eligible = (d.options || []).filter((o) => u ? o.meets_floor !== false : true);
+  const noneReached = eligible.every((o) => !o.covered);
   const why = d.rule === "fallback" ? `Fallback: ${d.why}`
     : route.reason === "requested" ? "The client named this tier; Jev was not asked."
     : d.rule === "least expected cost" ? `Least expected cost: price + (1 − success) × the cost of failing. A failure here costs `
       + `${d.stakes}× a redo on ${d.redo_tier} (stakes from ${d.stakes_from}), `
       + (d.verifiable ? "and the client's tests would catch it." : "and nothing is known to catch it.")
-    : d.rule && d.rule.startsWith("none") ? `No tier reached the target of ${pct(d.target)}; the most likely one was chosen.`
-    : `The cheapest of ${(d.options || []).filter((o) => o.covered).length} tier(s) estimated to succeed at ${pct(d.target)} or more.`;
+    : d.rule && d.rule.startsWith("none")
+      ? (u && !noneReached ? `No tier at the unsure floor reached the target of ${pct(d.target)}; the most likely one meeting the floor was chosen.`
+        : `No tier reached the target of ${pct(d.target)}; the most likely one was chosen.`)
+    : `The cheapest of ${eligible.filter((o) => o.covered).length} covered tier(s) estimated to succeed at ${pct(d.target)} or more.`;
   return el("div", { class: "panel card" }, el("h2", {}, "Decision"),
     el("div", { class: "why" }, why),
+    u ? el("div", { class: "hint" }, unsureLine(u)) : null,
     el("div", { class: "kv" },
       el("div", { style: "grid-column: span 2" }, el("div", { class: "k" }, "Tier"), el("div", { class: "v" }, tierChip(route.tier))),
       el("div", {}, el("div", { class: "k" }, "Est. success"), el("div", { class: "v" }, pct(route.score))),
@@ -438,6 +447,13 @@ function decisionCard(route, d) {
       d.prompt_tokens != null ? el("div", {}, el("div", { class: "k" }, "Prompt"), el("div", { class: "v" }, `~${d.prompt_tokens} tok`)) : null),
     d.skipped_failed && d.skipped_failed.length ? el("div", { class: "hint" }, `Not offered again (already failed): ${d.skipped_failed.join(", ")}`
       + (d.failed_bar != null ? `; nothing rated below ${pct(d.failed_bar)} is offered` : "")) : null);
+}
+
+function unsureLine(u) {
+  const reqs = u.reqs.join(", ");
+  if (u.unmet) return `Jev could not read ${reqs}; no tier at level ${u.min_level} was offered — floor unmet.`;
+  if (u.raised_from) return `Jev could not read ${reqs}; raised from ${u.raised_from[0]} (+${money(u.extra)}).`;
+  return `Jev could not read ${reqs}; the pick already met the level-${u.min_level} floor.`;
 }
 
 function needsCard(d) {
