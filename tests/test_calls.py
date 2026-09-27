@@ -112,3 +112,23 @@ def test_tiers_with_no_cache_price_are_named_only_while_a_shape_is_in_use():
     named = calls(task_shape=SHAPE).uncached()
     assert "sub" in named and "cx" in named
     assert "mid" not in named and "cheap" not in named  # a cache price, and free
+
+
+def test_a_task_row_that_does_not_add_up_is_rejected():
+    c = calls()
+    over = Usage(prompt_tokens=1000, completion_tokens=100, cached_tokens=900, cache_write_tokens=200)
+    negative = Usage(prompt_tokens=1000, completion_tokens=100, cached_tokens=-1)
+    assert not c.record_task("sub", over)
+    assert not c.record_task("sub", negative)
+    assert c.shape_for("sub") is None
+
+
+def test_a_tier_that_has_reported_cache_keeps_its_cold_tasks_too():
+    c = calls()
+    for _ in range(MIN_EVIDENCE):
+        assert c.record_task("sub", TASK)
+    before = c.shape_for("sub")
+    cold = Usage(prompt_tokens=1000, completion_tokens=100)  # no cache tokens at all
+    assert c.record_task("sub", cold)
+    after = c.shape_for("sub")
+    assert after.cache_read < before.cache_read

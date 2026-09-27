@@ -109,6 +109,9 @@ class CallRouter:
         self.ledger = QuotaLedger(caps, clock)
         self._shape = caps.task_shape
         self._tasks: dict[str, deque[tuple[int, int, int, int]]] = {}
+        # Tiers that have ever reported a nonzero cache field. Once one has, a
+        # later zero-cache task from it is a real cold task, not silence.
+        self._reports_cache: set[str] = set()
 
     def prices(self, tier_name: str) -> Prices:
         """What a tier really bills wins; its card's list prices stand in where it bills nothing."""
@@ -136,11 +139,22 @@ class CallRouter:
             self.ledger.record(tier.subscription, _usd(spend_prices, usage.prompt_tokens, usage.completion_tokens))
 
     def record_task(self, tier_name: str, usage: Usage) -> bool:
-        """One routed task's whole usage, as evidence of the tier's shape. Without cache tokens it is none."""
+        """One routed task's whole usage, as evidence of the tier's shape.
+
+        Without cache tokens it is none -- unless this tier has already shown it reports the
+        cache, in which case a cold task is real evidence too, not a caller staying silent.
+        """
         if usage.prompt_tokens <= 0 or usage.completion_tokens <= 0:
             return False
-        if usage.cached_tokens + usage.cache_write_tokens <= 0:
+        if usage.cached_tokens < 0 or usage.cache_write_tokens < 0:
+            return False
+        cache = usage.cached_tokens + usage.cache_write_tokens
+        if cache > usage.prompt_tokens:
+            return False  # doesn't add up: e.g. a caller reporting fresh input only, not on top
+        if cache <= 0 and tier_name not in self._reports_cache:
             return False  # a caller that does not report the cache, not a task that never cached
+        if cache > 0:
+            self._reports_cache.add(tier_name)
         self._tasks.setdefault(tier_name, deque(maxlen=WINDOW)).append(
             (usage.prompt_tokens, usage.cached_tokens, usage.cache_write_tokens, usage.completion_tokens)
         )
@@ -154,9 +168,12 @@ class CallRouter:
         return self._shape
 
     def task_cost(self, tier_name: str, input_tokens: int, output_tokens: int) -> float:
-        """A whole task by its shape, scaled to `output_tokens` of output; `cost(...)` when the tier has no shape."""
+        """A whole task by its shape, scaled to `output_tokens` of output; `cost(...)` when the tier has no shape.
+
+        `input_tokens` is used only in that unshaped fallback: a shape states its own input.
+        """
         shape = self.shape_for(tier_name)
-        if shape is None:  # `input_tokens` is used only here: a shape states its own input
+        if shape is None:
             return self.cost(tier_name, input_tokens, output_tokens)
         if self.locked(tier_name):
             return math.inf
