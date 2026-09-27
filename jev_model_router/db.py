@@ -31,7 +31,7 @@ from .pricing import Counterfactual
 from .schemas import Usage
 from .verification import VerificationOutcome
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 # Each entry is one forward migration, applied in order. Never edit a migration
 # that has shipped; append a new one. The list index + 1 is its version.
@@ -181,6 +181,21 @@ _MIGRATIONS: list[str] = [
     """
     ALTER TABLE route_decisions ADD COLUMN outcome_cached_tokens      INTEGER;
     ALTER TABLE route_decisions ADD COLUMN outcome_cache_write_tokens INTEGER;
+    """,
+    # v7: a route-only request refused because Jev did not answer and
+    # `on_jev_failure: reject` says so. Not a decision -- no tier, no outcome --
+    # so not a `route_decisions` row, which stats and calibration read as one.
+    """
+    CREATE TABLE IF NOT EXISTS route_rejections (
+        id           INTEGER PRIMARY KEY AUTOINCREMENT,
+        ts           TEXT NOT NULL,
+        request_id   TEXT NOT NULL,
+        stage        TEXT,
+        route_model  TEXT,
+        route_reason TEXT NOT NULL,
+        task_sha256  TEXT NOT NULL,
+        task_text    TEXT
+    );
     """,
 ]
 
@@ -496,6 +511,27 @@ class RequestLog:
         except Exception as exc:  # noqa: BLE001 - losing the row must not lose the answer
             self.failed_writes += 1
             self._record_failure(decision_id, exc)
+            return False
+
+    def record_rejection(
+        self, request_id: str, *, task: str, stage: str | None, route_model: str | None, route_reason: str
+    ) -> bool:
+        """Write one refused route-only request. Never raises: the caller is waiting on the answer."""
+        try:
+            with self._lock:
+                self._conn.execute(
+                    "INSERT INTO route_rejections (ts, request_id, stage, route_model, route_reason, "
+                    "task_sha256, task_text) VALUES (?,?,?,?,?,?,?)",
+                    (
+                        datetime.now(timezone.utc).isoformat(), request_id, stage, route_model, route_reason,
+                        sha256_hex(task), task if self.store_prompts else None,
+                    ),
+                )
+                self._conn.commit()
+            return True
+        except Exception as exc:  # noqa: BLE001 - losing the row must not lose the answer
+            self.failed_writes += 1
+            self._record_failure(request_id, exc)
             return False
 
     def decision(self, decision_id: str) -> sqlite3.Row | None:

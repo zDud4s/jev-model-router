@@ -293,6 +293,23 @@ def test_the_schema_rejects_a_counterfactual_without_a_request(tmp_path) -> None
     log.close()
 
 
+def test_a_refused_route_is_kept_in_its_own_table() -> None:
+    log = RequestLog(":memory:", store_prompts=True)
+    assert log.record_rejection("rj_1", task="fix it", stage="implement", route_model="capabilities:abc",
+                                route_reason='{"rule":"jev_failure"}') is True
+    [row] = log.query("SELECT * FROM route_rejections")
+    assert (row["request_id"], row["stage"], row["route_model"]) == ("rj_1", "implement", "capabilities:abc")
+    assert row["task_sha256"] == sha256_hex("fix it") and row["task_text"] == "fix it"
+    assert log.query("SELECT COUNT(*) AS n FROM route_decisions")[0]["n"] == 0
+
+
+def test_record_rejection_returns_false_instead_of_raising() -> None:
+    log = RequestLog(":memory:")
+    log.query("DROP TABLE route_rejections")
+    assert log.record_rejection("rj_x", task="t", stage=None, route_model=None, route_reason="{}") is False
+    assert log.failed_writes == 1
+
+
 def decided(log, i, tier, usage=None, reason=None):
     log.record_decision(f"rt_{i}", task="t", tier=tier, model=None, effort=None, runner=None, stage=None,
                         route_score=None, route_model=None, route_reason=reason)
