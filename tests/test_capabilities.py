@@ -21,7 +21,7 @@ from jev_model_router.calls import CallRouter
 from jev_model_router.capabilities import CapabilityRouter, Option, build_packet, failed_tiers
 from jev_model_router.config import ConfigError, Prices, parse_config
 from jev_model_router.db import RequestLog
-from jev_model_router.routing import build_router
+from jev_model_router.routing import JevUnavailable, build_router
 from jev_model_router.schemas import Usage
 
 from conftest import BASE_CONFIG, make_request
@@ -182,6 +182,40 @@ def test_a_jev_failure_routes_to_the_default_and_says_why():
     reason = json.loads(d.reason)
     assert reason["rule"] == "fallback" and "timeout" in reason["why"]
     assert d.score is None
+
+
+def test_a_jev_failure_under_fallback_says_which_mode_served_it():
+    d = decide(router(Ask(error=RuntimeError("timeout"))))
+    assert d.tier == "mid"
+    assert json.loads(d.reason)["on_jev_failure"] == "fallback"
+    assert d.detail["on_jev_failure"] == "fallback"
+
+
+@pytest.mark.parametrize("error", [RuntimeError("timeout"), ValueError("jev gave no probability for 'code'")])
+def test_a_jev_failure_under_reject_raises_instead_of_routing_blind(error):
+    r = router(Ask(error=error), on_jev_failure="reject")
+    with pytest.raises(JevUnavailable) as caught:
+        decide(r)
+    exc = caught.value
+    assert str(error) in exc.why and type(error).__name__ in exc.why
+    assert exc.router == r.fingerprint and exc.jev_ms is not None
+    assert json.loads(exc.reason) == {"rule": "jev_failure", "on_jev_failure": "reject", "why": exc.why}
+
+
+def test_reject_leaves_the_fallbacks_that_are_not_a_jev_failure_alone():
+    ask = Ask(error=RuntimeError("down"))
+    d = decide(router(ask, on_jev_failure="reject"), packet={"failed_tiers": ALL})
+    assert json.loads(d.reason)["rule"] == "fallback" and not ask.calls
+
+
+def test_the_failure_mode_changes_the_fingerprint_only_when_it_is_reject():
+    assert router(Ask(), on_jev_failure="fallback").fingerprint == router(Ask()).fingerprint
+    assert router(Ask(), on_jev_failure="reject").fingerprint != router(Ask()).fingerprint
+
+
+def test_with_jev_down_under_reject_there_is_no_escalation():
+    r = router(Ask(error=RuntimeError("down")), on_jev_failure="reject")
+    assert asyncio.run(r.escalation(make_request(), "mid", ALL)) is None
 
 
 def test_tiers_the_client_says_already_failed_are_not_offered_again():

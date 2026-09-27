@@ -53,7 +53,7 @@ import httpx
 
 from .calls import CallRouter, QuotaLedger
 from .config import Config, Prices, TierConfig
-from .routing import RouteDecision, _explicit_preference
+from .routing import JevUnavailable, RouteDecision, _explicit_preference
 from .schemas import ChatCompletionRequest, Usage
 from .tokens import estimate_prompt_tokens
 
@@ -243,6 +243,8 @@ class CapabilityRouter:
         }
         if caps.task_shape is not None:  # only when set, so configs without one keep their fingerprint
             spec["task_shape"] = asdict(caps.task_shape)
+        if caps.on_jev_failure != "fallback":  # likewise: the default keeps existing fingerprints
+            spec["on_jev_failure"] = caps.on_jev_failure
         self.fingerprint = "capabilities:" + hashlib.sha256(
             json.dumps(spec, sort_keys=True).encode()
         ).hexdigest()[:12]
@@ -326,12 +328,13 @@ class CapabilityRouter:
         try:
             needs = await self._ask(packet, self._caps.requirements)
         except Exception as exc:  # noqa: BLE001 - any failure to read the task routes by default
-            # Jev down is a routing outage, not a request failure: the default
-            # tier still answers, and the reason says why it was chosen.
-            return self._fallback(
-                candidates, f"jev error: {type(exc).__name__}: {exc}"[:300], packet=packet,
-                jev_ms=_ms(started),
-            )
+            # Jev down is a routing outage, not a request failure: by default the
+            # default tier still answers, and the reason says why it was chosen.
+            # `reject` refuses instead, and the app answers 503.
+            why = f"jev error: {type(exc).__name__}: {exc}"[:300]
+            if self._caps.on_jev_failure == "reject":
+                raise JevUnavailable(why, router=self.fingerprint, jev_ms=_ms(started)) from exc
+            return self._fallback(candidates, why, packet=packet, jev_ms=_ms(started), jev_failure=True)
         jev_ms = _ms(started)
 
         tokens = estimate_prompt_tokens(request)
@@ -409,7 +412,11 @@ class CapabilityRouter:
 
     async def escalation(self, request: ChatCompletionRequest, served: str, candidates: list[str]) -> str | None:
         """The tier to re-answer a request `served` failed, or None if none is rated as strong."""
-        decision = await self.decide(request, candidates, also_failed=frozenset({served}))
+        try:
+            decision = await self.decide(request, candidates, also_failed=frozenset({served}))
+        except JevUnavailable:
+            # Jev down under `reject`: no escalation; the answer already served stands.
+            return None
         if (decision.detail or {}).get("escalation") is False or decision.tier == served:
             return None
         return decision.tier
@@ -485,9 +492,12 @@ class CapabilityRouter:
         packet: str | None = None,
         jev_ms: int | None = None,
         escalation: bool | None = None,
+        jev_failure: bool = False,
     ) -> RouteDecision:
         tier = self._default if self._default in candidates else candidates[0]
         reason: dict[str, Any] = {"rule": "fallback", "why": why}
+        if jev_failure:
+            reason["on_jev_failure"] = "fallback"
         if needs:
             reason["need"] = {k: round(v, 3) for k, v in needs.items()}
         return RouteDecision(
@@ -496,7 +506,8 @@ class CapabilityRouter:
             reason=json.dumps(reason, separators=(",", ":")),
             detail={"rule": "fallback", "why": why, "packet": packet, "needs": needs or {}, "jev_ms": jev_ms,
                     "target": self._caps.target, "floor": self._caps.floor, "pick": tier, "options": [],
-                    **({"escalation": False} if escalation else {})},
+                    **({"escalation": False} if escalation else {}),
+                    **({"on_jev_failure": "fallback"} if jev_failure else {})},
         )
 
     def observe(self, tier_name: str, usage: Usage, status: int) -> None:

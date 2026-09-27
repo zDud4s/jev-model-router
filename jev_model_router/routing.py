@@ -23,6 +23,7 @@ failure mode the rest of this project exists to avoid. So `choose` became
 
 from __future__ import annotations
 
+import json
 import random
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Protocol, runtime_checkable
@@ -49,6 +50,23 @@ class RouteDecision:
     # packet, every answer, every option weighed. Too large for the log row,
     # which keeps `reason`; held in memory only, by `trace.py`.
     detail: dict[str, Any] | None = field(default=None, compare=False)
+
+
+class JevUnavailable(Exception):
+    """Jev did not answer, and `on_jev_failure: reject` says not to route blind.
+
+    Raised by a decision; the app turns it into a 503. `reason` is what the log
+    row's `route_reason` holds, `router` its `route_model`.
+    """
+
+    def __init__(self, why: str, *, router: str, jev_ms: int | None = None) -> None:
+        super().__init__(why)
+        self.why = why
+        self.router = router
+        self.jev_ms = jev_ms
+        self.reason = json.dumps(
+            {"rule": "jev_failure", "on_jev_failure": "reject", "why": why}, separators=(",", ":")
+        )
 
 
 @runtime_checkable
