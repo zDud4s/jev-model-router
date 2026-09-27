@@ -466,9 +466,12 @@ def test_the_unsure_floor_takes_its_band_and_level():
         ({"band": [True, 0.7]}, "two numbers"),
         ({"min_level": 4}, "0 to 3"),
         ({"min_level": True}, "0 to 3"),
+        ({"min_level": "high"}, "0 to 3"),
+        ({"min_level": -1}, "0 to 3"),
+        ({"band": 0.5}, "two numbers"),
     ],
     ids=["unknown-key", "not-a-mapping", "band-order", "band-range", "band-length", "band-bool", "level-range",
-         "level-bool"],
+         "level-bool", "level-text", "level-negative", "band-scalar"],
 )
 def test_an_unsure_floor_that_would_mislead_is_refused(unsure, message):
     with pytest.raises(ConfigError, match=message):
