@@ -226,7 +226,10 @@ class CapabilityRouter:
             config, caps, list_prices={name: card.list_prices for name, card in caps.cards.items()}, clock=clock
         )
         # Everything a decision depends on besides the task, so two log rows
-        # with the same fingerprint were decided by the same rules.
+        # with the same fingerprint were decided by the same rules. Observed
+        # per-tier shapes (`calls.shape_for`), like the quota ledger's 429
+        # locks, are runtime state and do not go in: they can change what a
+        # tier costs without changing the rules that priced it.
         spec = {
             "requirements": caps.requirements,
             "cards": {k: [v.levels, v.output_tokens] for k, v in sorted(caps.cards.items())},
@@ -374,6 +377,8 @@ class CapabilityRouter:
             **({"expected": _money(expected[pick.tier])} if expected else {}),
             "passed_over": [[o.tier, round(o.success, 3), _money(o.cost)] for o in cheaper],
         }
+        if basis == "task_shape":
+            reason["cost_basis"] = "task_shape"
         if failed:
             reason["skipped_failed"] = sorted(failed)
         if shapeless.tier != pick.tier:

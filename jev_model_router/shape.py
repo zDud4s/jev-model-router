@@ -27,12 +27,12 @@ import json
 import math
 import statistics
 from collections import Counter
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
-from .calls import accepts_task_row
+from .calls import accepts_task_row, pooled_shape
 from .config import TaskShape
 
 
@@ -171,12 +171,10 @@ def codex_tasks(root: Path, *, match: str | None = None, since: datetime | None 
 
 
 def pooled(tasks: list[Task]) -> TaskShape | None:
-    total_in = sum(t.input for t in tasks)
-    total_out = sum(t.output for t in tasks)
-    if total_in <= 0 or total_out <= 0:
+    shape = pooled_shape([(t.input, t.read, t.write, t.output) for t in tasks])
+    if shape is None:
         return None
-    return TaskShape(total_in / total_out, sum(t.read for t in tasks) / total_in,
-                     sum(t.write for t in tasks) / total_in, f"measured:{len(tasks)}")
+    return replace(shape, source=f"measured:{len(tasks)}")
 
 
 def config_block(shape: TaskShape, note: str) -> str:

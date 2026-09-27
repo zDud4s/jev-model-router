@@ -395,10 +395,13 @@ def decide_task(r, candidates=PAIR, task=True):
 
 def test_a_task_goes_to_the_tier_whose_cache_makes_it_cheaper():
     r = cache_router(task_shape=CACHE_HEAVY)
-    assert decide_task(r, task=False).tier == "cx"  # one call: cheaper per token wins
+    one_call = decide_task(r, task=False)
+    assert one_call.tier == "cx"  # one call: cheaper per token wins
+    assert "cost_basis" not in json.loads(one_call.reason)  # one-call basis: not named in the log
     d = decide_task(r)
     assert d.tier == "sub" and d.detail["cost_basis"] == "task_shape"
     reason = json.loads(d.reason)
+    assert reason["cost_basis"] == "task_shape"  # so the logged pick/passed_over costs are traceable to their basis
     assert reason["shape_flipped"] is True and reason["shapeless_pick"] == "cx"
     assert d.detail["shapeless_pick"] == "cx"
 

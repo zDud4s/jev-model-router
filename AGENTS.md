@@ -34,6 +34,7 @@ python -m jev_model_router -c config.yaml serve              # run the proxy
 python -m jev_model_router -c config.yaml stats              # read the request log back
 python -m jev_model_router -c config.yaml mcp                # route-only API as MCP tools on stdio
 python -m jev_model_router -c config.yaml keys               # which keys each tier needs; `keys set` stores them
+python -m jev_model_router measure-shape                      # task_shape from local transcripts (read-only)
 python -m jev_model_router --help                            # train, label, reconcile, calibrate, benchmarks ...
 ```
 

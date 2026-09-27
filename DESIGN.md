@@ -1173,7 +1173,9 @@ them by the one-call `cost`. Without that rule, a tier that happened to have bee
 tens of times dearer for the crime of having been measured. `cost_basis` in the response and
 in `detail` records which basis a decision used, and `route_reason` records `shape_flipped`
 and `shapeless_pick` next to it whenever the two bases would have picked differently — `stats`
-counts those flips per pair, from the log alone.
+counts those flips per pair, from the log alone. `route_reason` also carries its own
+`cost_basis` when the task basis was used, so a logged row's `pick` and `passed_over` costs
+are traceable to the basis that priced them without joining back to `detail`.
 
 **Where the shape comes from.** A tier's own outcomes are the first choice: `/v1/route`
 outcomes whose usage carried cache tokens, at least five of them (`MIN_EVIDENCE`), pooled sum
