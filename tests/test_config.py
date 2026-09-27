@@ -8,6 +8,7 @@ import yaml
 from jev_model_router.config import ConfigError, Prices, TaskShape, load_config, parse_config
 
 from conftest import BASE_CONFIG
+from test_capabilities import raw_config as caps_raw
 
 
 def test_a_tier_without_prices_parses_and_is_marked_unpriced(config) -> None:
@@ -156,8 +157,6 @@ def test_the_sampling_knobs_must_be_fractions() -> None:
             parse_config({**BASE_CONFIG, "router": {"kind": "static", field: value}})
 
 
-from test_capabilities import raw_config as caps_raw
-
 SHAPE = {"input_per_output": 295, "cache_read": 0.971, "cache_write": 0.026}
 
 
@@ -170,13 +169,17 @@ def test_a_task_shape_is_read():
 @pytest.mark.parametrize(
     "shape, message",
     [
-        ({**SHAPE, "input_per_output": 0}, "input_per_output must be positive"),
+        ({**SHAPE, "input_per_output": 0}, "must be a positive finite number"),
+        ({**SHAPE, "input_per_output": float("nan")}, "must be a positive finite number"),
+        ({**SHAPE, "input_per_output": float("inf")}, "must be a positive finite number"),
         ({**SHAPE, "cache_read": 1.2}, r"fractions in \[0, 1\]"),
         ({**SHAPE, "cache_read": 0.9, "cache_write": 0.2}, "cannot exceed 1"),
         ({"input_per_output": 10, "cache_read": 0.9}, "needs numbers"),
+        ({**SHAPE, "cache_read": True}, "needs numbers"),
         ({**SHAPE, "fresh": 0.1}, "takes only"),
+        ([1, 2, 3], "takes only"),
     ],
-    ids=["ratio", "range", "sum", "missing", "unknown"],
+    ids=["ratio", "nan", "inf", "range", "sum", "missing", "bool", "unknown", "not-a-dict"],
 )
 def test_a_task_shape_that_is_not_a_share_of_input_is_refused(shape, message):
     with pytest.raises(ConfigError, match=message):

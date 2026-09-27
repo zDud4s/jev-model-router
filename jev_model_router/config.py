@@ -8,6 +8,7 @@ field here rather than a table in source.
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -619,12 +620,14 @@ def _parse_task_shape(raw: Any) -> TaskShape | None:
     fields = ("input_per_output", "cache_read", "cache_write")
     if not isinstance(raw, dict) or set(raw) - set(fields):
         raise ConfigError(f"{where} takes only {', '.join(fields)}")
+    if any(isinstance(raw.get(k), bool) for k in fields):  # float(True) is 1.0: a typo, not a shape
+        raise ConfigError(f"{where} needs numbers for {', '.join(fields)}")
     try:
         ratio, read, write = (float(raw[k]) for k in fields)
     except (KeyError, TypeError, ValueError):
         raise ConfigError(f"{where} needs numbers for {', '.join(fields)}") from None
-    if ratio <= 0:
-        raise ConfigError(f"{where}.input_per_output must be positive, got {ratio}")
+    if not math.isfinite(ratio) or ratio <= 0:
+        raise ConfigError(f"{where}.input_per_output must be a positive finite number, got {ratio}")
     if not (0.0 <= read <= 1.0 and 0.0 <= write <= 1.0):
         raise ConfigError(f"{where}: cache_read and cache_write are fractions in [0, 1]")
     if read + write > 1.0 + 1e-9:
