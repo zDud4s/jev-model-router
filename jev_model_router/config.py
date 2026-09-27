@@ -599,6 +599,40 @@ _RULES = ("target", "expected_cost")
 
 
 @dataclass(frozen=True)
+class TaskShape:
+    """What a whole routed task processes, per output token: scale-free, so it orders tiers but budgets nothing.
+
+    Measured 2026-09-26 over 1461 local agent tasks: ~295 input tokens per output
+    token, 97.1% of it read from the prompt cache and 2.6% written to it.
+    """
+
+    input_per_output: float  # input tokens processed per output token, over a whole task
+    cache_read: float  # share of that input read from the cache
+    cache_write: float  # share written to it; the rest is fresh
+    source: str = "config"  # "config" | "observed:<n>" | "measured:<n>"
+
+
+def _parse_task_shape(raw: Any) -> TaskShape | None:
+    if raw is None:
+        return None
+    where = "router.capabilities.task_shape"
+    fields = ("input_per_output", "cache_read", "cache_write")
+    if not isinstance(raw, dict) or set(raw) - set(fields):
+        raise ConfigError(f"{where} takes only {', '.join(fields)}")
+    try:
+        ratio, read, write = (float(raw[k]) for k in fields)
+    except (KeyError, TypeError, ValueError):
+        raise ConfigError(f"{where} needs numbers for {', '.join(fields)}") from None
+    if ratio <= 0:
+        raise ConfigError(f"{where}.input_per_output must be positive, got {ratio}")
+    if not (0.0 <= read <= 1.0 and 0.0 <= write <= 1.0):
+        raise ConfigError(f"{where}: cache_read and cache_write are fractions in [0, 1]")
+    if read + write > 1.0 + 1e-9:
+        raise ConfigError(f"{where}: cache_read + cache_write cannot exceed 1, got {read + write:g}")
+    return TaskShape(ratio, read, write)
+
+
+@dataclass(frozen=True)
 class CapabilitiesConfig:
     """Jev reads a task packet; cards say which tier covers what it needs.
 
@@ -654,6 +688,10 @@ class CapabilitiesConfig:
     # requirement -> the highest level any of its cards may have. Written by
     # `calibrate --anchors` from `insufficient` anchors; applied last to every card.
     level_caps: dict[str, dict[str, float]] = field(default_factory=dict)
+    # How a whole routed task divides its input between fresh, cache read and
+    # cache write, per output token. Prices route-only decisions when every tier
+    # left has a shape (`calls.py`); `measure-shape` prints one.
+    task_shape: TaskShape | None = None
 
     @classmethod
     def parse(cls, raw: Any, tiers: dict[str, "TierConfig"], must_serve: Any) -> "CapabilitiesConfig":
@@ -662,7 +700,7 @@ class CapabilitiesConfig:
         unknown = set(raw) - {
             "jev_tier", "requirements", "cards", "target", "miss", "floor", "subscriptions", "max_packet_chars",
             "discover", "profiles", "fallback_profile", "effort_rules", "thinking", "miss_scale", "max_effort",
-            "rule", "failure", "family_scales", "benchmarks", "level_caps",
+            "rule", "failure", "family_scales", "benchmarks", "level_caps", "task_shape",
         }
         if unknown:
             raise ConfigError(f"unknown router.capabilities fields: {sorted(unknown)}")
@@ -800,6 +838,7 @@ class CapabilitiesConfig:
             family_scales=family_scales,
             benchmarks=_parse_benchmarks(raw.get("benchmarks")),
             level_caps=level_caps,
+            task_shape=_parse_task_shape(raw.get("task_shape")),
         )
 
 
