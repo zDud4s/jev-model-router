@@ -32,6 +32,8 @@ router:
   # capabilities:
   #   jev_tier: judge
   #   target: 0.8
+  #   on_jev_failure: fallback  # fallback | reject: when Jev does not answer, serve the
+  #                             # default tier, or refuse with 503 jev_unavailable
   #   discover:
   #     or:
   #       backend: openai_compatible

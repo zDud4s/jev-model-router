@@ -25,6 +25,9 @@ The answer has `model`, `effort`, `runner`, `success` (the router's estimate) an
 `decision_id`. Keep the `decision_id`. If it has a `why`, the router fell back to its
 default (for instance the judge could not be reached): mention it to the user.
 
+If `route` fails with HTTP 503 `jev_unavailable`, the router is set to refuse when its judge
+cannot be reached: tell the user, and use the default model rather than guessing one.
+
 `estimated_cost_usd` compares the tiers with each other; it is not a budget for the task.
 `cost_basis` says whether it priced the whole task by its cache-aware shape (`task_shape`)
 or as one call (`one_call`).

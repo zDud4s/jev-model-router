@@ -715,6 +715,29 @@ choice while the tier that dominates it is eligible and available, which usually
 card is wrong. It can still be picked on an exact tie (config order decides), by a retry after
 the dominating tier failed, while that tier's subscription is locked, or by the fallback.
 
+### When Jev does not answer
+
+With `router.kind: capabilities`, every decision starts with one call to the Jev tier. That
+call can fail — an HTTP error, a timeout, or an answer with no probability for something the
+request needs. By default (`on_jev_failure: fallback`) the request still gets served: the
+default tier answers blind, and the logged reason carries `"on_jev_failure":"fallback"` so a
+reader can tell a routed decision from one Jev never actually made. Blind means what it says —
+the default tier may be far dearer than the task needed, or too weak for it, and nothing in the
+response says so.
+
+`on_jev_failure: reject` refuses instead. Both `/v1/chat/completions` and `/v1/route` answer
+503 `jev_unavailable`, and the MCP `route` tool surfaces the same thing as a tool error. Nothing
+is called — no backend, no cost. A chat refusal is written to `requests` with `tier` NULL and
+`http_status` 503, the same table every served request lands in, because it is a request that
+was answered, just not with an inference. A route refusal is not a decision — no tier was
+chosen, so there is nothing to report an outcome on — and goes to its own table,
+`route_rejections`, instead of `route_decisions`. `stats` prints `JEV REJECTED` when either
+table has rows.
+
+Only the Jev call itself is in scope here. The other `_fallback` paths — no carded tier
+eligible, every carded tier locked, nothing rated above a tier that already failed — are
+routing outcomes with an answer to give, not an outage, and `reject` leaves them alone.
+
 ### Every model on an API: OpenRouter
 
 A `discover` source can be any API with an OpenAI-compatible `GET /models`. Every model
