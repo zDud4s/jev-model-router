@@ -149,6 +149,20 @@ def test_mcp_uses_a_running_proxy_when_the_env_var_names_one(monkeypatch):
     assert cli._build_parser().parse_args(["mcp"]).url is None
 
 
+async def test_a_jev_refusal_reaches_the_agent_as_a_tool_error(backend_factory):
+    from jev_model_router.app import create_app
+
+    config = parse_config(raw_config(on_jev_failure="reject"))
+    router = CapabilityRouter(config, ask=Ask(error=RuntimeError("jev timed out")))
+    app = create_app(config, backend_factory=backend_factory, log=RequestLog(":memory:"), router=router)
+    async with app.router.lifespan_context(app):
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport, base_url="http://jev-model-router") as client:
+            response = await McpServer(client, runners=["claude"]).handle(call(1, "route", {"task": "Fix it"}))
+    assert response["result"]["isError"] is True
+    assert "HTTP 503" in text_of(response) and "on_jev_failure is reject" in text_of(response)
+
+
 async def test_an_outcome_carries_cache_tokens_through(server):
     props = next(t for t in TOOLS if t["name"] == "report_outcome")["inputSchema"]["properties"]["usage"]["properties"]
     assert {"cached_tokens", "cache_write_tokens"} <= set(props)
