@@ -636,6 +636,41 @@ def _parse_task_shape(raw: Any) -> TaskShape | None:
 
 
 @dataclass(frozen=True)
+class UnsureFloor:
+    """When Jev cannot read a requirement, the pick must be good at it anyway.
+
+    A requirement whose p lies inside `band` (inclusive) is one Jev could not
+    tell either way, and the cheapest tier that reaches `target` may then rest
+    on a coin toss. The floor keeps only tiers whose card level on that
+    requirement is at least `min_level`. It is a level, not a tier name, so a
+    model released tomorrow is covered by the card it gets.
+    """
+
+    band: tuple[float, float] = (0.30, 0.70)
+    min_level: float = 2.0
+
+
+def _parse_unsure(raw: Any) -> UnsureFloor | None:
+    if raw is None:
+        return None
+    where = "router.capabilities.unsure"
+    if not isinstance(raw, dict) or set(raw) - {"band", "min_level"}:
+        raise ConfigError(f"{where} takes only 'band' and 'min_level'")
+    base = UnsureFloor()
+    band = raw.get("band", list(base.band))
+    if (not isinstance(band, (list, tuple)) or len(band) != 2
+            or any(isinstance(v, bool) or not isinstance(v, (int, float)) for v in band)):
+        raise ConfigError(f"{where}.band must be two numbers, [low, high]")
+    low, high = float(band[0]), float(band[1])
+    if not 0.0 <= low < high <= 1.0:
+        raise ConfigError(f"{where}.band must satisfy 0 <= low < high <= 1, got [{low:g}, {high:g}]")
+    level = raw.get("min_level", base.min_level)
+    if isinstance(level, bool) or not isinstance(level, (int, float)) or not 0.0 <= float(level) <= 3.0:
+        raise ConfigError(f"{where}.min_level must be a card level from 0 to 3, got {level!r}")
+    return UnsureFloor(band=(low, high), min_level=float(level))
+
+
+@dataclass(frozen=True)
 class CapabilitiesConfig:
     """Jev reads a task packet; cards say which tier covers what it needs.
 
@@ -695,6 +730,9 @@ class CapabilitiesConfig:
     # cache write, per output token. Prices route-only decisions when every tier
     # left has a shape (`calls.py`); `measure-shape` prints one.
     task_shape: TaskShape | None = None
+    # When Jev reads a requirement inside `band`, only tiers at `min_level` or
+    # above on it may be picked. None: off.
+    unsure: UnsureFloor | None = None
 
     @classmethod
     def parse(cls, raw: Any, tiers: dict[str, "TierConfig"], must_serve: Any) -> "CapabilitiesConfig":
@@ -703,7 +741,7 @@ class CapabilitiesConfig:
         unknown = set(raw) - {
             "jev_tier", "requirements", "cards", "target", "miss", "floor", "subscriptions", "max_packet_chars",
             "discover", "profiles", "fallback_profile", "effort_rules", "thinking", "miss_scale", "max_effort",
-            "rule", "failure", "family_scales", "benchmarks", "level_caps", "task_shape",
+            "rule", "failure", "family_scales", "benchmarks", "level_caps", "task_shape", "unsure",
         }
         if unknown:
             raise ConfigError(f"unknown router.capabilities fields: {sorted(unknown)}")
@@ -842,6 +880,7 @@ class CapabilitiesConfig:
             benchmarks=_parse_benchmarks(raw.get("benchmarks")),
             level_caps=level_caps,
             task_shape=_parse_task_shape(raw.get("task_shape")),
+            unsure=_parse_unsure(raw.get("unsure")),
         )
 
 

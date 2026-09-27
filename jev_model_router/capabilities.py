@@ -243,6 +243,8 @@ class CapabilityRouter:
         }
         if caps.task_shape is not None:  # only when set, so configs without one keep their fingerprint
             spec["task_shape"] = asdict(caps.task_shape)
+        if caps.unsure is not None:  # likewise
+            spec["unsure"] = asdict(caps.unsure)
         self.fingerprint = "capabilities:" + hashlib.sha256(
             json.dumps(spec, sort_keys=True).encode()
         ).hexdigest()[:12]

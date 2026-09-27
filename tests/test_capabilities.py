@@ -433,3 +433,50 @@ def test_one_observed_tier_without_a_config_shape_prices_the_whole_decision_as_o
         r.calls.record_task("sub", Usage(prompt_tokens=300_000, completion_tokens=1000, cached_tokens=299_000))
     d = decide_task(r)
     assert d.detail["cost_basis"] == "one_call" and d.tier == "cx"
+
+
+# ---------------------------------------------------------------- unsure floor
+# Jev read `reasoning` at 0.5: it cannot tell. The cheap card (level 1) still
+# reaches the target on it -- 1 - 0.375 * 0.5 = 0.8125 -- which is the gap the floor closes.
+UNSURE = {"reasoning": 0.5, "code": 0.05}
+
+
+def test_the_unsure_floor_is_off_unless_configured():
+    assert parse_config(raw_config()).router.capabilities.unsure is None
+
+
+def test_an_empty_unsure_block_turns_it_on_with_the_defaults():
+    floor = parse_config(raw_config(unsure={})).router.capabilities.unsure
+    assert floor.band == (0.30, 0.70) and floor.min_level == 2.0
+
+
+def test_the_unsure_floor_takes_its_band_and_level():
+    floor = parse_config(raw_config(unsure={"band": [0.4, 0.6], "min_level": 3})).router.capabilities.unsure
+    assert floor.band == (0.4, 0.6) and floor.min_level == 3.0
+
+
+@pytest.mark.parametrize(
+    "unsure, message",
+    [
+        ({"band": [0.3, 0.7], "level": 2}, "takes only"),
+        ("yes", "takes only"),
+        ({"band": [0.7, 0.3]}, "low < high"),
+        ({"band": [0.3, 1.2]}, "low < high"),
+        ({"band": [0.3]}, "two numbers"),
+        ({"band": [True, 0.7]}, "two numbers"),
+        ({"min_level": 4}, "0 to 3"),
+        ({"min_level": True}, "0 to 3"),
+    ],
+    ids=["unknown-key", "not-a-mapping", "band-order", "band-range", "band-length", "band-bool", "level-range",
+         "level-bool"],
+)
+def test_an_unsure_floor_that_would_mislead_is_refused(unsure, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_config(raw_config(unsure=unsure))
+
+
+def test_the_unsure_floor_changes_the_fingerprint_only_when_set():
+    base = router(Ask()).fingerprint
+    assert router(Ask()).fingerprint == base
+    assert router(Ask(), unsure={}).fingerprint != base
+    assert router(Ask(), unsure={}).fingerprint != router(Ask(), unsure={"min_level": 3}).fingerprint
