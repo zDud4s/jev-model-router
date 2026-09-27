@@ -212,6 +212,9 @@ class Stats:
     classifier: ClassifierStats | None = None
     billing: BillingStats | None = None
     task_cost: TaskCostStats | None = None
+    # Refused because Jev did not answer under `on_jev_failure: reject`.
+    jev_rejected_chat: int = 0
+    jev_rejected_route: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -293,6 +296,10 @@ def collect(log: RequestLog, task_shape: TaskShape | None = None) -> Stats:
         log_failures=len(log.query("SELECT id FROM log_failures")),
         by_tier=by_tier,
         baselines=baselines,
+        # Not filtered on route_score: a refused row has none.
+        jev_rejected_chat=log.query(
+            "SELECT COUNT(*) AS n FROM requests WHERE route_reason LIKE '{\"rule\":\"jev_failure\"%'")[0]["n"],
+        jev_rejected_route=log.query("SELECT COUNT(*) AS n FROM route_rejections")[0]["n"],
     )
 
 
@@ -598,6 +605,9 @@ def format_text(stats: Stats) -> str:
     lines.append(f"actual spend    ${stats.total_cost_usd:.6f}")
     if stats.log_failures:
         lines.append(f"LOG FAILURES    {stats.log_failures}  (rows that could not be written)")
+    rejected = stats.jev_rejected_chat + stats.jev_rejected_route
+    if rejected:
+        lines.append(f"JEV REJECTED    {rejected}  (chat {stats.jev_rejected_chat}, route {stats.jev_rejected_route})")
 
     lines.append("")
     lines.append("spend by tier")

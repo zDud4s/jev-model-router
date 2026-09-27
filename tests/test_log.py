@@ -371,3 +371,16 @@ def test_stats_pools_the_same_shape_the_router_does() -> None:
     assert (row.input_per_output, row.cache_read, row.cache_write) == (
         round(shape.input_per_output, 1), round(shape.cache_read, 3), round(shape.cache_write, 3),
     )
+
+
+def test_stats_count_what_was_refused_because_jev_did_not_answer() -> None:
+    log = RequestLog(":memory:")
+    assert "JEV REJECTED" not in format_text(collect(log))
+    log.record(LogEntry(request_id="req_1", prompt_text="hi", http_status=503,
+                        route_reason='{"rule":"jev_failure","on_jev_failure":"reject","why":"x"}'))
+    log.record(LogEntry(request_id="req_2", prompt_text="hi", http_status=200,
+                        route_reason='{"rule":"fallback","why":"jev error: x","on_jev_failure":"fallback"}'))
+    log.record_rejection("rj_1", task="t", stage=None, route_model=None, route_reason="{}")
+    stats = collect(log)
+    assert (stats.jev_rejected_chat, stats.jev_rejected_route) == (1, 1)
+    assert "JEV REJECTED    2  (chat 1, route 1)" in format_text(stats)
