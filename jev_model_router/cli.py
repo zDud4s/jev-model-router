@@ -68,7 +68,10 @@ def _build_parser() -> argparse.ArgumentParser:
     measure = sub.add_parser("measure-shape",
                              help="measure a task shape from this machine's agent transcripts (read-only)")
     measure.add_argument("--match", default=None, help="only transcripts whose project directory or cwd contains this")
-    measure.add_argument("--since", default=None, help="only activity from this date on, e.g. 2026-09-01")
+    measure.add_argument("--since", default=None,
+                         help="only activity from this date on, e.g. 2026-09-01 (read as UTC if it names no zone); "
+                              "a Claude message is kept or dropped on its own timestamp, a Codex rollout by its "
+                              "last one, since an earlier cumulative total cannot be recovered")
     measure.add_argument("--claude-dir", default=os.path.join(os.path.expanduser("~"), ".claude", "projects"),
                          help=argparse.SUPPRESS)
     measure.add_argument("--codex-dir", default=os.path.join(os.path.expanduser("~"), ".codex", "sessions"),

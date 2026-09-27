@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+from datetime import datetime, timezone
 from pathlib import Path
 
 import yaml
@@ -21,8 +22,9 @@ def write(path: Path, records: list[dict], junk: tuple[str, ...] = ()) -> None:
     path.write_text("\n".join([json.dumps(r) for r in records] + list(junk)) + "\n", encoding="utf-8")
 
 
-def turn(session, mid, *, fresh=10, read=900, write=50, out=20, agent=None, model="model-a", cwd="C:/work/proj"):
-    record = {"sessionId": session, "cwd": cwd, "timestamp": TS, "message": {
+def turn(session, mid, *, fresh=10, read=900, write=50, out=20, agent=None, model="model-a", cwd="C:/work/proj",
+        ts=TS):
+    record = {"sessionId": session, "cwd": cwd, "timestamp": ts, "message": {
         "id": mid, "model": model, "usage": {"input_tokens": fresh, "cache_read_input_tokens": read,
                                              "cache_creation_input_tokens": write, "output_tokens": out}}}
     if agent:
@@ -30,11 +32,11 @@ def turn(session, mid, *, fresh=10, read=900, write=50, out=20, agent=None, mode
     return record
 
 
-def rollout(cwd, *totals):
-    records = [{"type": "session_meta", "timestamp": TS, "payload": {"cwd": cwd}},
-               {"type": "turn_context", "timestamp": TS, "payload": {"model": "model-b", "cwd": cwd}}]
+def rollout(cwd, *totals, ts=TS):
+    records = [{"type": "session_meta", "timestamp": ts, "payload": {"cwd": cwd}},
+               {"type": "turn_context", "timestamp": ts, "payload": {"model": "model-b", "cwd": cwd}}]
     for inp, cached, out in totals:
-        records.append({"type": "event_msg", "timestamp": TS, "payload": {"type": "token_count", "info": {
+        records.append({"type": "event_msg", "timestamp": ts, "payload": {"type": "token_count", "info": {
             "total_token_usage": {"input_tokens": inp, "cached_input_tokens": cached, "output_tokens": out}}}})
     return records
 
@@ -87,3 +89,31 @@ def test_the_command_prints_the_report(tmp_path, capsys):
     out = capsys.readouterr().out
     assert code == 0 and "model-a" in out and "task_shape:" in out
     assert report(Scan()).startswith("tasks: 0")
+
+
+def test_a_split_message_counts_its_fullest_usage_once(tmp_path):
+    write(tmp_path / "proj" / "s1.jsonl", [turn("s1", "m1", out=10), turn("s1", "m1", out=30)])
+    (task,) = claude_tasks(tmp_path).tasks
+    assert task.output == 30  # the larger of the two lines, not their sum
+
+
+def test_since_drops_an_earlier_claude_message_but_keeps_a_later_one(tmp_path):
+    since = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    write(tmp_path / "proj" / "s1.jsonl", [
+        turn("s1", "m1", ts="2026-09-01T00:00:00Z", out=10),
+        turn("s1", "m2", ts="2026-09-20T00:00:00Z", out=20),
+    ])
+    (task,) = claude_tasks(tmp_path, since=since).tasks
+    assert task.output == 20
+
+
+def test_since_drops_a_codex_rollout_whose_last_stamp_is_earlier(tmp_path):
+    since = datetime(2026, 9, 15, tzinfo=timezone.utc)
+    write(tmp_path / "rollout-1.jsonl", rollout("C:/work/proj", (1000, 900, 10), ts="2026-09-01T00:00:00Z"))
+    assert codex_tasks(tmp_path, since=since).tasks == []
+
+
+def test_an_unparseable_since_is_rejected(tmp_path):
+    code = cli.main(["measure-shape", "--since", "nope", "--claude-dir", str(tmp_path / "claude"),
+                     "--codex-dir", str(tmp_path / "codex")])
+    assert code == 2

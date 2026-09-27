@@ -7,11 +7,18 @@ from what this machine's agents actually ran. Read-only, offline, and it names
 no model: it reports the model strings it finds. A line or file that does not
 parse is counted and skipped.
 
-- Claude Code, `~/.claude/projects/<project>/**/*.jsonl`: a message is written
-  once per content block, so each `usage` counts once, by message id. One task
-  is a session, or a subagent sidechain within one.
+- Claude Code, `~/.claude/projects/<project>/**/*.jsonl`: a message can be
+  written across several lines as it streams, and an earlier line may carry
+  only partial (streaming-start) usage, so lines are grouped by message id
+  and only the largest value of each usage field counts, once, per message.
+  One task is a session, or a subagent sidechain within one. `--since` drops
+  individual messages timestamped before it.
 - Codex, `~/.codex/sessions/**/rollout-*.jsonl`: usage is cumulative, so the
   last `total_token_usage` is the task's. Codex reports no cache writes.
+  `--since` keeps or drops a whole rollout by its last timestamp, since an
+  earlier cumulative total cannot be recovered on its own.
+
+A `--since` date given with no timezone is read as UTC.
 """
 
 from __future__ import annotations
@@ -25,6 +32,7 @@ from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 
+from .calls import accepts_task_row
 from .config import TaskShape
 
 
@@ -85,8 +93,11 @@ def _before(stamp: Any, since: datetime | None) -> bool:
 def claude_tasks(root: Path, *, match: str | None = None, since: datetime | None = None,
                  scan: Scan | None = None) -> Scan:
     scan = scan if scan is not None else Scan()
-    groups: dict[tuple[Any, Any], tuple[Counter[str], Task]] = {}
-    seen: set[str] = set()
+    # Per (session, sidechain) group: model tally, and per message id the
+    # largest value seen so far for each of the four usage fields -- a
+    # message split across lines (streamed) may report partial usage on an
+    # earlier line. A line with no id to merge on counts on its own.
+    groups: dict[tuple[Any, Any], tuple[Counter[str], dict[Any, list[int]]]] = {}
     for path in sorted(Path(root).glob("*/**/*.jsonl")):
         project = path.relative_to(root).parts[0]
         for record in _records(path, scan):
@@ -98,20 +109,25 @@ def claude_tasks(root: Path, *, match: str | None = None, since: datetime | None
                 continue
             if _before(record.get("timestamp"), since):
                 continue
-            mid = message.get("id") or record.get("requestId") or record.get("uuid")
-            if mid:
-                if mid in seen:
-                    continue
-                seen.add(mid)
-            key = (record.get("sessionId"), record.get("agentId") if record.get("isSidechain") else None)
-            models, task = groups.setdefault(key, (Counter(), Task("claude", "")))
+            agent = (record.get("agentId") or "sidechain") if record.get("isSidechain") else None
+            key = (record.get("sessionId"), agent)
+            models, messages = groups.setdefault(key, (Counter(), {}))
             models[str(message.get("model") or "?")] += 1
-            task.fresh += _int(usage.get("input_tokens"))
-            task.read += _int(usage.get("cache_read_input_tokens"))
-            task.write += _int(usage.get("cache_creation_input_tokens"))
-            task.output += _int(usage.get("output_tokens"))
-    for models, task in groups.values():
-        task.model = models.most_common(1)[0][0]
+            fields = [_int(usage.get("input_tokens")), _int(usage.get("cache_read_input_tokens")),
+                      _int(usage.get("cache_creation_input_tokens")), _int(usage.get("output_tokens"))]
+            mid = message.get("id") or record.get("requestId")
+            if mid is None:
+                messages[object()] = fields  # nothing to merge on: this line stands alone
+            else:
+                existing = messages.get(mid)
+                messages[mid] = fields if existing is None else [max(a, b) for a, b in zip(existing, fields)]
+    for models, messages in groups.values():
+        task = Task("claude", models.most_common(1)[0][0])
+        for fresh, read, write, output in messages.values():
+            task.fresh += fresh
+            task.read += read
+            task.write += write
+            task.output += output
         if task.input > 0 and task.output > 0:
             scan.tasks.append(task)
     return scan
@@ -137,7 +153,9 @@ def codex_tasks(root: Path, *, match: str | None = None, since: datetime | None 
         cached = _int(last.get("cached_input_tokens"))
         task = Task("codex", str(model or "?"), fresh=max(_int(last.get("input_tokens")) - cached, 0),
                     read=cached, output=_int(last.get("output_tokens")))
-        if task.input > 0 and task.output > 0:
+        # Codex always reports its cache (0 when unused), so this format's rows share
+        # the same acceptance rule `calls.py` applies to a live call's outcome.
+        if accepts_task_row(task.input, task.output, task.read, task.write, reports_cache=True):
             scan.tasks.append(task)
     return scan
 
