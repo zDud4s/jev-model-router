@@ -44,6 +44,18 @@ def test_under_reject_a_jev_failure_is_a_503_kept_as_a_rejection_not_a_decision(
     assert '"on_jev_failure":"reject"' in row["route_reason"]
 
 
+def test_a_jev_failure_does_not_claim_logged_as_when_the_rejection_write_fails(backend_factory):
+    client, log, _ = client_for(backend_factory, Ask(error=RuntimeError("jev timed out")),
+                                on_jev_failure="reject")
+    log.query("DROP TABLE route_rejections")
+    with client:
+        response = client.post("/v1/route", json=TASK)
+    assert response.status_code == 503
+    error = response.json()["error"]
+    assert error["code"] == "jev_unavailable"
+    assert "logged as" not in error["message"]
+
+
 def test_a_task_gets_a_model_an_effort_and_a_runner_and_nothing_runs(backend_factory, fake_backends):
     ask = Ask(HARD)
     client, log, _ = client_for(backend_factory, ask)

@@ -67,6 +67,18 @@ def test_a_dry_run_under_reject_with_jev_down_shows_the_refusal(backend_factory)
         [trace] = client.get("/routing/traces").json()["traces"]
     assert body["tier"] is None and "jev timed out" in body["error"]
     assert trace["status"] == "error"
+    # The refusal is on the trace itself, not just the response body, so the
+    # live /routing page can show it against the request that hit it.
+    route = next(s for s in trace["stages"] if s["name"] == "route")
+    assert "jev timed out" in route["error"]
+
+
+def test_the_routing_page_shows_a_route_stage_error(backend_factory):
+    """Minimal but present: the page reads `error` off a dry-run reply and a route stage."""
+    app = app_with(backend_factory)
+    with TestClient(app) as client:
+        page = client.get("/routing").text
+    assert "result.error" in page and "route.error" in page
 
 
 def test_polling_after_a_sequence_returns_only_what_moved(backend_factory):

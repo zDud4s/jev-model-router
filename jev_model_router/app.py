@@ -331,6 +331,7 @@ def create_app(
                 if inspect.isawaitable(decision):
                     decision = await decision
             except JevUnavailable as exc:
+                traces.stage(trace, "route", error=f"jev_unavailable: {exc.why}", jev_ms=exc.jev_ms)
                 traces.finish(trace, "error")
                 return {"trace": trace["id"], "tier": None, "error": f"jev_unavailable: {exc.why}"}
             traces.stage(trace, "route", **_route_view(decision, config, began))
@@ -462,14 +463,15 @@ def create_app(
                 decision = await decision
         except JevUnavailable as exc:
             if trace is not None:
+                traces.stage(trace, "route", error=f"jev_unavailable: {exc.why}", jev_ms=exc.jev_ms)
                 traces.finish(trace, "error")
             # Not a decision: nothing to report an outcome on, so no decision_id.
             rejection_id = f"rj_{uuid.uuid4().hex[:16]}"
-            await asyncio.to_thread(
+            logged = await asyncio.to_thread(
                 request_log.record_rejection, rejection_id, task=_prompt_text(request), stage=ask.stage,
                 route_model=exc.router, route_reason=exc.reason,
             )
-            return _jev_unavailable(exc, rejection_id)
+            return _jev_unavailable(exc, rejection_id if logged else None)
         tier = config.tiers[decision.tier]
         detail = decision.detail or {}
         picked = next((o for o in detail.get("options", []) if o.get("tier") == decision.tier), {})
@@ -622,6 +624,7 @@ def create_app(
             if inspect.isawaitable(decision):
                 decision = await decision
         except JevUnavailable as exc:
+            stage("route", error=f"jev_unavailable: {exc.why}", jev_ms=exc.jev_ms)
             if trace is not None:
                 traces.finish(trace, "error")
             base_entry.http_status = 503

@@ -398,8 +398,8 @@ function renderDetail() {
   const pipeline = el("div", { class: "pipeline" },
     step("Received", t.requested_model === "auto" ? "auto" : t.requested_model, 0, "done"),
     step("Eligible", elig ? `${elig.eligible.length} of ${elig.eligible.length + elig.rejected.length}` : null, elig && elig.t_ms, elig ? (elig.eligible.length ? "done" : "fail") : "wait"),
-    step("Jev", d.jev_ms != null ? `${d.jev_ms} ms` : (route ? (route.reason === "requested" ? "skipped: named" : "—") : null), route && route.t_ms, route ? "done" : "wait"),
-    step("Decision", route ? route.tier : null, route && route.t_ms, route ? (d.rule === "fallback" ? "fail" : "done") : "wait"),
+    step("Jev", d.jev_ms != null ? `${d.jev_ms} ms` : route && route.jev_ms != null ? `${route.jev_ms} ms` : (route ? (route.reason === "requested" ? "skipped: named" : "—") : null), route && route.t_ms, route ? (route.error ? "fail" : "done") : "wait"),
+    step("Decision", route ? (route.error || route.tier) : null, route && route.t_ms, route ? (route.error || d.rule === "fallback" ? "fail" : "done") : "wait"),
     step("Model", t.kind === "dry-run" ? "not run" : call ? `${call.model}${call.effort ? " @" + call.effort : ""}` : null, call && call.t_ms, t.kind === "dry-run" ? "wait" : call ? "done" : "wait"),
     step("Done", t.kind === "dry-run" ? "routed" : done ? `HTTP ${done.status}` : t.status, done ? done.t_ms : t.total_ms, failed ? "fail" : (done || t.kind === "dry-run") && t.status === "ok" ? "done" : "wait"));
 
@@ -408,7 +408,8 @@ function renderDetail() {
     el("div", { class: "prompt" }, t.preview || "(no user message)"), pipeline);
 
   const cards = [head];
-  if (route) cards.push(decisionCard(route, d));
+  if (route && route.error) cards.push(errorCard(route));
+  else if (route) cards.push(decisionCard(route, d));
   if (d.needs && Object.keys(d.needs).length) cards.push(el("div", { class: "two" }, needsCard(d), packetCard(d)));
   if (d.options && d.options.length) cards.push(optionsCard(d));
   if (done || answer) cards.push(answerCard(answer, done));
@@ -416,6 +417,10 @@ function renderDetail() {
     el("summary", { class: "hint" }, `${elig.rejected.length} tier(s) not eligible`),
     el("div", { class: "rej" }, ...elig.rejected.map((r) => el("div", {}, el("b", {}, r.tier), ` — ${r.reason}: ${r.detail}`)))));
   $("#detail").replaceChildren(...cards);
+}
+
+function errorCard(route) {
+  return el("div", { class: "panel card" }, el("h2", {}, "Refused"), el("pre", { class: "status-error" }, route.error));
 }
 
 function decisionCard(route, d) {
@@ -549,7 +554,9 @@ async function submit(kind) {
   try {
     const r = await fetch(kind === "dry" ? "/routing/dry-run" : "/v1/chat/completions",
       { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-    if (!r.ok) { const e = await r.json().catch(() => ({})); $("#err").textContent = (e.error && e.error.message) || `HTTP ${r.status}`; }
+    const result = await r.json().catch(() => ({}));
+    if (!r.ok) { $("#err").textContent = (result.error && result.error.message) || `HTTP ${r.status}`; }
+    else if (result.error) { $("#err").textContent = result.error; }
   } catch (e) { $("#err").textContent = String(e); }
   finally { for (const b of [$("#dry"), $("#send")]) b.disabled = false; }
 }
