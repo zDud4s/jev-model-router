@@ -644,7 +644,8 @@ function renderTiers() {
     const beaten = t.dominated_by.length;
     return el("tr", { class: beaten ? "dom" : "", title: beaten ? `beaten by ${t.dominated_by.join(", ")}` : "" },
       el("td", { class: "name" }, tierChip(t.name),
-        el("div", { class: "sub" }, [t.model, t.family ? `family ${t.family}` : null, t.card].filter(Boolean).join(" · "))),
+        el("div", { class: "sub" }, [t.model, t.family ? `family ${t.family}` : null, t.card,
+          t.prices_from ? `prices ${t.prices_from}` : null].filter(Boolean).join(" · "))),
       el("td", {}, t.effort || "—"),
       el("td", { class: "num" }, `${fmt(t.prices.input)} · ${fmt(t.prices.output)}`),
       el("td", { class: "num" }, t.output_tokens),

@@ -107,6 +107,8 @@ def build(
             "family": card.family,
             "card": "derived" if derived is not None else ("profile" if card.family is not None else "configured"),
             "prices": _prices(router, config, name),
+            # The listing, the profile or the config; "tier" when the tier bills its own prices.
+            "prices_from": "tier" if tier is not None and tier.prices.configured else card.list_prices_from,
             "output_tokens": card.output_tokens,
             "input_overhead": card.input_overhead,
             "levels": levels,

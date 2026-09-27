@@ -506,6 +506,8 @@ def test_the_tiers_view_shows_each_level_its_source_evidence_and_the_profile_it_
     assert (large["backend"], large["model"], large["effort"], large["family"]) == (
         "claude_cli", "acme-large", "high", "acme-large")
     assert large["prices"]["output"] == 25.0 and large["output_tokens"] > 0
+    # No listing source in this fixture, so a discovered card keeps its profile's prices.
+    assert large["prices_from"].startswith("profile:")
     reasoning = large["levels"]["reasoning"]
     served = app.state.config.router.capabilities.cards["cli:acme-large@high"].levels["reasoning"]
     assert reasoning["level"] == pytest.approx(served, abs=1e-3) and reasoning["profile_level"] == 2.0

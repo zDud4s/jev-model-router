@@ -359,6 +359,10 @@ class ModelCard:
     # kind of call costs money at the margin -- a weight written there would be
     # logged as money spent.
     list_prices: Prices = field(default_factory=Prices)
+    # Where `list_prices` came from: "listing:<base_url> <id>" when a provider's
+    # listing sells the same model, "profile:<match>" when the profile's
+    # hand-written prices stand, "config" for a card written in the config.
+    list_prices_from: str = "config"
     # The profile it was built from (its `match`), so calibration learnt from
     # outcomes can be kept per family rather than one number for every model.
     family: str | None = None

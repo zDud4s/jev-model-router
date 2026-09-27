@@ -147,6 +147,10 @@ def create_app(
 
                     print(f"  on the fallback profile (write a profile): {len(unprofiled)}: {some(unprofiled)}",
                           file=sys.stderr)
+                from .discovery import stale_profiles
+
+                for line in stale_profiles(config):
+                    print(f"  {line}", file=sys.stderr)
                 from .discovery import unused_caps
 
                 unused = unused_caps(config)

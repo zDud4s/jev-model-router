@@ -17,7 +17,7 @@ from jev_model_router.capabilities import CapabilityRouter
 from jev_model_router.catalog import CatalogReport, Offered, Source, models_source
 from jev_model_router.config import ConfigError, parse_config
 from jev_model_router.db import RequestLog
-from jev_model_router.discovery import expand
+from jev_model_router.discovery import expand, stale_profiles
 
 from conftest import BASE_CONFIG, make_request
 
@@ -193,6 +193,74 @@ def test_a_listed_price_the_listing_leaves_out_is_not_free():
     assert prices.configured and prices.input == 2.0
     assert prices.cache_read == 2.0  # the input rate: a cache discount has to be stated to be claimed
     assert prices.cache_write_configured is False
+
+
+OPUS = "claude:claude-opus-5-5@high"
+LISTED = or_entry("anthropic/claude-opus-5.5", prompt=5.0, completion=25.0,
+                  input_cache_read=0.5, input_cache_write=6.25)
+
+
+def test_a_cli_tier_takes_its_models_listed_prices_cache_included():
+    config, _, _ = with_listing(LISTED)
+    card = config.router.capabilities.cards[OPUS]
+    p = card.list_prices
+    assert (p.input, p.output, p.cache_read, p.cache_write) == (5.0, 25.0, 0.5, 6.25)
+    assert p.cache_write_configured
+    assert card.list_prices_from == f"listing:{OR} anthropic/claude-opus-5.5"
+    # Only the router's estimate moves: a subscription call is still logged as billing nothing.
+    assert not config.tiers[OPUS].prices.configured
+
+
+def test_an_alias_is_not_a_second_price_for_the_model():
+    alias = or_entry("~anthropic/claude-opus-5.5", prompt=9.0, completion=9.0,
+                     extra={"alias_target": "anthropic/claude-opus-5.5"})
+    config, _, _ = with_listing(LISTED, alias)
+    assert config.router.capabilities.cards[OPUS].list_prices.input == 5.0
+
+
+def test_no_listing_entry_or_two_leave_the_profile_prices():
+    two, _, _ = with_listing(LISTED, or_entry("other/claude-opus-5-5", prompt=4.0, completion=20.0))
+    none, _, _ = with_listing(or_entry("vendor/unrelated", prompt=1.0, completion=2.0))
+    for config in (two, none):
+        card = config.router.capabilities.cards[OPUS]
+        assert (card.list_prices.input, card.list_prices.cache_read) == (5.0, 5.0)  # the profile's, no cache price
+        assert card.list_prices_from == "profile:claude-opus-*"
+
+
+def test_explicit_billed_and_local_tiers_keep_their_prices():
+    raw = listing_raw()
+    raw["tiers"]["mine"] = {"backend": "claude_cli", "model": "claude-opus-5-5", "effort": "high",
+                            "context_window": 1_000_000}
+    local = or_entry("qwen/qwen3.5-4b", prompt=0.05, completion=0.1)
+    config, _, _ = with_listing(LISTED, local, raw=raw)
+    cards = config.router.capabilities.cards
+    assert cards["mine"].list_prices_from == "profile:claude-opus-*"  # the operator's tier
+    assert cards["or:anthropic/claude-opus-5.5"].list_prices_from.startswith("profile:")  # billed by the listing
+    assert cards["local:qwen3.5:4b"].list_prices_from == "profile:qwen*"  # a shadow price, not an API's
+    assert cards["claude:claude-opus-5-5@medium"].list_prices_from.startswith("listing:")
+
+
+def test_a_hand_written_card_says_it_came_from_the_config():
+    raw = raw_config()
+    raw["router"]["capabilities"]["cards"] = {"mid": {"levels": {"reasoning": 2}}}
+    config, _, _ = expand(parse_config(raw), REPORT, None)
+    assert config.router.capabilities.cards["mid"].list_prices_from == "config"
+
+
+def test_a_profile_the_listing_contradicts_is_named_once():
+    cheaper, _, _ = with_listing(or_entry("anthropic/claude-opus-5.5", prompt=4.0, completion=20.0))
+    assert stale_profiles(cheaper) == ["profile claude-opus-* list_prices 5/25; listing says 4/20"]
+    assert stale_profiles(with_listing(LISTED)[0]) == []
+
+
+def test_startup_names_a_stale_profile(backend_factory, capsys):
+    raw = listing_raw()
+    raw["catalog"] = {"check_on_start": True, "path": None}
+    rep = report(**{**REPORT.discovered, "or": or_listing(or_entry("anthropic/claude-opus-5.5", prompt=4.0,
+                                                                     completion=20.0))})
+    create_app(parse_config(raw), backend_factory=backend_factory, log=RequestLog(":memory:"),
+               catalog_check=lambda config: rep)
+    assert "profile claude-opus-* list_prices 5/25; listing says 4/20" in capsys.readouterr().err
 
 
 # ---------------------------------------------------------------- config

@@ -30,6 +30,7 @@ from __future__ import annotations
 
 import fnmatch
 from dataclasses import dataclass, replace
+from typing import Callable
 
 from .catalog import CatalogReport, Offered, _older
 from .config import (
@@ -43,7 +44,7 @@ from .config import (
     TierConfig,
     capped,
 )
-from .scores import Scores, benchmark_weights
+from .scores import Scores, _norm, benchmark_weights
 from .scores_derive import DerivedCard, derive, effort_prior, line_for, served_keys
 
 
@@ -82,6 +83,7 @@ def card_for(
         output_tokens=output,
         input_overhead=source.input_overhead,
         list_prices=profile.list_prices,
+        list_prices_from=f"profile:{profile.match}",
         family=profile.match,
     )
 
@@ -157,6 +159,44 @@ def _explicit(
     return out
 
 
+def _listing_key(scores: Scores | None) -> Callable[[str], str]:
+    """The key a listing id and a CLI model id meet under: benchmark evidence's rule, or its normalisation alone.
+
+    Without a benchmarks file there are no aliases and no date rules, so a dated
+    listing id matches nothing and its CLI tier keeps the profile's prices.
+    """
+    if scores is not None:
+        return scores.key
+    return lambda text: _norm(text.strip().split("/")[-1])
+
+
+def listing_index(
+    caps: CapabilitiesConfig, report: CatalogReport, key: Callable[[str], str]
+) -> dict[str, list[tuple[str, str, Prices]]]:
+    """Model key -> (base_url, id, prices) for every priced model a listing offers; variants and aliases left out."""
+    index: dict[str, list[tuple[str, str, Prices]]] = {}
+    for name, source in caps.discover.items():
+        served = report.discovered.get(name)
+        if served is None:
+            continue
+        for model in served.models.values():
+            if not model.prices or model.same_as is not None or model.unpriceable:
+                continue
+            index.setdefault(key(model.id), []).append((source.base_url, model.id, Prices.parse(model.prices)))
+    return index
+
+
+def _listed_for(
+    ids: tuple[str, ...], index: dict[str, list[tuple[str, str, Prices]]], key: Callable[[str], str]
+) -> tuple[str, str, Prices] | None:
+    """The one listing entry under any of this model's keys; None for none or several (two prices are no answer)."""
+    hits = {(base, mid): prices for k in dict.fromkeys(key(i) for i in ids) for base, mid, prices in index.get(k, [])}
+    if len(hits) != 1:
+        return None
+    (base, mid), prices = next(iter(hits.items()))
+    return base, mid, prices
+
+
 def expand(
     config: Config, report: CatalogReport, scores: Scores | None = None
 ) -> tuple[Config, list[Discovered], list[str]]:
@@ -224,7 +264,9 @@ def expand(
                 )
                 pending.append((tier_name, ids_of(model), effort, profile, source))
                 found.append(Discovered(tier_name, name, model.id, effort, profile.match if matched else "*fallback*"))
-    pending += [(t, ids_of(m), e, p, s) for t, m, e, p, s in _explicit(config, report)]
+    explicit_pending = _explicit(config, report)
+    explicit_names = {t for t, *_ in explicit_pending}
+    pending += [(t, ids_of(m), e, p, s) for t, m, e, p, s in explicit_pending]
     pending = _with_evidence(caps, scores, pending, tiers, found)
     unprofiled += [f"{d.source}:{d.model}" for d in found if d.profile == "*fallback*"]
     unprofiled = list(dict.fromkeys(unprofiled))
@@ -238,6 +280,21 @@ def expand(
         for tier_name, ids, effort, profile, source in pending:
             derived = derive(caps, scores, keys[_named(source, ids)], effort, profile, line, weights)
             cards[tier_name] = card_for(caps, profile, effort, source, derived)
+    # A subscription tier bills nothing per call, so its card carries the price
+    # its quota is weighed at. Where a listing sells the same model, that is the
+    # provider's own price, cache included, rather than a hand-written guess.
+    key = _listing_key(scores)
+    index = listing_index(caps, report, key)
+    for tier_name, ids, _, _, _ in pending:
+        tier = tiers[tier_name]
+        if tier_name in explicit_names or tier.subscription is None or tier.prices.configured:
+            continue
+        listed = _listed_for(ids, index, key)
+        if listed is not None:
+            base, model_id, prices = listed
+            cards[tier_name] = replace(
+                cards[tier_name], list_prices=prices, list_prices_from=f"listing:{base} {model_id}"
+            )
     new_caps = replace(caps, cards=cards)
     new_router = replace(config.router, capabilities=new_caps)
     return replace(config, tiers=tiers, router=new_router), found, unprofiled
@@ -344,6 +401,27 @@ def served_ids(
     return out
 
 
+def stale_profiles(config: Config) -> list[str]:
+    """One line per profile whose hand-written prices a listing contradicts: how a stale profile becomes visible."""
+    caps = config.router.capabilities
+    if caps is None:
+        return []
+    profiles = {p.match: p for p in caps.profiles}
+    lines: list[str] = []
+    for _, card in sorted(caps.cards.items()):
+        profile = profiles.get(card.family or "")
+        if profile is None or not card.list_prices_from.startswith("listing:"):
+            continue
+        mine, listed = profile.list_prices, card.list_prices
+        if (mine.input, mine.output) == (listed.input, listed.output):
+            continue
+        line = (f"profile {profile.match} list_prices {mine.input:g}/{mine.output:g}; "
+                f"listing says {listed.input:g}/{listed.output:g}")
+        if line not in lines:
+            lines.append(line)
+    return lines
+
+
 def unused_caps(config: Config) -> list[str]:
     """`level_caps` keys no card has: not an error, since a model can leave the catalog."""
     caps = config.router.capabilities
@@ -354,5 +432,6 @@ def unused_caps(config: Config) -> list[str]:
 
 
 __all__ = [
-    "Discovered", "card_for", "derived_cards", "derived_tiers", "expand", "model_ids", "profile_for", "served_ids", "unused_caps",
+    "Discovered", "card_for", "derived_cards", "derived_tiers", "expand", "listing_index", "model_ids", "profile_for",
+    "served_ids", "stale_profiles", "unused_caps",
 ]
