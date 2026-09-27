@@ -755,7 +755,9 @@ them.
 
 Every decision with an unsure requirement logs `reason.unsure`. When the floor changed the
 tier, it also logs the tier that would have won (`raised_from`) and the estimated difference
-(`extra`). `stats` prints an `unsure floor` block with:
+(`extra`). A `/v1/route` answer carries the same object as `unsure`, because the caller
+runs the model itself and would otherwise never see it. `stats` prints an `unsure floor`
+block with:
 
 - the counts;
 - the estimated extra;

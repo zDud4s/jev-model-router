@@ -482,6 +482,8 @@ def create_app(
             # Why a fallback fell back (Jev unreachable, no key...): the caller
             # cannot see the router's stderr.
             **({"why": detail["why"]} if detail.get("why") else {}),
+            # Jev could not read a requirement: which, and whether the floor raised the pick.
+            **({"unsure": detail["unsure"]} if detail.get("unsure") else {}),
             "router": decision.model,
             "unknown_failed": list(ask.unknown_failed),
         }

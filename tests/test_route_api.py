@@ -15,7 +15,7 @@ from jev_model_router.db import RequestLog
 from jev_model_router.schemas import Usage
 from jev_model_router.stats import collect
 
-from test_capabilities import HARD, UNSURE, Ask, raw_config
+from test_capabilities import EASY, HARD, UNSURE, Ask, raw_config
 
 TASK = {"task": "Fix the race in the scheduler", "stage": "implement", "files": ["core/src/scheduler.rs"]}
 
@@ -177,5 +177,13 @@ def test_an_unsure_reading_goes_from_route_to_the_stats_block(backend_factory):
     with client:
         body = client.post("/v1/route", json=TASK).json()
         assert body["tier"] == "cx"
+        # The caller runs the model itself, so it is told the reading was a coin toss.
+        assert body["unsure"]["reqs"] == ["reasoning"] and body["unsure"]["raised_from"][0] == "cheap"
         u = collect(log).unsure
     assert u.decisions == 1 and u.raised == 1
+
+
+def test_a_confident_reading_adds_no_unsure_field_to_the_route(backend_factory):
+    client, _, _ = client_for(backend_factory, Ask(EASY), unsure={})
+    with client:
+        assert "unsure" not in client.post("/v1/route", json=TASK).json()
