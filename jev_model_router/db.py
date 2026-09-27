@@ -528,11 +528,12 @@ class RequestLog:
             return "exists" if found else "missing"
 
     def task_usage(self) -> list[sqlite3.Row]:
-        """Route outcomes that reported cache tokens, oldest first: what each tier's task shape is observed from."""
+        """Route outcomes with usage, oldest first; record_task decides which count."""
         return self.query(
-            "SELECT tier, outcome_input_tokens AS input, outcome_cached_tokens AS cached, "
-            "outcome_cache_write_tokens AS written, outcome_output_tokens AS output FROM route_decisions "
-            "WHERE COALESCE(outcome_cached_tokens, 0) + COALESCE(outcome_cache_write_tokens, 0) > 0 ORDER BY id"
+            "SELECT tier, outcome_input_tokens AS input, outcome_output_tokens AS output, "
+            "COALESCE(outcome_cached_tokens, 0) AS cached, COALESCE(outcome_cache_write_tokens, 0) AS written "
+            "FROM route_decisions "
+            "WHERE outcome_input_tokens IS NOT NULL AND outcome_output_tokens IS NOT NULL ORDER BY id"
         )
 
     def query(self, sql: str, params: Iterable[Any] = ()) -> list[sqlite3.Row]:

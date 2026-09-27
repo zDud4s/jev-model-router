@@ -139,3 +139,31 @@ def test_observed_shapes_are_read_back_from_the_log_at_startup(backend_factory):
         log.set_outcome(f"rt_{i}", "pass", None, Usage(prompt_tokens=3000, completion_tokens=10, cached_tokens=2900))
     _, _, router = client_for(backend_factory, log=log)
     assert router.calls.shape_for("sub").source == "observed:5"
+
+
+COLD = {"prompt_tokens": 5000, "completion_tokens": 200}  # no cache fields at all
+
+
+def test_the_seeded_shape_matches_what_the_outcomes_built(backend_factory, tmp_path):
+    """A cold task before any cache report is rejected; one after is real evidence. A restart must agree."""
+    path = tmp_path / "log.db"
+    log = RequestLog(path)
+    client, _, router = client_for(backend_factory, log=log)
+    tier = "sub"
+    # Rejected: the tier has not yet shown it reports the cache. Then five cached
+    # tasks establish that it does, a cold one afterwards counts, and three more
+    # cached tasks keep building on it.
+    usages = [COLD, *([CACHED] * 5), COLD, *([CACHED] * 3)]
+    with client:
+        for i, usage in enumerate(usages):
+            log.record_decision(f"rt_seed_{i}", task="t", tier=tier, model=None, effort=None, runner=None,
+                                stage=None, route_score=None, route_model=None, route_reason=None)
+            client.post(f"/v1/route/rt_seed_{i}/outcome", json={"status": "pass", "usage": usage})
+        live_shape = router.calls.shape_for(tier)
+    # 9 of the 10 tasks count: the first cold one is rejected, proving record_task's
+    # own rule rather than a coincidence of order.
+    assert live_shape.source == "observed:9"
+
+    reopened = RequestLog(path)
+    _, _, restarted = client_for(backend_factory, log=reopened)
+    assert restarted.calls.shape_for(tier) == live_shape

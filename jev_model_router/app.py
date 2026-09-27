@@ -194,13 +194,19 @@ def create_app(
     calls = getattr(active_router, "calls", None)
     if calls is not None:
         try:  # the log's outcomes seed each tier's shape; a log it cannot read leaves the config's
-            for row in request_log.task_usage():
+            rows = request_log.task_usage()
+        except Exception as exc:  # noqa: BLE001
+            rows = []
+            print(f"task shapes: cannot read them from the log: {type(exc).__name__}: {exc}", file=sys.stderr)
+        for row in rows:
+            try:  # one bad row must not cost every other row its evidence
                 calls.record_task(row["tier"], Usage(
                     prompt_tokens=row["input"] or 0, completion_tokens=row["output"] or 0,
                     cached_tokens=row["cached"] or 0, cache_write_tokens=row["written"] or 0,
                 ))
-        except Exception as exc:  # noqa: BLE001
-            print(f"task shapes: cannot read them from the log: {type(exc).__name__}: {exc}", file=sys.stderr)
+            except Exception as exc:  # noqa: BLE001
+                print(f"task shapes: cannot read a row for {row['tier']!r}: {type(exc).__name__}: {exc}",
+                      file=sys.stderr)
         uncached = calls.uncached()
         if uncached:
             from .scores_derive import some
@@ -514,6 +520,8 @@ def create_app(
             except Exception:  # noqa: BLE001 - accounting must not fail the report
                 pass
         calls = getattr(active_router, "calls", None)
+        # A failed task's usage still counts toward the shape: it cost what it
+        # cost regardless of the caller's gate verdict.
         if calls is not None and usage is not None and row is not None:
             try:
                 calls.record_task(row["tier"], usage)
