@@ -498,3 +498,157 @@ def test_one_observed_tier_without_a_config_shape_prices_the_whole_decision_as_o
         r.calls.record_task("sub", Usage(prompt_tokens=300_000, completion_tokens=1000, cached_tokens=299_000))
     d = decide_task(r)
     assert d.detail["cost_basis"] == "one_call" and d.tier == "cx"
+
+
+# ---------------------------------------------------------------- unsure floor
+# Jev read `reasoning` at 0.5: it cannot tell. The cheap card (level 1) still
+# reaches the target on it -- 1 - 0.375 * 0.5 = 0.8125 -- which is the gap the floor closes.
+UNSURE = {"reasoning": 0.5, "code": 0.05}
+
+
+def test_the_unsure_floor_is_off_unless_configured():
+    assert parse_config(raw_config()).router.capabilities.unsure is None
+
+
+def test_an_empty_unsure_block_turns_it_on_with_the_defaults():
+    floor = parse_config(raw_config(unsure={})).router.capabilities.unsure
+    assert floor.band == (0.30, 0.70) and floor.min_level == 2.0
+
+
+def test_the_unsure_floor_takes_its_band_and_level():
+    floor = parse_config(raw_config(unsure={"band": [0.4, 0.6], "min_level": 3})).router.capabilities.unsure
+    assert floor.band == (0.4, 0.6) and floor.min_level == 3.0
+
+
+@pytest.mark.parametrize(
+    "unsure, message",
+    [
+        ({"band": [0.3, 0.7], "level": 2}, "takes only"),
+        ("yes", "takes only"),
+        ({"band": [0.7, 0.3]}, "low < high"),
+        ({"band": [0.3, 1.2]}, "low < high"),
+        ({"band": [0.3]}, "two numbers"),
+        ({"band": [True, 0.7]}, "two numbers"),
+        ({"min_level": 4}, "0 to 3"),
+        ({"min_level": True}, "0 to 3"),
+        ({"min_level": "high"}, "0 to 3"),
+        ({"min_level": -1}, "0 to 3"),
+        ({"band": 0.5}, "two numbers"),
+    ],
+    ids=["unknown-key", "not-a-mapping", "band-order", "band-range", "band-length", "band-bool", "level-range",
+         "level-bool", "level-text", "level-negative", "band-scalar"],
+)
+def test_an_unsure_floor_that_would_mislead_is_refused(unsure, message):
+    with pytest.raises(ConfigError, match=message):
+        parse_config(raw_config(unsure=unsure))
+
+
+def test_the_unsure_floor_changes_the_fingerprint_only_when_set():
+    base = router(Ask()).fingerprint
+    assert router(Ask()).fingerprint == base
+    assert router(Ask(), unsure={}).fingerprint != base
+    assert router(Ask(), unsure={}).fingerprint != router(Ask(), unsure={"min_level": 3}).fingerprint
+
+
+def test_without_the_floor_an_unsure_reading_goes_to_the_cheapest_tier():
+    d = decide(router(Ask(UNSURE)))
+    assert d.tier == "cheap"
+    assert "unsure" not in json.loads(d.reason) and d.detail["unsure"] is None
+
+
+def test_an_unsure_requirement_raises_the_pick_to_a_card_at_the_level_and_logs_the_cost():
+    r = router(Ask(UNSURE), unsure={})
+    d = decide(r)
+    assert d.tier == "cx"  # the cheapest card at level 2 on reasoning
+    tokens = d.detail["prompt_tokens"]
+    u = json.loads(d.reason)["unsure"]
+    assert u["reqs"] == ["reasoning"] and u["band"] == [0.3, 0.7] and u["min_level"] == 2.0
+    assert u["raised_from"][0] == "cheap"
+    assert u["extra"] == pytest.approx(round(r.cost("cx", tokens) - r.cost("cheap", tokens), 6))
+    assert d.detail["unsure"] == u
+    # The tier the floor passed over is still named as passed over.
+    assert "cheap" in [row[0] for row in json.loads(d.reason)["passed_over"]]
+
+
+def test_the_band_is_inclusive_and_a_confident_reading_is_not_unsure():
+    d = decide(router(Ask({"reasoning": 0.7, "code": 0.71}), unsure={}))
+    assert json.loads(d.reason)["unsure"]["reqs"] == ["reasoning"]
+    sure = decide(router(Ask(EASY), unsure={}))
+    assert sure.tier == "cheap" and "unsure" not in json.loads(sure.reason)
+
+
+def test_a_card_already_at_the_level_is_not_raised():
+    d = decide(router(Ask(UNSURE), unsure={"min_level": 1}))
+    assert d.tier == "cheap"
+    u = json.loads(d.reason)["unsure"]
+    assert u == {"reqs": ["reasoning"], "band": [0.3, 0.7], "min_level": 1.0}
+
+
+def test_when_no_tier_reaches_the_level_the_pick_stands_and_says_so():
+    d = decide(router(Ask(UNSURE), unsure={"min_level": 3}), candidates=["cheap", "mid"])
+    assert d.tier == "cheap"
+    u = json.loads(d.reason)["unsure"]
+    assert u["unmet"] is True and "raised_from" not in u
+
+
+def test_the_floor_composes_with_a_failed_tier():
+    # cx failed: the bar is its 0.925, which mid meets and cheap does not. A floor at 3
+    # then leaves top and sub, and sub is cheaper.
+    d = decide(router(Ask(UNSURE), unsure={"min_level": 3}), packet={"failed_tiers": ["cx"]})
+    assert d.tier == "sub"
+    reason = json.loads(d.reason)
+    assert reason["skipped_failed"] == ["cx"] and reason["unsure"]["raised_from"][0] == "mid"
+
+
+def test_under_expected_cost_the_redo_tier_also_clears_the_floor():
+    r = router(Ask(UNSURE), rule="expected_cost", unsure={})
+    d = decide(r)
+    cards = r._caps.cards
+    assert cards[d.tier].levels["reasoning"] >= 2
+    assert cards[d.detail["redo_tier"]].levels["reasoning"] >= 2
+
+
+def _with_flo(**caps_overrides: Any) -> Any:
+    """raw_config with an extra tier 'flo', a level-1 card, for a fitted-scale scenario."""
+    raw = raw_config(cards={**CAPS["cards"], "flo": {"levels": {"reasoning": 1, "code": 1},
+                                                       "list_prices": {"input": 1.0, "output": 5.0}}},
+                      **caps_overrides)
+    raw["tiers"]["flo"] = {"backend": "openai_compatible", "model": "flo-model",
+                            "base_url": "https://example.invalid/v1", "context_window": 200000,
+                            "supports_tools": True}
+    return raw
+
+
+def test_the_floor_reads_a_fitted_scales_calibrated_miss_not_the_raw_level():
+    # flo's card is level 1 on reasoning, but its fitted family scale (0.3) makes
+    # its effective miss (0.3 * 0.5 = 0.15) as good as the level-2 bar (1.0 * 0.2).
+    r = CapabilityRouter(parse_config(_with_flo(family_scales={"flo": 0.3}, unsure={})), ask=Ask(UNSURE))
+    options = [Option("cheap", 0.0, 0.0), Option("mid", 0.0, 0.0), Option("flo", 0.0, 0.0)]
+    floored = {o.tier for o in r._floored(options, ["reasoning"])}
+    assert floored == {"mid", "flo"}  # cheap (scale 1.0) still misses the bar; flo, calibrated, clears it
+
+
+def test_the_floor_never_drops_a_tier_that_dominates_one_it_keeps():
+    config = parse_config(_with_flo(family_scales={"flo": 0.3}, unsure={}))
+    r = CapabilityRouter(config, ask=Ask(UNSURE))
+    # flo's calibrated miss beats mid's on every requirement at no more cost: it dominates mid.
+    assert "flo" in r.dominated.get("mid", [])
+    d = decide(r, candidates=["cheap", "mid", "flo"])
+    # The floor must not exclude flo (a dominator) while mid (what it dominates) stays eligible.
+    assert d.tier == "flo"
+
+
+def test_a_shape_flip_is_measured_on_the_floored_tiers():
+    cards = copy.deepcopy(CAPS["cards"])
+    cards["sub"]["list_prices"] = CACHEY
+    cards["cx"] = {"levels": {"reasoning": 3, "code": 3}, "list_prices": PLAIN}
+    r = router(Ask(UNSURE), cards=cards, task_shape=CACHE_HEAVY, unsure={})
+    d = asyncio.run(r.decide(make_request(), ["cheap", "sub", "cx"], task=True))
+    assert d.detail["cost_basis"] == "task_shape"
+    reason = json.loads(d.reason)
+    # Unfloored, cheap wins both ways; floored, sub on the task and cx on one call.
+    assert d.tier == "sub" and reason["shapeless_pick"] == "cx"
+    tokens = d.detail["prompt_tokens"]
+    assert reason["unsure"]["raised_from"][0] == "cheap"
+    assert reason["unsure"]["extra"] == pytest.approx(
+        round(r.task_cost("sub", tokens) - r.task_cost("cheap", tokens), 6))

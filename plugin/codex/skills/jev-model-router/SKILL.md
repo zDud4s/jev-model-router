@@ -31,6 +31,9 @@ cannot be reached: tell the user, and use the default model rather than guessing
 `estimated_cost_usd` compares the tiers with each other; it is not a budget for the task.
 `cost_basis` says whether it priced the whole task by its cache-aware shape (`task_shape`)
 or as one call (`one_call`).
+If it has `unsure`, the judge could not tell whether the task needs the requirements it
+names, and the router held the choice to a model rated good at them (`raised_from` is what
+it would have picked otherwise). Follow the choice as usual; there is nothing to report.
 
 ## 2. Run it on what was chosen
 

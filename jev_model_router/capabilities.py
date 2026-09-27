@@ -37,6 +37,11 @@ for a hand-written one. `state()` reports the dominated tiers: those another
 tier, as eligible and available, beats on every requirement at no more cost,
 so they are never the cheapest adequate choice while it is there (see
 `dominance.py` for what can still pick them).
+
+With `unsure` set, a requirement Jev reads inside its band -- a p it could not
+call either way -- admits only tiers whose card is at `min_level` on it. The
+log names the tier that would have won without the floor and the estimated
+difference, so `stats` can say whether the floor pays for itself.
 """
 
 from __future__ import annotations
@@ -245,6 +250,8 @@ class CapabilityRouter:
             spec["task_shape"] = asdict(caps.task_shape)
         if caps.on_jev_failure != "fallback":  # likewise: the default keeps existing fingerprints
             spec["on_jev_failure"] = caps.on_jev_failure
+        if caps.unsure is not None:  # likewise
+            spec["unsure"] = asdict(caps.unsure)
         self.fingerprint = "capabilities:" + hashlib.sha256(
             json.dumps(spec, sort_keys=True).encode()
         ).hexdigest()[:12]
@@ -366,10 +373,17 @@ class CapabilityRouter:
             live = [repriced[o.tier] for o in live]
             # Tiers already out (locked, below a failed tier) keep their one-call figure in the trace.
             options = [repriced.get(o.tier, o) for o in options]
-        pick, rule, weighed = self._pick(live, needs, request)
+        # Where Jev could not read a requirement, only a card good at it may be
+        # picked. None reaching the level: the pick stands and the log says so.
+        unsure = self._unsure(needs)
+        floored = self._floored(live, unsure)
+        pick, rule, weighed = self._pick(floored or live, needs, request)
         expected = weighed.pop("expected", {})
+        # What the same rule would have picked without the floor.
+        unfloored = self._pick(live, needs, request)[0] if unsure and floored else pick
         # What one-call prices would have picked, by the same rule on the same tiers.
-        shapeless = self._pick(one_call, needs, request)[0] if basis == "task_shape" else pick
+        shapeless = (self._pick(self._floored(one_call, unsure) or one_call, needs, request)[0]
+                     if basis == "task_shape" else pick)
         # The cheaper tiers it passed over, and why: that is what a wrong card
         # looks like in the log, and what recalibration reads.
         cheaper = sorted((o for o in live if o.cost < pick.cost), key=lambda o: -o.cost)[:3]
@@ -387,6 +401,17 @@ class CapabilityRouter:
         if shapeless.tier != pick.tier:
             reason["shape_flipped"] = True
             reason["shapeless_pick"] = shapeless.tier
+        floored_tiers = {o.tier for o in floored} if unsure else None
+        unsure_view: dict[str, Any] | None = None
+        if unsure:
+            floor = self._caps.unsure
+            unsure_view = {"reqs": unsure, "band": list(floor.band), "min_level": floor.min_level}
+            if not floored:
+                unsure_view["unmet"] = True
+            elif unfloored.tier != pick.tier:
+                unsure_view["raised_from"] = [unfloored.tier, round(unfloored.success, 3), _money(unfloored.cost)]
+                unsure_view["extra"] = _money(pick.cost - unfloored.cost)
+            reason["unsure"] = unsure_view
         return RouteDecision(
             tier=pick.tier,
             score=pick.success,
@@ -405,8 +430,10 @@ class CapabilityRouter:
                 "pick": pick.tier,
                 "skipped_failed": sorted(failed),
                 "failed_bar": failed_bar,
+                "unsure": unsure_view,
                 **weighed,
-                "options": [self._option_view(o, expected.get(o.tier)) for o in sorted(options, key=lambda o: o.cost)],
+                "options": [self._option_view(o, expected.get(o.tier), floored_tiers)
+                            for o in sorted(options, key=lambda o: o.cost)],
             },
         )
 
@@ -420,6 +447,35 @@ class CapabilityRouter:
         if (decision.detail or {}).get("escalation") is False or decision.tier == served:
             return None
         return decision.tier
+
+    def _unsure(self, needs: dict[str, float]) -> list[str]:
+        """The requirements Jev read inside the unsure band: it could not tell either way."""
+        floor = self._caps.unsure
+        if floor is None:
+            return []
+        low, high = floor.band
+        return sorted(key for key, p in needs.items() if low <= p <= high)
+
+    def _floored(self, options: list[Option], unsure: list[str]) -> list[Option]:
+        """The options whose calibrated miss is at or below `min_level`'s, on every requirement Jev could not read.
+
+        Read on the card's level as calibrated -- its effective miss, capped and
+        scaled the same way `success()` (and `dominance.py`) cap and scale it --
+        not the raw level. A family whose fitted scale makes a lower level miss
+        as little as `min_level` still passes: the floor never excludes a tier
+        that dominates one it keeps. Without fitted `family_scales` this reduces
+        to the level comparison, since `_miss` is non-increasing in the level.
+        """
+        if not unsure:
+            return options
+        bar_level = self._caps.unsure.min_level  # type: ignore[union-attr] - unsure is empty without it
+        bar = min(1.0, self._caps.miss_scale * self._miss(bar_level))
+        return [
+            o for o in options
+            if all(min(1.0, self.scale_for(o.tier) * self._miss(self._caps.cards[o.tier].levels.get(r, 0.0)))
+                   <= bar + 1e-12
+                   for r in unsure)
+        ]
 
     def _pick(
         self, live: list[Option], needs: dict[str, float], request: ChatCompletionRequest
@@ -470,7 +526,9 @@ class CapabilityRouter:
         settings = self._config.verification
         return settings.sample_rate if settings.verifies(tier) else 0.0
 
-    def _option_view(self, option: Option, expected: float | None = None) -> dict[str, Any]:
+    def _option_view(
+        self, option: Option, expected: float | None = None, floored_tiers: set[str] | None = None
+    ) -> dict[str, Any]:
         tier = self._config.tier(option.tier)
         return {
             "tier": option.tier,
@@ -481,6 +539,9 @@ class CapabilityRouter:
             "cost": option.cost if math.isfinite(option.cost) else None,
             "covered": option.success >= self._caps.target,
             "expected": expected if expected is None or math.isfinite(expected) else None,
+            # None when the unsure floor did not apply; else whether this tier
+            # cleared it, so a trace can tell "not covered" from "floored out".
+            "meets_floor": None if floored_tiers is None else option.tier in floored_tiers,
         }
 
     def _fallback(

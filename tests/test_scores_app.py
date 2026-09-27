@@ -593,3 +593,14 @@ def test_the_routing_page_has_a_tiers_tab(tmp_path, backend_factory):
         page = client.get("/routing").text
     assert 'data-view="tiers"' in page and 'data-view="requests"' in page and "/routing/tiers" in page
     assert "<script src" not in page and "http://" not in page.replace("http://www.w3.org/2000/svg", "")
+
+
+def test_the_routing_page_names_the_unsure_floor_and_what_it_raised(tmp_path, backend_factory):
+    # The decision card must not blame the target when the unsure floor is what
+    # excluded a tier, and must say what the floor raised the pick to and cost.
+    app = create_app(parse_config(raw_config()), backend_factory=backend_factory, log=RequestLog(":memory:"))
+    with TestClient(app) as client:
+        page = client.get("/routing").text
+    assert "meets_floor" in page  # the floor's per-option verdict feeds the count and the "none reached" check
+    assert "floor unmet" in page
+    assert "raised from" in page

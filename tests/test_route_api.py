@@ -13,8 +13,9 @@ from jev_model_router.capabilities import CapabilityRouter
 from jev_model_router.config import parse_config
 from jev_model_router.db import RequestLog
 from jev_model_router.schemas import Usage
+from jev_model_router.stats import collect
 
-from test_capabilities import HARD, Ask, raw_config
+from test_capabilities import EASY, HARD, UNSURE, Ask, raw_config
 
 TASK = {"task": "Fix the race in the scheduler", "stage": "implement", "files": ["core/src/scheduler.rs"]}
 
@@ -194,3 +195,22 @@ def test_the_seeded_shape_matches_what_the_outcomes_built(backend_factory, tmp_p
     reopened = RequestLog(path)
     _, _, restarted = client_for(backend_factory, log=reopened)
     assert restarted.calls.shape_for(tier) == live_shape
+
+
+def test_an_unsure_reading_goes_from_route_to_the_stats_block(backend_factory):
+    # UNSURE reads reasoning at 0.5, inside the default band: the floor raises
+    # the pick off "cheap" (level 1) to "cx" (the cheapest card at level 2).
+    client, log, _ = client_for(backend_factory, Ask(UNSURE), unsure={})
+    with client:
+        body = client.post("/v1/route", json=TASK).json()
+        assert body["tier"] == "cx"
+        # The caller runs the model itself, so it is told the reading was a coin toss.
+        assert body["unsure"]["reqs"] == ["reasoning"] and body["unsure"]["raised_from"][0] == "cheap"
+        u = collect(log).unsure
+    assert u.decisions == 1 and u.raised == 1
+
+
+def test_a_confident_reading_adds_no_unsure_field_to_the_route(backend_factory):
+    client, _, _ = client_for(backend_factory, Ask(EASY), unsure={})
+    with client:
+        assert "unsure" not in client.post("/v1/route", json=TASK).json()
