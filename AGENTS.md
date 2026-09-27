@@ -57,6 +57,8 @@ real calls and spend quota or money. Do not run them unless asked.
   `claude_cli`, `codex_cli`, `jev`), registered in `backends/__init__.py`.
 - `jev_model_router/routing.py`, `eligibility.py`, `dominance.py`, `capabilities.py`: the
   routing decision. `verification.py`: cheap answer checked by a stronger tier.
+- `jev_model_router/calls.py`: the call router: prices, the subscription ledger, and a task's
+  cache-aware shape. The capabilities router is given one. `shape.py`: `measure-shape`.
 - `jev_model_router/scores*.py`, `benchmark.py`, `calibration.py`: benchmark evidence into
   card levels. `catalog.py`, `discovery.py`: find what models a machine can reach
   (CLI caches, Ollama, any API's `/models` listing such as OpenRouter's).

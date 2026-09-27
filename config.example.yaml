@@ -39,6 +39,13 @@ router:
   #       api_key_env: OPENROUTER_API_KEY
   #       effort_body: {reasoning: {effort: "{effort}"}}
   #       require_evidence: true    # only models with benchmark data or a profile
+  #   # How a whole routed task divides its input, per output token. Measured
+  #   # 2026-09-26 over 1461 local agent tasks; `jev-model-router measure-shape`
+  #   # prints this machine's. It orders tiers on /v1/route; it budgets nothing.
+  #   task_shape:
+  #     input_per_output: 295
+  #     cache_read: 0.971
+  #     cache_write: 0.026
 
 tiers:
   # Local model. No prices means it costs zero.

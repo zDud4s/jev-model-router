@@ -1102,6 +1102,128 @@ memory, it found a `cache_read` billed at the full input rate where the provider
 a `cache_write` left out (so costed at zero), and a misspelt model id. Other providers
 publish no machine-readable list and are reported as `unchecked`, not as passing.
 
+## The price of a whole task
+
+`CapabilityRouter.cost` used to price a routed task as one call: prompt tokens once at the
+input rate, plus one answer's output. A task on `/v1/route` is not one call. It is an agent
+loop that re-sends a growing context on every turn, and the provider serves almost all of
+that context back from its prompt cache.
+
+**The measurement.** 1461 local Claude Code transcripts and Codex rollouts, read offline on
+2026-09-26 with no model calls, each priced at OpenRouter's public listing (Codex reports no
+cache writes, so its tasks show their whole re-sent context as fresh input):
+
+| model | tasks | median turns | input from cache | cost share: fresh / read / write / output |
+|---|---|---|---|---|
+| opus-5 | 491 | 36 | 97.4% | 0 / 66 / 22 / 11 % |
+| sonnet-5 | 362 | 26 | 96.3% | 0 / 63 / 30 / 7 % |
+| gpt-5.6-sol | 280 | 16 | 95.0% | 28 / 54 / 0 / 18 % |
+| gpt-5.6-terra | 211 | 22 | 96.0% | 25 / 61 / 0 / 14 % |
+| opus-5.5 | 70 | 18.5 | 96.8% | 0 / 45 / 37 / 18 % |
+
+Pooled over all 1461: about **295 input tokens processed per output token** (median 366),
+**97.1%** of that input read from cache, **2.6%** written to it, the rest — **0.3%** — fresh.
+
+**What that does to decisions.** Pricing each task at its own measured profile, on nine
+tiers, and comparing the order against the router's one-call formula: the cheapest of all
+nine never changes, on any of the 1461 tasks. What changes is which of a pair is cheaper —
+three pairs, and only under `rule: target`, which picks the cheapest tier that still clears
+the target rather than the outright cheapest. The cause is not the tiers' list prices, which
+differ modestly; it is their cache prices, which differ by an order of magnitude (a 2.5% cache
+discount against a 90% one) and which the one-call formula never looks at, since a single call
+carries almost no cache.
+
+**The split.** `calls.py` is a new module that owns what a call costs right now: prices, the
+subscription ledger (a 429 lock already made a tier's cost `inf`; that was moved here
+unchanged), and, since this is more of the same kind of knowledge, a task's cache-aware shape.
+It never imports the capabilities router. The capabilities router keeps success and token
+estimates — Jev's reading, the cards, calibration — and is given a `CallRouter`, never the
+reverse; asked for none, it builds its own from the config, on its own clock, so nothing
+that builds a `CapabilityRouter` offline needs to know the call router exists.
+
+**CLI tiers priced from the listing.** Claude Code and Codex tiers carry no prices of their
+own — a subscription is not billed per token — so their cards used a profile's hand-written
+`list_prices`, and none of the eighteen profiles priced the cache at all. The same models are
+usually in a discovered listing too, under a different id, and the benchmark evidence already
+has a rule for matching such ids (`scores.key`, or its plain normalisation where no benchmarks
+file is configured). Discovery now indexes every priced, non-variant listing entry by that
+key and, for a subscription tier whose own prices are not configured, looks up its model
+under that key: one match repriced the card, cache included; several matches or none leaves
+the profile's guess in place, because two listings disagreeing about the same model is not
+something to silently pick a winner from. A listing entry priced 0/0 — a promotional or
+preview row — is never used this way either; it is not a real price for anything. An
+explicit tier, written under `tiers:`, is never repriced by this rule: the operator wrote it
+by hand. Where the listing does reprice a card, and a configured profile disagrees with it,
+startup prints one line naming the profile and the listed model it was checked against
+(`profile gpt-5.6-sol list_prices 4/20; listing says 2/10`) — this is how a stale profile
+stops being invisible.
+
+**The shape orders tiers; it does not budget a task.** `CallRouter.task_cost` prices a task
+by its shape, scaled to `card.output_tokens` — one card-sized answer's worth of output — not
+to the task's real output, which is however many answers a whole agent loop writes. That
+scaling keeps the number right in proportion between tiers and wrong, on purpose, as a total:
+it is there to be compared, never summed into a budget. Both pick rules only need the
+comparison: `target` compares costs directly, and `expected_cost`'s redo term is the same
+task cost, so the argmin is unchanged either way. That comparison holds only when every tier
+being compared is priced the same way, so a decision uses `task_cost` for a tier only when
+*every* live tier in it has a shape — observed or from config — and otherwise prices all of
+them by the one-call `cost`. Without that rule, a tier that happened to have been observed
+(input ~295× output) would sit next to one still priced as a single call (~5k input) and look
+tens of times dearer for the crime of having been measured. `cost_basis` in the response and
+in `detail` records which basis a decision used, and `route_reason` records `shape_flipped`
+and `shapeless_pick` next to it whenever the two bases would have picked differently — `stats`
+counts those flips per pair, from the log alone.
+
+**Where the shape comes from.** A tier's own outcomes are the first choice: `/v1/route`
+outcomes whose usage carried cache tokens, at least five of them (`MIN_EVIDENCE`), pooled sum
+over sum — not a mean of ratios, so a long task weighs more — over the last two hundred
+(`WINDOW`) such outcomes. Shapes are kept and pooled **per tier**, never across tiers, because
+the ratio is driven mostly by the runner rather than the model: the two CLI harnesses measured
+here disagree a lot about how much context each turn resends. Failing that, `router.capabilities.task_shape`
+in config is the fallback, and `measure-shape` (below) is how an operator gets one. Failing
+that, the task is priced as today, one call.
+
+Not every outcome with tokens counts as evidence. A row that does not add up — a negative
+cache count, or cached-plus-written tokens exceeding the reported prompt — is rejected. A
+zero-cache row is also rejected, but only for a tier that has never yet reported a nonzero
+cache field: once a tier has shown it reports the cache at all, a later cold task from it is
+real evidence of a cheap task, not silence from a caller that never sends the numbers.
+Startup seeds every tier's shape from the log before serving a request, replaying every route
+outcome that has usage (`RequestLog.task_usage()`, oldest first) through the same acceptance
+rule, so the shape a fresh process starts with is the one a long-running process would have
+converged to. `stats` reads the identical rows through the identical rule
+(`calls.accepts_task_row`) and reports what it drops, in two counts per tier: outcomes with
+usage but no cache tokens yet, and outcomes that plain do not add up. Because the acceptance
+rule lives in one function that both `CallRouter.record_task` and `stats` call, the two can
+never disagree about what counts.
+
+A config shape rejects a non-finite number or a boolean in place of any of its three fields
+— `float(True)` is a valid `1.0` that a config typo should not silently become.
+
+`prompt_tokens` in a reported outcome is the whole input a call cost, cached and cache-write
+tokens included, not input on top of them — the MCP tool's schema and both skill copies say
+so, because a caller that reported them additively would inflate the shape's input side.
+
+**`jev-model-router measure-shape`** reads local agent transcripts offline, read-only, and
+prints a shape to paste into config: Claude Code's `~/.claude/projects/**/*.jsonl` and
+Codex's `~/.codex/sessions/**/rollout-*.jsonl`. A Claude Code message can be written across
+several streamed lines, and a resumed session can copy an old message into a new file, so
+lines are merged by message id across every session before counting: each usage field's
+maximum across its lines counts once, whichever session it is first seen in. `--since` filters
+a Claude Code transcript per message, by that message's own timestamp; a Codex rollout reports
+cumulative usage, so `--since` keeps or drops the whole rollout by its last timestamp instead,
+since an earlier cumulative total cannot be recovered from a later one. A date given with no
+time zone is read as UTC.
+
+**The selection bias of observed shapes.** An observed shape is the traffic a tier happened
+to be sent, not a fact about the model alone. A tier routed harder tasks runs longer loops and
+looks dearer per output token for it; a tier sent short or easy tasks looks cheaper than the
+same model would on harder ones, and looking cheaper is exactly what makes a router send it
+more. The window has no way to tell the two apart. `stats` prints each tier's observed shape
+next to the configured one so a wide gap between them reads first as a question about what
+that tier has been asked to do, not as a settled fact about it — if a cheap tier's cost keeps
+drifting down, that is the first place to look.
+
 ## A baseline worth beating
 
 Before trusting any router, price the config change it is competing with. Two models from the
