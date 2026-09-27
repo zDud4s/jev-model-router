@@ -726,13 +726,16 @@ the default tier may be far dearer than the task needed, or too weak for it, and
 response says so.
 
 `on_jev_failure: reject` refuses instead. Both `/v1/chat/completions` and `/v1/route` answer
-503 `jev_unavailable`, and the MCP `route` tool surfaces the same thing as a tool error. Nothing
-is called — no backend, no cost. A chat refusal is written to `requests` with `tier` NULL and
-`http_status` 503, the same table every served request lands in, because it is a request that
-was answered, just not with an inference. A route refusal is not a decision — no tier was
-chosen, so there is nothing to report an outcome on — and goes to its own table,
-`route_rejections`, instead of `route_decisions`. `stats` prints `JEV REJECTED` when either
-table has rows.
+503 `jev_unavailable`, and the MCP `route` tool surfaces the same thing as a tool error. No
+backend is called; the only cost is the Jev call already made before it failed. A chat refusal
+is written to `requests` with `tier` NULL and `http_status` 503, the same table every served
+request lands in, because it is a request that was answered, just not with an inference. A
+route refusal is not a decision — no tier was chosen, so there is nothing to report an outcome
+on — and goes to its own table, `route_rejections`, instead of `route_decisions`. `stats`
+prints `JEV REJECTED` when any refusal is logged: `requests` rows whose rule is `jev_failure`,
+or rows in `route_rejections`. The refusal also shows in the live `/routing` trace, as a route
+stage carrying the reason, so a reader watching a request does not have to go to the log to see
+why it was turned away.
 
 Only the Jev call itself is in scope here. The other `_fallback` paths — no carded tier
 eligible, every carded tier locked, nothing rated above a tier that already failed — are
