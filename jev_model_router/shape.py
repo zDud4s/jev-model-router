@@ -93,11 +93,15 @@ def _before(stamp: Any, since: datetime | None) -> bool:
 def claude_tasks(root: Path, *, match: str | None = None, since: datetime | None = None,
                  scan: Scan | None = None) -> Scan:
     scan = scan if scan is not None else Scan()
-    # Per (session, sidechain) group: model tally, and per message id the
-    # largest value seen so far for each of the four usage fields -- a
-    # message split across lines (streamed) may report partial usage on an
-    # earlier line. A line with no id to merge on counts on its own.
-    groups: dict[tuple[Any, Any], tuple[Counter[str], dict[Any, list[int]]]] = {}
+    # Model tally per (session, sidechain) group. Usage is merged globally by
+    # message id, not per group: a resume/continue can copy a message into
+    # another session's file, and that copy must not add its usage again. A
+    # message belongs to the group it is first seen in; a later line for the
+    # same id -- there or in another group -- only merges into it by max (a
+    # message split across streamed lines may report partial usage on an
+    # earlier line). A line with no id to merge on stands alone.
+    groups: dict[tuple[Any, Any], Counter[str]] = {}
+    merged: dict[Any, tuple[tuple[Any, Any], list[int]]] = {}
     for path in sorted(Path(root).glob("*/**/*.jsonl")):
         project = path.relative_to(root).parts[0]
         for record in _records(path, scan):
@@ -111,23 +115,25 @@ def claude_tasks(root: Path, *, match: str | None = None, since: datetime | None
                 continue
             agent = (record.get("agentId") or "sidechain") if record.get("isSidechain") else None
             key = (record.get("sessionId"), agent)
-            models, messages = groups.setdefault(key, (Counter(), {}))
-            models[str(message.get("model") or "?")] += 1
+            groups.setdefault(key, Counter())[str(message.get("model") or "?")] += 1
             fields = [_int(usage.get("input_tokens")), _int(usage.get("cache_read_input_tokens")),
                       _int(usage.get("cache_creation_input_tokens")), _int(usage.get("output_tokens"))]
-            mid = message.get("id") or record.get("requestId")
-            if mid is None:
-                messages[object()] = fields  # nothing to merge on: this line stands alone
+            mid = message.get("id") or record.get("requestId") or object()  # no id: stands alone
+            existing = merged.get(mid)
+            if existing is None:
+                merged[mid] = (key, fields)
             else:
-                existing = messages.get(mid)
-                messages[mid] = fields if existing is None else [max(a, b) for a, b in zip(existing, fields)]
-    for models, messages in groups.values():
-        task = Task("claude", models.most_common(1)[0][0])
-        for fresh, read, write, output in messages.values():
-            task.fresh += fresh
-            task.read += read
-            task.write += write
-            task.output += output
+                first_key, current = existing
+                merged[mid] = (first_key, [max(a, b) for a, b in zip(current, fields)])
+    totals: dict[tuple[Any, Any], list[int]] = {}
+    for group_key, fields in merged.values():
+        total = totals.setdefault(group_key, [0, 0, 0, 0])
+        for i, value in enumerate(fields):
+            total[i] += value
+    for key, (fresh, read, write, output) in totals.items():
+        models = groups.get(key, Counter())
+        task = Task("claude", models.most_common(1)[0][0] if models else "?",
+                    fresh=fresh, read=read, write=write, output=output)
         if task.input > 0 and task.output > 0:
             scan.tasks.append(task)
     return scan
@@ -150,12 +156,16 @@ def codex_tasks(root: Path, *, match: str | None = None, since: datetime | None 
             continue
         if _before(stamp, since):
             continue
+        raw_input = _int(last.get("input_tokens"))
         cached = _int(last.get("cached_input_tokens"))
-        task = Task("codex", str(model or "?"), fresh=max(_int(last.get("input_tokens")) - cached, 0),
+        task = Task("codex", str(model or "?"), fresh=max(raw_input - cached, 0),
                     read=cached, output=_int(last.get("output_tokens")))
         # Codex always reports its cache (0 when unused), so this format's rows share
-        # the same acceptance rule `calls.py` applies to a live call's outcome.
-        if accepts_task_row(task.input, task.output, task.read, task.write, reports_cache=True):
+        # the same acceptance rule `calls.py` applies to a live call's outcome. The raw
+        # (unclamped) input_tokens goes in, not task.input: clamping fresh to 0 when
+        # cached_input_tokens overstates input_tokens would otherwise hide that the row
+        # doesn't add up.
+        if accepts_task_row(raw_input, task.output, task.read, task.write, reports_cache=True):
             scan.tasks.append(task)
     return scan
 

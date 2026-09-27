@@ -117,3 +117,16 @@ def test_an_unparseable_since_is_rejected(tmp_path):
     code = cli.main(["measure-shape", "--since", "nope", "--claude-dir", str(tmp_path / "claude"),
                      "--codex-dir", str(tmp_path / "codex")])
     assert code == 2
+
+
+def test_a_message_copied_into_another_session_counts_once(tmp_path):
+    write(tmp_path / "proj" / "s1.jsonl", [turn("s1", "m1")])
+    write(tmp_path / "proj" / "s2.jsonl", [turn("s2", "m1")])  # resume/continue copied the same message
+    scan = claude_tasks(tmp_path)
+    assert len(scan.tasks) == 1
+    assert (scan.tasks[0].read, scan.tasks[0].write, scan.tasks[0].output) == (900, 50, 20)
+
+
+def test_codex_rejects_a_row_whose_cache_exceeds_its_input(tmp_path):
+    write(tmp_path / "rollout-1.jsonl", rollout("C:/work/proj", (100, 900, 10)))  # cached > input: doesn't add up
+    assert codex_tasks(tmp_path).tasks == []
