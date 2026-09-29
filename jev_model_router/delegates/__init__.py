@@ -6,8 +6,9 @@ A third agent CLI is one module and one line below; nothing outside an adapter n
 from __future__ import annotations
 
 from .base import ACCESS, DEPTH_ENV, Adapter, RunResult, Target, clip, parse_event
+from .claude import ClaudeAdapter
 
-ADAPTERS: dict[str, Adapter] = {}
+ADAPTERS: dict[str, Adapter] = {a.runner: a for a in (ClaudeAdapter(),)}
 
 
 def adapter_for(runner: str) -> Adapter | None:

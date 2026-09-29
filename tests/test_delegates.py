@@ -9,7 +9,7 @@ import json
 
 import pytest
 
-from jev_model_router.delegates import ACCESS, Adapter, Target, parse_event
+from jev_model_router.delegates import ACCESS, Adapter, Target, adapter_for, parse_event
 
 TARGET = Target(tier="cx", runner="codex", model="gpt-6-sol", effort="high", executable="/bin/codex")
 
@@ -38,3 +38,64 @@ def test_parse_event_reads_one_json_object_per_line_and_nothing_else():
 
 def test_the_access_levels_are_the_three_the_spec_names():
     assert ACCESS == ("read-only", "workspace-write", "full")
+
+
+CLAUDE = Target(tier="sub", runner="claude", model="claude-opus-5", effort="high", executable="/bin/claude")
+RESULT = {"type": "result", "subtype": "success", "is_error": False, "result": "done: 3 files changed",
+          "usage": {"input_tokens": 20, "cache_read_input_tokens": 900, "cache_creation_input_tokens": 80,
+                    "output_tokens": 40}}
+STREAM = [
+    {"type": "system", "subtype": "init"},
+    {"type": "assistant", "message": {"content": [{"type": "tool_use", "name": "Edit", "input": {}}]}},
+    {"type": "assistant", "message": {"content": [{"type": "text", "text": "All tests pass."}]}},
+    RESULT,
+]
+
+
+@pytest.mark.parametrize("access, flags", [
+    ("read-only", ["--tools", "Read,Grep,Glob", "--permission-mode", "dontAsk"]),
+    ("workspace-write", ["--permission-mode", "acceptEdits", "--allowedTools", "Bash", "PowerShell",
+                         "--permission-prompts", "none"]),
+    ("full", ["--dangerously-skip-permissions"]),
+])
+def test_claude_argv_per_access_level(access, flags):
+    argv = adapter_for("claude").argv(CLAUDE, access, "/work")
+    assert argv == ["/bin/claude", "-p", "--output-format", "stream-json", "--verbose",
+                    "--model", "claude-opus-5", "--effort", "high", *flags]
+
+
+def test_claude_argv_leaves_effort_out_when_the_tier_has_none():
+    argv = adapter_for("claude").argv(Target(**{**CLAUDE.as_dict(), "effort": None}), "full", "/work")
+    assert "--effort" not in argv
+
+
+def test_claude_env_drops_what_would_bill_per_token_or_refuse_to_nest():
+    env = adapter_for("claude").env({"ANTHROPIC_API_KEY": "k", "CLAUDECODE": "1", "PATH": "/bin"})
+    assert env == {"PATH": "/bin"}
+
+
+def test_claude_reads_the_final_result_and_its_usage():
+    run = adapter_for("claude").read(jsonl(STREAM), 0, "")
+    assert run.failure is None and run.message == "done: 3 files changed"
+    assert (run.usage.prompt_tokens, run.usage.completion_tokens, run.usage.cached_tokens,
+            run.usage.cache_write_tokens) == (1000, 40, 900, 80)
+
+
+def test_claude_an_error_result_is_a_failure_and_a_spent_window_a_rate_limit():
+    failed = adapter_for("claude").read(jsonl([{**RESULT, "is_error": True, "subtype": "error_during_execution",
+                                                 "result": "tool crashed"}]), 1, "")
+    limited = adapter_for("claude").read(jsonl([{**RESULT, "is_error": True, "result": "5-hour limit reached"}]), 1, "")
+    status = adapter_for("claude").read(jsonl([{**RESULT, "is_error": True, "result": "x", "api_error_status": 429}]), 1, "")
+    assert failed.failure == "tool crashed" and not failed.rate_limited
+    assert limited.rate_limited and status.rate_limited
+
+
+def test_claude_with_no_result_event_fails_with_its_stderr_and_no_usage():
+    run = adapter_for("claude").read(["not json\n"], 1, "error: not logged in\n")
+    assert run.failure == "error: not logged in" and run.usage.prompt_tokens == 0 and not run.rate_limited
+
+
+def test_claude_progress_names_tools_and_text():
+    adapter = adapter_for("claude")
+    lines = [adapter.progress(line) for line in jsonl(STREAM)]
+    assert lines == [None, "tool Edit", "All tests pass.", "done (success)"]
