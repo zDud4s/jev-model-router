@@ -39,6 +39,31 @@ def test_a_429_locks_the_subscription_until_its_window_turns():
     assert math.isfinite(c.cost("sub", 1000, 1000))
 
 
+def test_a_429_seen_by_another_process_locks_from_when_it_was_seen():
+    now = [10 * 3600.0]
+    c = calls(clock=lambda: now[0])
+    c.lock("sub", at=now[0] - 4 * 3600)  # seen four hours ago: one hour of the window left
+    assert c.locked("sub")
+    now[0] += 3600 + 1
+    assert not c.locked("sub")
+
+
+def test_an_older_lock_never_shortens_a_newer_one():
+    now = [10 * 3600.0]
+    c = calls(clock=lambda: now[0])
+    c.record_spend("sub", Usage(), 429, Prices())  # locked for 5 h from now
+    c.lock("sub", at=now[0] - 4 * 3600)
+    now[0] += 2 * 3600
+    assert c.locked("sub")
+
+
+def test_locking_a_tier_with_no_subscription_or_no_such_tier_does_nothing():
+    c = calls()
+    c.lock("mid")
+    c.lock("gone")
+    assert c.state() == calls().state()  # every subscription still unlocked
+
+
 def test_spend_is_charged_at_the_prices_given_and_only_to_subscriptions():
     c = calls()
     spend = Prices(input=2.0, configured=True)

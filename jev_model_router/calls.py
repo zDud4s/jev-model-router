@@ -42,10 +42,13 @@ class QuotaLedger:
     def record(self, subscription: str, usd: float) -> None:
         self._spent.setdefault(subscription, deque()).append((self._clock(), usd))
 
-    def lock(self, subscription: str) -> None:
+    def lock(self, subscription: str, at: float | None = None) -> None:
+        """Off the table for one window from `at` (a 429 seen then, maybe by another process), else from now."""
         budget = self._budgets.get(subscription)
         hours = budget.window_hours if budget else 1.0
-        self._locked_until[subscription] = self._clock() + hours * 3600
+        until = (self._clock() if at is None else at) + hours * 3600
+        # An older 429 read late must not shorten a lock a newer one set.
+        self._locked_until[subscription] = max(self._locked_until.get(subscription, 0.0), until)
 
     def used(self, subscription: str) -> float:
         budget = self._budgets.get(subscription)
@@ -142,6 +145,12 @@ class CallRouter:
     def locked(self, tier_name: str) -> bool:
         tier = self._config.tier(tier_name)
         return bool(tier.subscription) and self.ledger.locked(tier.subscription)
+
+    def lock(self, tier_name: str, at: float | None = None) -> None:
+        """A 429 on this tier's subscription that another process sharing the log saw, at `at`."""
+        tier = self._config.tiers.get(tier_name)
+        if tier is not None and tier.subscription:
+            self.ledger.lock(tier.subscription, at=at)
 
     def cost(self, tier_name: str, input_tokens: int, output_tokens: int) -> float:
         if self.locked(tier_name):
