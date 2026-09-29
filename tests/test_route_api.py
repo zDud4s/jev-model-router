@@ -5,6 +5,8 @@ Jev is never called: the router answers from a scripted `Ask`.
 
 from __future__ import annotations
 
+import json
+
 import pytest
 from fastapi.testclient import TestClient
 
@@ -55,6 +57,22 @@ def test_a_caller_that_runs_only_codex_is_offered_only_codex(backend_factory):
         assert body["tier"] == "cx" and body["runner"] == "codex"
         none = client.post("/v1/route", json={**TASK, "runners": ["gemini"]})
     assert none.status_code == 422 and "gemini" in none.json()["error"]["message"]
+
+
+def test_a_decision_names_what_to_run_and_never_the_task(backend_factory):
+    log = RequestLog(":memory:", store_prompts=True)
+    client, _, _ = client_for(backend_factory, log=log)
+    with client:
+        decision = client.post("/v1/route", json={**TASK, "runners": ["codex"]}).json()["decision_id"]
+        body = client.get(f"/v1/route/{decision}").json()
+        missing = client.get("/v1/route/rt_nope")
+        targets = client.get("/v1/route/targets").json()["targets"]
+        stored = log.decision(decision)["task_text"]  # inside the block: the lifespan closes the log
+    assert body == {"decision_id": decision, "tier": "cx", "runner": "codex", "model": "gpt-6-sol",
+                    "effort": None, "executable": "codex"}
+    assert stored and "Fix the race" not in json.dumps(body)
+    assert missing.status_code == 404
+    assert sorted(t["tier"] for t in targets) == ["cx", "sub"]
 
 
 def test_a_failed_model_is_named_as_the_runner_knows_it(backend_factory):

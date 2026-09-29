@@ -9,7 +9,10 @@ import json
 
 import pytest
 
-from jev_model_router.delegates import ACCESS, Adapter, Target, adapter_for, parse_event
+from jev_model_router.config import parse_config
+from jev_model_router.delegates import ACCESS, Adapter, Target, adapter_for, parse_event, target_of
+
+from test_capabilities import raw_config
 
 TARGET = Target(tier="cx", runner="codex", model="gpt-6-sol", effort="high", executable="/bin/codex")
 
@@ -38,6 +41,13 @@ def test_parse_event_reads_one_json_object_per_line_and_nothing_else():
 
 def test_the_access_levels_are_the_three_the_spec_names():
     assert ACCESS == ("read-only", "workspace-write", "full")
+
+
+def test_a_tier_an_adapter_runs_is_a_target_and_any_other_is_not():
+    config = parse_config(raw_config())
+    assert target_of("cx", config.tiers["cx"]) == Target("cx", "codex", "gpt-6-sol", None, "codex")
+    assert target_of("sub", config.tiers["sub"]).executable == "claude"
+    assert target_of("mid", config.tiers["mid"]) is None
 
 
 CLAUDE = Target(tier="sub", runner="claude", model="claude-opus-5", effort="high", executable="/bin/claude")

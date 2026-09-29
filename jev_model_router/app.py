@@ -40,6 +40,7 @@ from .backends import (
 )
 from .config import Config, ConfigError
 from .db import LogEntry, RequestLog
+from .delegates import target_of
 from .eligibility import evaluate
 from .pricing import cost_usd, counterfactuals
 from .routing import Router, build_router
@@ -554,6 +555,23 @@ def create_app(
             account_usage(active_router, row["tier"], usage)
         return {"decision_id": decision_id, "tier": row["tier"] if row else None,
                 "usage": "recorded" if result == "ok" else "kept_existing"}
+
+    @app.get("/v1/route/targets")
+    async def route_targets() -> Any:
+        """The tiers a delegate adapter can run, for an MCP server working out what it may offer."""
+        found = (target_of(name, tier) for name, tier in config.tiers.items())
+        return {"targets": [t.as_dict() for t in found if t is not None]}
+
+    @app.get("/v1/route/{decision_id}")
+    async def route_decision(decision_id: str) -> Any:
+        """What a decision asked to run, for `jev-model-router delegate --url`. Never the task text."""
+        row = await asyncio.to_thread(request_log.decision, decision_id)
+        if row is None:
+            return JSONResponse(status_code=404, content=error_body(f"no decision {decision_id!r}"))
+        tier = config.tiers.get(row["tier"])
+        target = target_of(row["tier"], tier) if tier is not None else None
+        return {"decision_id": decision_id, "tier": row["tier"], "runner": row["runner"], "model": row["model"],
+                "effort": row["effort"], "executable": target.executable if target is not None else None}
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
