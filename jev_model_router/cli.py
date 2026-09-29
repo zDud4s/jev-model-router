@@ -874,6 +874,12 @@ def main(argv: list[str] | None = None) -> int:
         quiet = args.json and (args.prices or args.catalog)
         if not quiet:
             print(f"config OK: {len(config.tiers)} tier(s): {', '.join(config.tiers)}")
+            # Those are the file's tiers alone: without this line a discovering
+            # config reads as if it had nothing to route between.
+            caps = config.router.capabilities
+            if caps and caps.discover and not args.catalog:
+                print(f"discover ({', '.join(caps.discover)}) adds its models as tiers at startup; "
+                      "`check --catalog` lists them")
             for line in _missing_keys(config):
                 print(line, file=sys.stderr)
         if args.catalog:

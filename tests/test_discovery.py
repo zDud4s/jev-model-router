@@ -369,3 +369,27 @@ def test_with_the_catalog_check_healthz_reports_dominance_and_startup_names_unus
     assert isinstance(dominated, dict) and dominated  # 30-odd discovered tiers: some are always beaten
     err = capsys.readouterr().err
     assert "level_caps for no card" in err and "retired-model" in err
+
+
+def test_check_says_discover_sources_add_tiers_at_startup(tmp_path, capsys):
+    import yaml
+
+    from jev_model_router import cli
+
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(raw_config()), encoding="utf-8")
+    assert cli.main(["-c", str(path), "check"]) == 0
+    out = capsys.readouterr().out
+    assert "config OK:" in out
+    assert "discover (claude, codex, local) adds its models as tiers at startup; `check --catalog` lists them" in out
+
+
+def test_check_without_discover_says_nothing_of_it(tmp_path, capsys):
+    import yaml
+
+    from jev_model_router import cli
+
+    path = tmp_path / "c.yaml"
+    path.write_text(yaml.safe_dump(copy.deepcopy(BASE_CONFIG)), encoding="utf-8")
+    assert cli.main(["-c", str(path), "check"]) == 0
+    assert "discover" not in capsys.readouterr().out
