@@ -696,12 +696,74 @@ POST /v1/route/{decision_id}/outcome
 {"status": "pass" | "fail" | "rate_limited" | "error",
  "detail": "optional text", "usage": {"prompt_tokens": 0, "completion_tokens": 0}}
 -> 200; 404 unknown decision; 409 an outcome was already reported (the first one is kept)
+
+POST /v1/route/{decision_id}/usage
+{"prompt_tokens": 0, "completion_tokens": 0, "cached_tokens": 0, "cache_write_tokens": 0}
+-> 200 {"usage": "recorded" | "kept_existing"}; 404 unknown decision
+
+GET /v1/route/{decision_id}
+-> 200 {"tier", "runner", "model", "effort", "executable"}   (never the task)
+
+GET /v1/route/targets
+-> 200 {"targets": [{"tier", "runner", "model", "effort", "executable"}, ...]}
 ```
 
 `pass`/`fail` is the label `jev-model-router calibrate --from-log` learns each model family's
 scale from; `error` means the run broke for a reason that says nothing about the model, and
 is not learnt from. `rate_limited` takes that subscription off the table until its window
 turns -- the router cannot see a 429 on a call it did not make.
+
+### Delegating to the other agent's CLI
+
+Each plugin starts its server with `--runner` set to its own CLI. That kept a task from the
+other subscription out of the choice even when the router preferred it. Asking an agent to
+copy CLI flags from a skill was not a substitute: flags drift, quoting is easy to get wrong,
+and the calling agent does not know how many tokens the other CLI used.
+
+Delegation is therefore explicit: start the MCP server with `mcp --delegate`, or set
+`JEV_MODEL_ROUTER_DELEGATE=1` in the environment that starts it. The server widens its
+`runners` by the adapters whose CLIs are available here, and each answer says
+`run: subagent | delegate | unavailable`. A delegate command is pinned to the server's own
+config or loopback URL, so a project-local config cannot redirect it. The
+`jev-model-router delegate` command runs the choice; exit 0 means it ran, 2 that the CLI
+failed or timed out, 3 that it hit a rate limit, and 4 that it could not start.
+`jev_model_router/delegates/` holds one adapter per CLI.
+
+A delegated run works in the project with one of three access levels:
+
+| `--access` | codex | claude |
+|---|---|---|
+| `read-only` | OS sandbox, read only | Read, Grep, Glob only |
+| `workspace-write` (default) | OS sandbox: writes stay in the project, no network | edits allowed, shell allowed **with no sandbox**: a command can write anywhere and reach the network |
+| `full` | no sandbox, no approvals | every permission skipped |
+
+The two `workspace-write` rows are deliberately not the same guarantee. Codex supplies an OS
+sandbox; Claude's non-interactive shell cannot prompt, so its allowed shell has no sandbox.
+The skills choose `full` only when the user asks for it.
+
+The delegate knows the exact usage, but the caller can report an outcome first. `set_usage`
+writes the four token columns only when no tokens are there; `set_outcome` keeps an existing
+block of tokens and reports `kept_existing` instead of mixing sources. Whoever writes tokens
+first counts them. The `outcome_*_tokens` columns therefore also hold usage that arrived
+before, or without, an outcome. Calibration still requires an outcome: tokens on their own
+are cost evidence, not a label.
+
+An in-process delegate and an MCP server are separate processes sharing one log, and both
+update rows the server originally inserted. Migration v7 adds append-only `route_events` with
+a writer id so the app can catch up on other writers' usage and rate-limit events before each
+decision. A caught-up rate limit uses `QuotaLedger.lock(at=)` so its original timestamp sets
+the window. Startup deliberately does not replay events: it seeds task shapes from the rows,
+then starts at the newest event, because old spend and expired locks are not current state.
+
+A child gets `JEV_MODEL_ROUTER_DEPTH=1`, which prevents it from delegating again. Codex also
+gets that value through `shell_environment_policy.set`, because its shell filters the process
+environment. Its MCP server has the same issue, so the Codex plugin's `env_vars` allow-list
+names the router's depth, delegation, config and URL variables.
+
+There is no `delegate` MCP tool: a blocking MCP call cannot show progress and times out sooner
+than a shell. Resume and steering are not implemented because each delegation is one fresh
+run. Routing inside nucleos is also out of scope because it has its own runners and can call
+`/v1/route` itself.
 
 `jev-model-router calibrate --anchors FILE` takes tasks with a tier known to be (or not be) enough.
 An `insufficient` anchor whose tier still reaches the target caps one requirement for that
