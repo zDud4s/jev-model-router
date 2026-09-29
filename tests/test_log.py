@@ -354,3 +354,93 @@ def test_stats_pools_the_same_shape_the_router_does() -> None:
     assert (row.input_per_output, row.cache_read, row.cache_write) == (
         round(shape.input_per_output, 1), round(shape.cache_read, 3), round(shape.cache_write, 3),
     )
+
+
+def routed(log, i=1, tier="sub"):
+    log.record_decision(f"rt_{i}", task="t", tier=tier, model=None, effort=None, runner=None, stage=None,
+                        route_score=None, route_model=None, route_reason=None)
+
+
+RUN = Usage(prompt_tokens=100, completion_tokens=10, cached_tokens=80, cache_write_tokens=5)
+GUESS = Usage(prompt_tokens=999, completion_tokens=99, cached_tokens=1, cache_write_tokens=1)
+
+
+def tokens(row):
+    return (row["outcome_input_tokens"], row["outcome_output_tokens"],
+            row["outcome_cached_tokens"], row["outcome_cache_write_tokens"])
+
+
+def events(log):
+    return [(r["decision_id"], r["kind"], r["writer"]) for r in
+            log.query("SELECT decision_id, kind, writer FROM route_events ORDER BY id")]
+
+
+def test_a_delegates_usage_survives_an_outcome_that_brings_its_own() -> None:
+    log = RequestLog(":memory:")
+    routed(log)
+    assert log.set_usage("rt_1", RUN, "delegate") == "ok"
+    assert log.set_outcome("rt_1", "pass", None, GUESS, "app") == "kept_existing"
+    row = log.decision("rt_1")
+    assert row["outcome"] == "pass" and tokens(row) == (100, 10, 80, 5)
+
+
+def test_an_outcome_first_leaves_room_for_the_usage_and_the_first_usage_is_kept() -> None:
+    log = RequestLog(":memory:")
+    routed(log)
+    assert log.set_outcome("rt_1", "pass", None, None, "app") == "ok"
+    assert tokens(log.decision("rt_1")) == (None, None, None, None)
+    assert log.set_usage("rt_1", RUN, "delegate") == "ok"
+    assert log.set_usage("rt_1", GUESS, "delegate") == "kept_existing"
+    assert tokens(log.decision("rt_1")) == (100, 10, 80, 5)
+    assert log.set_usage("rt_nope", RUN, "delegate") == "missing"
+
+
+def test_two_sources_never_mix_in_one_row() -> None:
+    log = RequestLog(":memory:")
+    routed(log)
+    log.set_usage("rt_1", Usage(prompt_tokens=100, completion_tokens=10), "delegate")  # no cache fields
+    log.set_outcome("rt_1", "pass", None, RUN, "app")
+    assert tokens(log.decision("rt_1")) == (100, 10, 0, 0)
+
+
+def test_an_outcome_with_the_first_tokens_writes_them_and_says_ok() -> None:
+    log = RequestLog(":memory:")
+    routed(log)
+    assert log.set_outcome("rt_1", "fail", "tests failed", RUN, "app") == "ok"
+    assert tokens(log.decision("rt_1")) == (100, 10, 80, 5)
+    assert log.set_outcome("rt_1", "pass", None, None, "app") == "exists"
+    assert log.set_outcome("rt_nope", "pass", None, None, "app") == "missing"
+
+
+def test_each_write_appends_one_event_and_only_when_it_changed_something() -> None:
+    log = RequestLog(":memory:")
+    routed(log, 1)
+    routed(log, 2)
+    log.set_usage("rt_1", RUN, "d")
+    log.set_usage("rt_1", GUESS, "d")                  # kept: no event
+    log.set_outcome("rt_1", "pass", None, GUESS, "a")  # outcome only: its usage was not kept
+    log.set_outcome("rt_1", "fail", None, None, "a")   # exists: no event
+    log.set_outcome("rt_2", "pass", None, RUN, "a")    # outcome, and the tokens it wrote
+    assert events(log) == [("rt_1", "usage", "d"), ("rt_1", "outcome", "a"),
+                           ("rt_2", "outcome", "a"), ("rt_2", "usage", "a")]
+
+
+def test_events_after_leaves_out_the_readers_own_and_carries_the_row() -> None:
+    log = RequestLog(":memory:")
+    routed(log)
+    log.set_usage("rt_1", RUN, "delegate")
+    log.set_outcome("rt_1", "rate_limited", None, None, "app")
+    [usage] = log.events_after(0, "app")
+    assert (usage["kind"], usage["tier"], usage["input"], usage["output"], usage["cached"], usage["written"]) == (
+        "usage", "sub", 100, 10, 80, 5)
+    assert [r["kind"] for r in log.events_after(0, "delegate")] == ["outcome"]
+    assert log.events_after(0, "delegate")[0]["outcome"] == "rate_limited"
+    assert log.last_event_id() == 2 and log.events_after(2, "x") == []
+    assert RequestLog(":memory:").last_event_id() == 0
+
+
+def test_task_usage_includes_tokens_that_arrived_without_an_outcome() -> None:
+    log = RequestLog(":memory:")
+    routed(log)
+    log.set_usage("rt_1", RUN, "delegate")
+    assert [(r["tier"], r["input"]) for r in log.task_usage()] == [("sub", 100)]
