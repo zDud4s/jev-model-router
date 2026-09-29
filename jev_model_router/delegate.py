@@ -13,12 +13,15 @@ from __future__ import annotations
 
 import ipaddress
 import os
+import signal
 import shutil
 import subprocess
 import sys
 import threading
+import time
 import uuid
 from collections import deque
+from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from typing import IO, Any, Callable, Mapping, Protocol
@@ -162,22 +165,54 @@ def kill_tree(proc: "subprocess.Popen[str]") -> None:
         return
     if os.name == "nt":
         subprocess.run(["taskkill", "/T", "/F", "/PID", str(proc.pid)], capture_output=True)
+        try:
+            proc.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            pass
         if proc.poll() is None:
             # A restricted host can deny taskkill; at least stop the CLI itself instead of hanging.
-            proc.kill()
+            try:
+                proc.kill()
+            except OSError:
+                pass
         return
-    import signal
-
     try:
         os.killpg(proc.pid, signal.SIGKILL)
     except (ProcessLookupError, PermissionError):
-        proc.kill()
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+class _Interrupted(KeyboardInterrupt):
+    def __init__(self, result: RunResult) -> None:
+        self.result = result
+
+
+@contextmanager
+def _termination_interrupts():
+    previous: list[tuple[int, Any]] = []
+
+    def interrupt(signum: int, frame: Any) -> None:
+        raise KeyboardInterrupt
+
+    try:
+        for name in ("SIGTERM", "SIGHUP"):
+            if hasattr(signal, name):
+                sig = getattr(signal, name)
+                previous.append((sig, signal.signal(sig, interrupt)))
+        yield
+    finally:
+        for sig, handler in reversed(previous):
+            signal.signal(sig, handler)
 
 
 def _collect(proc: "subprocess.Popen[str]", adapter: Adapter, brief: str, timeout: float | None,
              err: IO[str]) -> tuple[RunResult, bool]:
     lines: list[str] = []
     tail: deque[str] = deque(maxlen=50)
+    reader_error: list[BaseException] = []
 
     def feed() -> None:
         try:
@@ -190,37 +225,52 @@ def _collect(proc: "subprocess.Popen[str]", adapter: Adapter, brief: str, timeou
         for line in proc.stderr:
             tail.append(line)
 
-    helpers = [threading.Thread(target=feed, daemon=True), threading.Thread(target=drain, daemon=True)]
-    for thread in helpers:
-        thread.start()
-    expired = threading.Event()
-    timer = None
-    if timeout:
-        def expire() -> None:
-            expired.set()
+    def read() -> None:
+        try:
+            for line in proc.stdout:
+                lines.append(line)
+                note = adapter.progress(line)
+                if note:
+                    print(f"[{adapter.runner}] {note}", file=err, flush=True)
+        except BaseException as exc:  # propagate progress failures after stopping the process tree
+            reader_error.append(exc)
             kill_tree(proc)
 
-        timer = threading.Timer(timeout, expire)
-        timer.daemon = True
-        timer.start()
-    try:
-        for line in proc.stdout:
-            lines.append(line)
-            note = adapter.progress(line)
-            if note:
-                print(f"[{adapter.runner}] {note}", file=err, flush=True)
-    except BaseException:
-        # Ctrl-C, or the host stopping a background task: the child is in its own process group,
-        # so nothing reaches it unless this kills it.
-        kill_tree(proc)
-        raise
-    finally:
-        if timer is not None:
-            timer.cancel()
-    returncode = proc.wait()
+    helpers = [threading.Thread(target=call, daemon=True) for call in (feed, drain, read)]
     for thread in helpers:
-        thread.join(timeout=5)
-    return adapter.read(lines, returncode, "".join(tail)), expired.is_set()
+        thread.start()
+    expired = False
+    interrupted = False
+    try:
+        try:
+            returncode = proc.wait(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            if proc.poll() is None:
+                expired = True
+                kill_tree(proc)
+            returncode = proc.poll()
+            if returncode is None:
+                returncode = proc.wait(timeout=5)
+    except KeyboardInterrupt:
+        interrupted = True
+        kill_tree(proc)
+        try:
+            returncode = proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            returncode = proc.poll()
+            if returncode is None:
+                returncode = -1
+    deadline = time.monotonic() + 5
+    for thread in helpers:
+        thread.join(timeout=max(0, deadline - time.monotonic()))
+    if reader_error and not hasattr(adapter, "read"):
+        raise reader_error[0]
+    result = adapter.read(lines, returncode, "".join(tail))
+    if interrupted or reader_error and isinstance(reader_error[0], KeyboardInterrupt):
+        raise _Interrupted(result)
+    if reader_error:
+        raise reader_error[0]
+    return result, expired
 
 
 def _safely(err: IO[str], what: str, call: Callable[..., Any], *args: Any) -> None:
@@ -275,13 +325,23 @@ def run_delegate(
     except OSError as exc:
         print(f"delegate: cannot run {resolved!r}: {exc}", file=err)
         return CANNOT
+    interrupted = False
     try:
-        result, timed_out = _collect(proc, adapter, brief, timeout, err)
+        with _termination_interrupts():
+            result, timed_out = _collect(proc, adapter, brief, timeout, err)
+    except _Interrupted as exc:
+        result, timed_out, interrupted = exc.result, False, True
     except KeyboardInterrupt:
         print("delegate: interrupted; the run was killed", file=err)
         return FAILED
     if result.usage.prompt_tokens or result.usage.completion_tokens:
         _safely(err, "recording the usage", source.record_usage, decision_id, result.usage)
+    if interrupted:
+        if result.rate_limited:
+            _safely(err, "reporting the rate limit", source.report_rate_limited, decision_id,
+                    (result.failure or "rate limited")[:2000])
+        print("delegate: interrupted; the run was killed", file=err)
+        return FAILED
     if timed_out:
         print(f"delegate: timed out after {timeout:.0f}s; the run was killed", file=err)
         return FAILED

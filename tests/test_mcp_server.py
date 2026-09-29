@@ -215,6 +215,35 @@ async def test_with_delegation_the_other_runner_is_offered_with_a_pinned_command
     assert body["decision_id"] in body["command_line"]
 
 
+async def test_a_non_loopback_delegate_url_neither_widens_nor_offers_a_command(make):
+    server, _ = await make(runners=["codex"], delegate=True,
+                           delegate_via=["--url", "http://router.example:8080"],
+                           which=on_path("claude", "codex"))
+    own = routed(await server.handle(call(1, "route", {"task": "Fix it"})))
+    other = routed(await server.handle(call(2, "route", {"task": "Fix it", "runners": ["claude"]})))
+    assert (own["runner"], own["run"]) == ("codex", "subagent")
+    assert (other["runner"], other["run"]) == ("claude", "unavailable") and "command" not in other
+
+
+async def test_a_failed_targets_lookup_is_retried_instead_of_cached(make, monkeypatch):
+    server, _ = await make(runners=["codex"], delegate=True, delegate_via=VIA,
+                           which=on_path("claude", "codex"))
+    request = server._request
+    calls = 0
+
+    async def fail_once(method, path, body):
+        nonlocal calls
+        if path == "/v1/route/targets":
+            calls += 1
+            if calls == 1:
+                return None, {"isError": True}
+        return await request(method, path, body)
+
+    monkeypatch.setattr(server, "_request", fail_once)
+    assert await server._delegable() == frozenset()
+    assert "claude" in await server._delegable() and calls == 2
+
+
 async def test_a_runner_whose_cli_is_not_here_is_not_offered(make):
     server, _ = await make(runners=["codex"], delegate=True, delegate_via=VIA, which=on_path("codex"))
     body = routed(await server.handle(call(1, "route", {"task": "Fix it"})))

@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import json
 import os
+import signal
+import subprocess
 import sys
+import threading
 import time
 from pathlib import Path
 
@@ -162,6 +165,151 @@ def test_an_interrupted_run_kills_its_tree(tmp_path, monkeypatch):
     with pytest.raises(KeyboardInterrupt):
         delegate._collect(proc, Interrupting(), "brief", None, Out())
     assert killed == [proc.pid] and proc.wait(timeout=30) is not None
+
+
+def test_a_run_turns_termination_signals_into_an_interrupt_and_restores_them(monkeypatch):
+    signals = [signal.SIGTERM]
+    if hasattr(signal, "SIGHUP"):
+        signals.append(signal.SIGHUP)
+    previous = {sig: object() for sig in signals}
+    active = dict(previous)
+
+    def install(sig, handler):
+        old = active[sig]
+        active[sig] = handler
+        return old
+
+    def collect(proc, adapter, brief, timeout, err):
+        for sig in signals:
+            assert active[sig] is not previous[sig]
+            with pytest.raises(KeyboardInterrupt):
+                active[sig](sig, None)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(signal, "signal", install)
+    monkeypatch.setattr(delegate, "_collect", collect)
+    code, _, _ = go(FakeSource(), lambda argv, env, cwd: object())
+    assert code == 2 and active == previous
+
+
+def test_stdout_is_read_off_the_waiting_thread():
+    seen = []
+
+    class Stdin:
+        def write(self, text):
+            pass
+
+        def close(self):
+            pass
+
+    class Stdout:
+        def __iter__(self):
+            seen.append(threading.current_thread() is not threading.main_thread())
+            return iter(())
+
+    class Proc:
+        stdin, stdout, stderr = Stdin(), Stdout(), ()
+
+        def wait(self, timeout=None):
+            return 0
+
+        def poll(self):
+            return 0
+
+    result, expired = delegate._collect(Proc(), delegate.adapter_for("codex"), "brief", None, Out())
+    assert seen == [True] and not expired and result.failure == "no agent message"
+
+
+def test_a_timeout_race_does_not_mark_an_already_finished_process_expired(monkeypatch):
+    killed = []
+
+    class Stdin:
+        def write(self, text):
+            pass
+
+        def close(self):
+            pass
+
+    class Stdout:
+        def __iter__(self):
+            time.sleep(0.05)
+            return iter(())
+
+    class Proc:
+        stdin, stdout, stderr = Stdin(), Stdout(), ()
+
+        def wait(self, timeout=None):
+            if timeout is not None:
+                raise subprocess.TimeoutExpired("delegate", timeout)
+            time.sleep(0.05)
+            return 0
+
+        def poll(self):
+            return 0
+
+    monkeypatch.setattr(delegate, "kill_tree", lambda proc: killed.append(proc))
+    _, expired = delegate._collect(Proc(), delegate.adapter_for("codex"), "brief", 0.01, Out())
+    assert not expired and killed == []
+
+
+def test_an_interrupt_records_partial_usage_and_rate_limit_before_failing(monkeypatch):
+    events = [
+        json.dumps({"type": "turn.completed", "usage": {"input_tokens": 70, "output_tokens": 7}}) + "\n",
+        json.dumps({"type": "error", "message": "You've hit your usage limit"}) + "\n",
+    ]
+
+    class Stdin:
+        def write(self, text):
+            pass
+
+        def close(self):
+            pass
+
+    class Proc:
+        stdin, stdout, stderr = Stdin(), events, ()
+        pid = 123
+        killed = False
+
+        def wait(self, timeout=None):
+            if not self.killed:
+                raise KeyboardInterrupt
+            return -9
+
+        def poll(self):
+            return -9 if self.killed else None
+
+    proc = Proc()
+    monkeypatch.setattr(delegate, "kill_tree", lambda child: setattr(child, "killed", True))
+    source = FakeSource()
+    code, _, _ = go(source, lambda argv, env, cwd: proc)
+    assert code == 2 and [usage.prompt_tokens for usage in source.usage] == [70]
+    assert source.limited == ["You've hit your usage limit"]
+
+
+def test_windows_kill_tree_waits_after_taskkill_and_tolerates_kill_errors(monkeypatch):
+    class Proc:
+        pid = 123
+
+        def __init__(self):
+            self.waits = []
+            self.kills = 0
+
+        def poll(self):
+            return None
+
+        def wait(self, timeout=None):
+            self.waits.append(timeout)
+            raise subprocess.TimeoutExpired("delegate", timeout)
+
+        def kill(self):
+            self.kills += 1
+            raise OSError("already gone")
+
+    proc = Proc()
+    monkeypatch.setattr(delegate.os, "name", "nt")
+    monkeypatch.setattr(delegate.subprocess, "run", lambda *args, **kwargs: None)
+    delegate.kill_tree(proc)
+    assert proc.waits == [2] and proc.kills == 1
 
 
 def test_a_timeout_kills_the_run_and_records_what_it_saw(tmp_path):

@@ -33,10 +33,11 @@ import shlex
 import shutil
 import sys
 from typing import IO, Any, Awaitable, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
+from .delegate import _loopback
 from .delegates import Target, adapter_for
 from .route_api import OUTCOMES
 
@@ -145,10 +146,13 @@ class McpServer:
     ) -> None:
         self._client = client
         self._own = frozenset(runners or [])
-        self._delegate = delegate and depth < 1
         self._depth = depth
         # How `delegate` reaches this server's decisions: ["-c", <absolute config>] or ["--url", <url>].
         self._via = list(delegate_via or [])
+        local_via = not self._via[:1] == ["--url"] or (
+            len(self._via) > 1 and _loopback(urlsplit(self._via[1]).hostname or "")
+        )
+        self._delegate = delegate and depth < 1 and local_via
         self._powershell = powershell
         self._which = which
         self._runnable: frozenset[str] | None = None
@@ -216,8 +220,10 @@ class McpServer:
         """Runners of tiers an adapter can run on this machine. Asked once: PATH does not change under a session."""
         if self._runnable is None:
             payload, error = await self._request("GET", "/v1/route/targets", None)
+            if error is not None:
+                return frozenset()
             found: set[str] = set()
-            for raw in (payload or {}).get("targets", []) if error is None else []:
+            for raw in (payload or {}).get("targets", []):
                 try:
                     target = Target.from_dict(raw)
                 except (KeyError, TypeError, ValueError):

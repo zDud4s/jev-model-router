@@ -100,6 +100,13 @@ def test_claude_an_error_result_is_a_failure_and_a_spent_window_a_rate_limit():
     assert limited.rate_limited and status.rate_limited
 
 
+def test_claude_a_nonzero_exit_after_a_success_result_uses_stderr_not_the_answer():
+    result = {**RESULT, "result": "Finished documenting the rate limit behavior"}
+    run = adapter_for("claude").read(jsonl([result]), 1, "process wrapper failed\n")
+    assert run.message == result["result"]
+    assert run.failure == "process wrapper failed" and not run.rate_limited
+
+
 def test_claude_with_no_result_event_fails_with_its_stderr_and_no_usage():
     run = adapter_for("claude").read(["not json\n"], 1, "error: not logged in\n")
     assert run.failure == "error: not logged in" and run.usage.prompt_tokens == 0 and not run.rate_limited

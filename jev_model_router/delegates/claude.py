@@ -59,9 +59,12 @@ class ClaudeAdapter(Adapter):
             return RunResult(None, Usage(), failure, says_limited(failure))
         usage = _usage_of(result.get("usage"))
         text = result.get("result") if isinstance(result.get("result"), str) else None
-        if result.get("is_error") or returncode != 0:
+        if result.get("is_error"):
             failure = text or str(result.get("subtype") or f"exited {returncode}")
             # A spent window can arrive as an error result with no HTTP status: the text says so.
             limited = result.get("api_error_status") == 429 or says_limited(failure)
             return RunResult(text, usage, failure, limited)
+        if returncode != 0:
+            failure = (stderr or "").strip()[-2000:] or f"exited {returncode}"
+            return RunResult(text, usage, failure, False)
         return RunResult(text, usage, None)
