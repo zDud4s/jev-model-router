@@ -31,17 +31,33 @@ or as one call (`one_call`).
 
 ## 2. Run it on what was chosen
 
-- Delegating to a subagent that takes a model and reasoning effort: give it the returned
-  `model` and `effort` as they are.
-- Otherwise, for a self-contained task, run it from the repository root:
+The answer's `run` says how.
+
+- `run: "subagent"`: delegating to a subagent that takes a model and reasoning effort: give it the
+  returned `model` and `effort` as they are. Otherwise, for a self-contained task, run it from the
+  repository root:
 
   ```bash
   codex exec -m <model> -c model_reasoning_effort="<effort>" "<the brief>"
   ```
 
   Leave out the `-c` when `effort` is null.
-- If the answer's `runner` is not `codex`, you cannot run it from here; use the default and
-  report `error` with that reason.
+- `run: "delegate"`: the tier runs on another agent's CLI, on that agent's subscription.
+  1. Write the brief to a file, as you would brief a subagent: it starts with none of your context.
+  2. Run `command_line` followed by ` --brief-file '<that file>'` in the shell with
+     `sandbox_permissions: "require_escalated"`: it needs the network and writes the router's log.
+     Give the call a `timeout_ms` long enough for the task (30 minutes: `1800000`).
+  3. It may edit files and run commands in this project (`workspace-write`). Add
+     `--access read-only` for a review or an investigation. Add `--access full` only when the user
+     asked for it.
+  4. stdout is the other agent's final message: check its work as you would a subagent's.
+     Exit 0: report `pass` or `fail` from your check. Exit 3: it hit a rate limit and already
+     reported `rate_limited`; do not report again, route again. Exit 2 or 4: report `error` with
+     the reason it printed on stderr. Its tokens are already logged: leave `usage` out.
+- `run: "unavailable"`: this session cannot run that tier. Use the default and report `error` with
+  that reason.
+
+`delegate` answers appear only when the user turned delegation on (`JEV_MODEL_ROUTER_DELEGATE=1`).
 
 ## 3. After the work is checked: `report_outcome`
 

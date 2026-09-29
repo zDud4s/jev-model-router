@@ -298,3 +298,13 @@ def test_mcp_against_a_proxy_pins_its_url(monkeypatch):
     assert cli.main(["mcp", "--url", "http://127.0.0.1:8080", "--runner", "claude"]) == 0
     assert seen["delegate_via"] == ["--url", "http://127.0.0.1:8080"]
     assert seen["depth"] == 0 and seen["powershell"] is False
+
+
+def test_the_codex_manifest_lets_the_routers_variables_through():
+    from pathlib import Path
+
+    manifest = json.loads((Path(__file__).parent.parent / "plugin" / "codex" / "mcp.json").read_text())
+    server = manifest["mcpServers"]["jev-model-router"]
+    assert set(server["env_vars"]) == {"JEV_MODEL_ROUTER_DEPTH", "JEV_MODEL_ROUTER_DELEGATE",
+                                       "JEV_MODEL_ROUTER_CONFIG", "JEV_MODEL_ROUTER_URL"}
+    assert server["args"] == ["mcp", "--runner", "codex"]
