@@ -163,3 +163,11 @@ def test_a_stream_is_one_chunk_then_the_usage():
     assert isinstance(events[0], StreamChunk)
     assert events[0].data["choices"][0]["delta"]["content"] == "final answer"
     assert isinstance(events[-1], StreamEnd) and events[-1].usage.completion_tokens == 80
+
+
+def test_a_limit_reached_message_is_a_rate_limit():
+    events = [{"type": "turn.failed", "error": {"message": "5-hour limit reached - resets 3pm"}}]
+    backend = CodexCliBackend(tier(), runner=Recorder(stdout=jsonl(events), returncode=1))
+    with pytest.raises(BackendError) as info:
+        run(backend, request(("user", "hi")))
+    assert info.value.status == 429

@@ -227,3 +227,13 @@ def test_a_subscription_tier_names_its_pool_and_an_unknown_effort_is_refused():
     assert tier(subscription="work").subscription == "work"
     with pytest.raises(ConfigError, match="effort must be one of"):
         tier(effort="extreme")
+
+
+def test_an_auth_token_and_a_parent_session_never_reach_the_cli(monkeypatch):
+    # CLAUDECODE is set inside a Claude Code session, and `claude` refuses to start nested.
+    monkeypatch.setenv("ANTHROPIC_AUTH_TOKEN", "should-not-pass")
+    monkeypatch.setenv("CLAUDECODE", "1")
+    runner = Recorder()
+    run(ClaudeCliBackend(tier(), runner=runner), request(("user", "hi")))
+    env = runner.calls[0]["env"]
+    assert "ANTHROPIC_AUTH_TOKEN" not in env and "CLAUDECODE" not in env
