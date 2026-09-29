@@ -6,6 +6,7 @@ Jev is never called: the router answers from a scripted `Ask`.
 from __future__ import annotations
 
 import json
+import threading
 
 import pytest
 from fastapi.testclient import TestClient
@@ -235,6 +236,35 @@ def test_another_apps_outcome_is_counted_once_by_this_one_before_it_routes(backe
         b.post("/v1/route", json=TASK)
     assert seen(router_a) == 1 and seen(router_b) == 1
     assert router_b.ledger.used("claude") > 0
+
+
+def test_route_reads_events_in_a_worker_then_applies_them_on_the_event_loop(
+    backend_factory, monkeypatch,
+):
+    threads = {}
+
+    class Follower:
+        def __init__(self, log, writer):
+            pass
+
+        def read(self):
+            threads["read"] = threading.get_ident()
+            return ["event"]
+
+        def apply(self, router, rows):
+            threads["apply"] = threading.get_ident()
+            assert rows == ["event"]
+            return len(rows)
+
+        def catch_up(self, router):
+            raise AssertionError("route_only must split reading from applying")
+
+    monkeypatch.setattr("jev_model_router.app.EventFollower", Follower)
+    client, _, _ = client_for(backend_factory)
+    with client:
+        response = client.post("/v1/route", json=TASK)
+    assert response.status_code == 200
+    assert threads["read"] != threads["apply"]
 
 
 def test_a_delegates_usage_then_an_outcome_with_usage_is_counted_once(backend_factory, tmp_path):

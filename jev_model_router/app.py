@@ -438,7 +438,8 @@ def create_app(
             ask = parse_route_ask(await raw_request.json(), config)
         except (ValidationError, json.JSONDecodeError, ValueError) as exc:
             return JSONResponse(status_code=400, content=error_body(f"invalid route request: {exc}"))
-        await asyncio.to_thread(follower.catch_up, active_router)
+        rows = await asyncio.to_thread(follower.read)
+        follower.apply(active_router, rows)
         request = ask.request
         decision_id = f"rt_{uuid.uuid4().hex[:16]}"
         trace = (

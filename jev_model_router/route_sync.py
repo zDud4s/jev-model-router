@@ -18,12 +18,15 @@ from .db import RequestLog
 from .schemas import Usage
 
 
-def account_usage(router: Any, tier: str, usage: Usage) -> None:
+def account_usage(router: Any, tier: str, usage: Usage, at: float | None = None) -> None:
     """One routed task's whole usage: spend on its subscription, and evidence of its tier's shape."""
     observe = getattr(router, "observe", None)
     if observe is not None:
         try:
-            observe(tier, usage, 200)
+            if at is None:
+                observe(tier, usage, 200)
+            else:
+                observe(tier, usage, 200, at=at)
         except Exception:  # noqa: BLE001 - accounting must not fail a report
             pass
     calls = getattr(router, "calls", None)
@@ -48,33 +51,39 @@ class EventFollower:
         except Exception:  # noqa: BLE001 - a log it cannot read leaves nothing to catch up on
             self.last = 0
 
-    def catch_up(self, router: Any) -> int:
-        """Apply the new events to `router`; how many there were. Never raises."""
+    def read(self) -> list[Any]:
+        """Read and claim new events; concurrent readers never receive the same event. Never raises."""
         with self._lock:
-            return self._catch_up(router)
+            try:
+                rows = self._log.events_after(self.last, self.writer)
+                if rows:
+                    self.last = rows[-1]["id"]
+                return rows
+            except Exception as exc:  # noqa: BLE001 - a decision must not fail on the log
+                print(f"route events: cannot read them: {type(exc).__name__}: {exc}", file=sys.stderr)
+                return []
 
-    def _catch_up(self, router: Any) -> int:
-        try:
-            rows = self._log.events_after(self.last, self.writer)
-        except Exception as exc:  # noqa: BLE001 - a decision must not fail on the log
-            print(f"route events: cannot read them: {type(exc).__name__}: {exc}", file=sys.stderr)
-            return 0
+    def apply(self, router: Any, rows: list[Any]) -> int:
+        """Apply rows already claimed by `read` to `router`; how many there were. Never raises."""
         for row in rows:
-            self.last = row["id"]
-            if row["kind"] == "usage" and row["input"] is not None and row["output"] is not None:
-                account_usage(router, row["tier"], Usage(
-                    prompt_tokens=row["input"], completion_tokens=row["output"],
-                    cached_tokens=row["cached"], cache_write_tokens=row["written"],
-                ))
-            elif row["kind"] == "outcome" and row["outcome"] == "rate_limited":
-                calls = getattr(router, "calls", None)
-                if calls is None:
-                    continue
-                try:
+            try:
+                if row["kind"] == "usage" and row["input"] is not None and row["output"] is not None:
+                    account_usage(router, row["tier"], Usage(
+                        prompt_tokens=row["input"], completion_tokens=row["output"],
+                        cached_tokens=row["cached"], cache_write_tokens=row["written"],
+                    ), at=datetime.fromisoformat(row["ts"]).timestamp())
+                elif row["kind"] == "outcome" and row["outcome"] == "rate_limited":
+                    calls = getattr(router, "calls", None)
+                    if calls is None:
+                        continue
                     calls.lock(row["tier"], at=datetime.fromisoformat(row["ts"]).timestamp())
-                except Exception:  # noqa: BLE001
-                    pass
+            except Exception:  # noqa: BLE001 - one bad event must not fail a decision or the remaining rows
+                pass
         return len(rows)
+
+    def catch_up(self, router: Any) -> int:
+        """Synchronously read and apply new events to `router`. Never raises."""
+        return self.apply(router, self.read())
 
 
 __all__ = ["EventFollower", "account_usage"]

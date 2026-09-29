@@ -73,6 +73,23 @@ def test_spend_is_charged_at_the_prices_given_and_only_to_subscriptions():
     assert c.state() == {"subscriptions": {"claude": {"used_usd": 2.0, "locked": False}}}
 
 
+def test_spend_without_an_event_time_is_recorded_at_the_current_time():
+    now = [10 * 3600.0]
+    c = calls(clock=lambda: now[0])
+    c.ledger.record("claude", 2.0)
+    assert c.ledger.used("claude") == 2.0
+    now[0] += 5 * 3600 + 1
+    assert c.ledger.used("claude") == 0.0
+
+
+def test_out_of_order_spend_still_prunes_every_entry_older_than_the_window():
+    now = [10 * 3600.0]
+    c = calls(clock=lambda: now[0])
+    c.ledger.record("claude", 2.0, at=now[0] - 3600)
+    c.ledger.record("claude", 7.0, at=now[0] - 6 * 3600)
+    assert c.ledger.used("claude") == 2.0
+
+
 SHAPE = {"input_per_output": 300, "cache_read": 0.9, "cache_write": 0.05}
 TASK = Usage(prompt_tokens=30_000, completion_tokens=100, cached_tokens=29_000, cache_write_tokens=500)
 

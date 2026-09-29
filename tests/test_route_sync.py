@@ -52,6 +52,28 @@ def test_another_writers_usage_is_counted_once_and_its_own_never():
     assert follower.catch_up(r) == 0 and seen(r) == 1
 
 
+def test_usage_older_than_the_subscription_window_adds_no_current_spend():
+    log = RequestLog(":memory:")
+    event_time = datetime.now(timezone.utc).timestamp()
+    r = router(clock=lambda: event_time + 5 * 3600 + 60)
+    follower = EventFollower(log, "app")
+    routed(log, 1)
+    log.set_usage("rt_1", CACHED, "delegate")
+    assert follower.catch_up(r) == 1
+    assert r.ledger.used("claude") == 0
+
+
+def test_usage_inside_the_subscription_window_adds_current_spend():
+    log = RequestLog(":memory:")
+    event_time = datetime.now(timezone.utc).timestamp()
+    r = router(clock=lambda: event_time + 4 * 3600)
+    follower = EventFollower(log, "app")
+    routed(log, 1)
+    log.set_usage("rt_1", CACHED, "delegate")
+    assert follower.catch_up(r) == 1
+    assert r.ledger.used("claude") > 0
+
+
 def test_a_rate_limit_another_writer_saw_locks_from_when_it_was_seen():
     log = RequestLog(":memory:")
     ts = datetime.now(timezone.utc).timestamp()
@@ -66,7 +88,7 @@ def test_a_rate_limit_another_writer_saw_locks_from_when_it_was_seen():
     assert not r.ledger.locked("claude")
 
 
-def test_two_decisions_at_once_count_an_event_once():
+def test_two_decisions_reading_at_once_return_an_event_once():
     import threading
 
     log = RequestLog(":memory:")
@@ -74,11 +96,15 @@ def test_two_decisions_at_once_count_an_event_once():
     follower = EventFollower(log, "app")
     routed(log, 1)
     log.set_usage("rt_1", CACHED, "delegate")
-    threads = [threading.Thread(target=follower.catch_up, args=(r,)) for _ in range(8)]
+    batches = []
+    threads = [threading.Thread(target=lambda: batches.append(follower.read())) for _ in range(8)]
     for t in threads:
         t.start()
     for t in threads:
         t.join()
+    for rows in batches:
+        follower.apply(r, rows)
+    assert sum(len(rows) for rows in batches) == 1
     assert seen(r) == 1
 
 

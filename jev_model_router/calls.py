@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 import time
+from bisect import insort
 from collections import deque
 from typing import Any, Callable, Mapping, Sequence
 
@@ -39,8 +40,9 @@ class QuotaLedger:
         self._spent: dict[str, deque[tuple[float, float]]] = {}
         self._locked_until: dict[str, float] = {}
 
-    def record(self, subscription: str, usd: float) -> None:
-        self._spent.setdefault(subscription, deque()).append((self._clock(), usd))
+    def record(self, subscription: str, usd: float, at: float | None = None) -> None:
+        """Record spend when it happened, keeping late cross-process events in time order."""
+        insort(self._spent.setdefault(subscription, deque()), (self._clock() if at is None else at, usd))
 
     def lock(self, subscription: str, at: float | None = None) -> None:
         """Off the table for one window from `at` (a 429 seen then, maybe by another process), else from now."""
@@ -157,16 +159,20 @@ class CallRouter:
             return math.inf  # answered 429: not available until the window turns
         return _usd(self.prices(tier_name), input_tokens, output_tokens)
 
-    def record_spend(self, tier_name: str, usage: Usage, status: int, spend_prices: Prices) -> None:
+    def record_spend(
+        self, tier_name: str, usage: Usage, status: int, spend_prices: Prices, at: float | None = None,
+    ) -> None:
         """Charge a finished call to its subscription at `spend_prices`, or lock it on a 429."""
         tier = self._config.tiers.get(tier_name)
         if tier is None or not tier.subscription:
             return
         if status == 429:
-            self.ledger.lock(tier.subscription)
+            self.ledger.lock(tier.subscription, at=at)
             return
         if status < 400:
-            self.ledger.record(tier.subscription, _usd(spend_prices, usage.prompt_tokens, usage.completion_tokens))
+            self.ledger.record(
+                tier.subscription, _usd(spend_prices, usage.prompt_tokens, usage.completion_tokens), at=at,
+            )
 
     def record_task(self, tier_name: str, usage: Usage) -> bool:
         """One routed task's whole usage, as evidence of the tier's shape.
