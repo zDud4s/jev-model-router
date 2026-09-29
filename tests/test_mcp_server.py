@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 
 import httpx
 import pytest
@@ -17,7 +18,7 @@ from jev_model_router import cli
 from jev_model_router.capabilities import CapabilityRouter
 from jev_model_router.config import parse_config
 from jev_model_router.db import RequestLog
-from jev_model_router.mcp_server import PROTOCOL_VERSIONS, TOOLS, McpServer, run
+from jev_model_router.mcp_server import PROTOCOL_VERSIONS, TOOLS, McpServer, command_line, run
 
 from test_capabilities import HARD, Ask, raw_config
 
@@ -159,3 +160,96 @@ async def test_an_outcome_carries_cache_tokens_through(server):
     response = await server.handle(call(2, "report_outcome",
                                         {"decision_id": routed["decision_id"], "status": "pass", "usage": usage}))
     assert response["result"]["isError"] is False
+
+
+VIA = ["-c", "/abs/router config.yaml"]
+
+
+def on_path(*names):
+    return lambda exe: f"/usr/bin/{exe}" if exe in names else None
+
+
+@pytest.fixture
+async def make(backend_factory):
+    """A server over a fresh app; `make(**kwargs)` returns (server, log)."""
+    stack = []
+
+    async def build(**kwargs):
+        log = RequestLog(":memory:")
+        app = app_for(backend_factory, log=log)
+        ctx = app.router.lifespan_context(app)
+        await ctx.__aenter__()
+        client = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://jev-model-router")
+        stack.append((ctx, client))
+        return McpServer(client, **kwargs), log
+
+    yield build
+    for ctx, client in reversed(stack):
+        await client.aclose()
+        await ctx.__aexit__(None, None, None)
+
+
+def routed(response):
+    assert response["result"]["isError"] is False, text_of(response)
+    return json.loads(text_of(response))
+
+
+def decisions(log):
+    return log.query("SELECT COUNT(*) AS n FROM route_decisions")[0]["n"]
+
+
+async def test_off_by_default_the_answer_is_run_here_or_unavailable(make):
+    server, _ = await make(runners=["codex"], which=on_path("claude", "codex"))
+    own = routed(await server.handle(call(1, "route", {"task": "Fix it"})))
+    other = routed(await server.handle(call(2, "route", {"task": "Fix it", "runners": ["claude"]})))
+    assert (own["runner"], own["run"]) == ("codex", "subagent")
+    assert (other["runner"], other["run"]) == ("claude", "unavailable") and "command" not in other
+
+
+async def test_with_delegation_the_other_runner_is_offered_with_a_pinned_command(make):
+    server, _ = await make(runners=["codex"], delegate=True, delegate_via=VIA, which=on_path("claude", "codex"))
+    body = routed(await server.handle(call(1, "route", {"task": "Fix it"})))
+    assert (body["runner"], body["run"]) == ("claude", "delegate")
+    assert body["command"] == [sys.executable, "-m", "jev_model_router", "delegate", body["decision_id"], *VIA]
+    assert body["decision_id"] in body["command_line"]
+
+
+async def test_a_runner_whose_cli_is_not_here_is_not_offered(make):
+    server, _ = await make(runners=["codex"], delegate=True, delegate_via=VIA, which=on_path("codex"))
+    body = routed(await server.handle(call(1, "route", {"task": "Fix it"})))
+    assert (body["runner"], body["run"]) == ("codex", "subagent")
+
+
+async def test_an_explicit_list_is_intersected_and_an_empty_one_routes_nothing(make):
+    server, log = await make(runners=["codex"], delegate=True, delegate_via=VIA, which=on_path("claude", "codex"))
+    body = routed(await server.handle(call(1, "route", {"task": "Fix it", "runners": ["claude", "gemini"]})))
+    assert body["run"] == "delegate"
+    empty = await server.handle(call(2, "route", {"task": "Fix it", "runners": ["gemini"]}))
+    assert empty["result"]["isError"] is True and "gemini" in text_of(empty)
+    assert decisions(log) == 1
+
+
+async def test_a_delegated_run_offers_only_its_own_runner(make):
+    server, log = await make(runners=["codex"], delegate=True, depth=1, delegate_via=VIA,
+                             which=on_path("claude", "codex"))
+    body = routed(await server.handle(call(1, "route", {"task": "Fix it"})))
+    assert (body["runner"], body["run"]) == ("codex", "subagent")
+    refused = await server.handle(call(2, "route", {"task": "Fix it", "runners": ["claude"]}))
+    assert refused["result"]["isError"] is True and decisions(log) == 1
+
+
+async def test_a_server_with_no_runner_of_its_own_routes_as_today(make):
+    plain, _ = await make(which=on_path("claude", "codex"))
+    assert routed(await plain.handle(call(1, "route", {"task": "Fix it"})))["run"] == "unavailable"
+    delegating, _ = await make(delegate=True, delegate_via=VIA, which=on_path("claude", "codex"))
+    body = routed(await delegating.handle(call(1, "route", {"task": "Fix it"})))
+    assert body["runner"] == "claude" and body["run"] == "delegate"
+
+
+def test_the_command_line_is_quoted_for_the_hosts_shell():
+    argv = ["C:\\Program Files\\Python\\python.exe", "-m", "jev_model_router", "delegate", "rt_1", "-c", "it's.yaml"]
+    assert command_line(argv, powershell=True) == (
+        "& 'C:\\Program Files\\Python\\python.exe' '-m' 'jev_model_router' 'delegate' 'rt_1' '-c' 'it''s.yaml'")
+    posix = command_line(argv, powershell=False)
+    import shlex
+    assert shlex.split(posix) == argv
