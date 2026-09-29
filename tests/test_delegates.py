@@ -99,3 +99,59 @@ def test_claude_progress_names_tools_and_text():
     adapter = adapter_for("claude")
     lines = [adapter.progress(line) for line in jsonl(STREAM)]
     assert lines == [None, "tool Edit", "All tests pass.", "done (success)"]
+
+
+from test_codex_cli import EVENTS as CODEX_EVENTS
+
+
+@pytest.mark.parametrize("access, flags", [
+    ("read-only", ["--sandbox", "read-only"]),
+    ("workspace-write", ["--sandbox", "workspace-write"]),
+    ("full", ["--dangerously-bypass-approvals-and-sandbox"]),
+])
+def test_codex_argv_per_access_level(access, flags):
+    argv = adapter_for("codex").argv(TARGET, access, "/work")
+    assert argv == ["/bin/codex", "exec", "--json", "--skip-git-repo-check", "-C", "/work", "-m", "gpt-6-sol",
+                    "-c", 'model_reasoning_effort="high"',
+                    "-c", 'shell_environment_policy.set.JEV_MODEL_ROUTER_DEPTH="1"', *flags, "-"]
+
+
+def test_codex_argv_leaves_effort_out_when_the_tier_has_none_and_keeps_the_depth():
+    argv = adapter_for("codex").argv(Target(**{**TARGET.as_dict(), "effort": None}), "full", "/work")
+    assert not any(a.startswith("model_reasoning_effort") for a in argv)
+    assert 'shell_environment_policy.set.JEV_MODEL_ROUTER_DEPTH="1"' in argv
+
+
+def test_codex_env_drops_the_api_keys():
+    assert adapter_for("codex").env({"OPENAI_API_KEY": "o", "CODEX_API_KEY": "c", "PATH": "/bin"}) == {"PATH": "/bin"}
+
+
+def test_codex_reads_the_last_message_and_the_turns_usage():
+    run = adapter_for("codex").read(jsonl(CODEX_EVENTS), 0, "")
+    assert run.failure is None and run.message == "final answer"
+    assert (run.usage.prompt_tokens, run.usage.cached_tokens, run.usage.completion_tokens) == (1200, 1000, 80)
+
+
+def test_codex_keeps_the_last_turns_usage_not_a_sum():
+    two = [*CODEX_EVENTS, {"type": "turn.completed", "usage": {"input_tokens": 1500, "output_tokens": 90}}]
+    assert adapter_for("codex").read(jsonl(two), 0, "").usage.prompt_tokens == 1500
+
+
+def test_codex_a_failed_turn_fails_and_a_spent_window_is_a_rate_limit():
+    failed = adapter_for("codex").read(jsonl([{"type": "turn.failed", "error": {"message": "sandbox denied"}}]), 1, "")
+    limited = adapter_for("codex").read(jsonl([{"type": "error", "message": "You've hit your usage limit"}]), 1, "")
+    silent = adapter_for("codex").read([], 2, "boom\n")
+    no_answer = adapter_for("codex").read(jsonl([CODEX_EVENTS[-1]]), 0, "")
+    assert failed.failure == "sandbox denied" and not failed.rate_limited
+    assert limited.rate_limited
+    assert silent.failure == "boom"
+    assert no_answer.failure == "no agent message" and no_answer.usage.prompt_tokens == 1200
+
+
+def test_codex_progress_names_commands_and_messages():
+    adapter = adapter_for("codex")
+    started = {"type": "item.started", "item": {"type": "command_execution", "command": "pytest -q"}}
+    assert adapter.progress(json.dumps(started)) == "$ pytest -q"
+    assert adapter.progress(json.dumps(CODEX_EVENTS[-2])) == "final answer"
+    assert adapter.progress(json.dumps(CODEX_EVENTS[-1])) == "done"
+    assert adapter.progress("warning: something") is None

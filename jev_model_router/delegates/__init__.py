@@ -7,8 +7,9 @@ from __future__ import annotations
 
 from .base import ACCESS, DEPTH_ENV, Adapter, RunResult, Target, clip, parse_event
 from .claude import ClaudeAdapter
+from .codex import CodexAdapter
 
-ADAPTERS: dict[str, Adapter] = {a.runner: a for a in (ClaudeAdapter(),)}
+ADAPTERS: dict[str, Adapter] = {a.runner: a for a in (ClaudeAdapter(), CodexAdapter())}
 
 
 def adapter_for(runner: str) -> Adapter | None:
