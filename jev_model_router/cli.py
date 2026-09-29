@@ -1,4 +1,4 @@
-"""Command line: `jev-model-router init`, `serve`, `mcp`, `keys`, `stats`, `measure-shape`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
+"""Command line: `jev-model-router init`, `serve`, `mcp`, `delegate`, `keys`, `stats`, `measure-shape`, `train`, `label`, `reconcile`, `calibrate`, `benchmarks` and `check`."""
 
 from __future__ import annotations
 
@@ -56,6 +56,25 @@ def _build_parser() -> argparse.ArgumentParser:
                           f"(default: ${URL_ENV})")
     mcp.add_argument("--runner", action="append", default=[],
                      help="only offer tiers this CLI runs, e.g. claude or codex; repeatable")
+
+    delegate = sub.add_parser(
+        "delegate", help="run a routed task on the CLI of the tier chosen, in this directory (see the route tool's run)",
+    )
+    delegate.add_argument("decision_id", help="the decision_id the route tool returned")
+    delegate.add_argument("--brief-file", default=None, help="the brief for the run (default: read from stdin)")
+    delegate.add_argument(
+        "--access", default="workspace-write", choices=("read-only", "workspace-write", "full"),
+        help="what the run may do: look only, edit and run commands in this project (default), or anything; "
+             "use full only when the user asked for it",
+    )
+    delegate.add_argument("--timeout", type=float, default=None,
+                          help="seconds before the run and everything it started are killed (default: none)")
+    where = delegate.add_mutually_exclusive_group()
+    # After the subcommand, and not the global -c, so a pinned config always wins over $JEV_MODEL_ROUTER_URL.
+    where.add_argument("-c", "--config", dest="delegate_config", default=None,
+                       help=f"the config whose log holds the decision (default: ${URL_ENV}, else the global -c)")
+    where.add_argument("--url", dest="delegate_url", default=None,
+                       help="a proxy running on this machine (jev-model-router serve)")
 
     keys = sub.add_parser("keys", help="show the API keys the config needs, and set or unset them")
     keys.add_argument("action", nargs="?", choices=["list", "set", "unset"], default="list",
@@ -823,6 +842,36 @@ def _mcp(args) -> int:
         sys.stdout = protocol_out
 
 
+def _delegate(args) -> int:
+    from pathlib import Path
+
+    from . import delegate
+
+    # Before anything is read: a delegated run must not delegate again, and stdin may never close.
+    refusal = delegate.refused_at_depth(os.environ)
+    if refusal:
+        print(f"delegate: {refusal}", file=sys.stderr)
+        return delegate.CANNOT
+    url = args.delegate_url or (None if args.delegate_config else os.environ.get(URL_ENV) or None)
+    try:
+        source = delegate.HttpSource(url) if url else delegate.LogSource(args.delegate_config or args.config)
+    except delegate.CannotStart as exc:
+        print(f"delegate: {exc}", file=sys.stderr)
+        return delegate.CANNOT
+    try:
+        if args.brief_file:
+            try:
+                brief = Path(args.brief_file).read_text(encoding="utf-8")
+            except OSError as exc:
+                print(f"delegate: cannot read the brief: {exc}", file=sys.stderr)
+                return delegate.CANNOT
+        else:
+            brief = sys.stdin.read()
+        return delegate.run_delegate(args.decision_id, source, brief, access=args.access, timeout=args.timeout)
+    finally:
+        source.close()
+
+
 def _measure_shape(args: argparse.Namespace) -> int:
     """Read-only: no config, no network, nothing written."""
     from datetime import datetime, timezone
@@ -851,6 +900,8 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "mcp":
         return _mcp(args)
+    if args.command == "delegate":
+        return _delegate(args)
     if args.command == "keys":
         return _keys(args)
     if args.command == "init":

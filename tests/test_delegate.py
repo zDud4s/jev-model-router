@@ -16,6 +16,7 @@ import pytest
 import yaml
 from fastapi.testclient import TestClient
 
+from jev_model_router import cli
 from jev_model_router import delegate
 from jev_model_router.delegate import CannotStart, HttpSource, LogSource, run_delegate
 from jev_model_router.delegates import DEPTH_ENV, Target
@@ -257,3 +258,54 @@ def test_the_http_source_reads_the_decision_and_posts_usage_and_the_rate_limit(b
             source.target("rt_nope")
         row = log.decision(decision)  # inside the block: the lifespan closes the log
     assert row["outcome_input_tokens"] == 10 and row["outcome"] == "error"
+
+
+def test_config_and_url_together_are_refused():
+    with pytest.raises(SystemExit) as info:
+        cli.main(["delegate", "rt_1", "-c", "a.yaml", "--url", "http://127.0.0.1:1"])
+    assert info.value.code == 2
+
+
+def test_an_explicit_config_wins_over_the_url_in_the_environment(tmp_path, monkeypatch):
+    config = write_config(tmp_path)
+    brief = tmp_path / "brief.md"
+    brief.write_text("Fix it")
+    seen = {}
+
+    def fake_run(decision_id, source, text, **kwargs):
+        seen.update(source=type(source).__name__, brief=text, access=kwargs["access"])
+        return 0
+
+    monkeypatch.setattr(delegate, "run_delegate", fake_run)
+    monkeypatch.setenv(cli.URL_ENV, "http://127.0.0.1:9")
+    monkeypatch.delenv(DEPTH_ENV, raising=False)
+    assert cli.main(["delegate", "rt_1", "-c", str(config), "--brief-file", str(brief), "--access", "read-only"]) == 0
+    assert seen == {"source": "LogSource", "brief": "Fix it", "access": "read-only"}
+
+
+def test_the_url_in_the_environment_applies_when_neither_is_given(monkeypatch, tmp_path):
+    seen = {}
+    monkeypatch.setattr(delegate, "run_delegate", lambda d, source, text, **kw: seen.setdefault("s", type(source).__name__) and 0)
+    monkeypatch.setenv(cli.URL_ENV, "http://127.0.0.1:9")
+    monkeypatch.delenv(DEPTH_ENV, raising=False)
+    brief = tmp_path / "b.md"
+    brief.write_text("x")
+    cli.main(["delegate", "rt_1", "--brief-file", str(brief)])
+    assert seen == {"s": "HttpSource"}
+
+
+def test_a_router_elsewhere_is_refused_before_anything_runs(monkeypatch, capsys):
+    monkeypatch.delenv(DEPTH_ENV, raising=False)
+    assert cli.main(["delegate", "rt_1", "--url", "http://10.0.0.5:8080"]) == 4
+    assert "this machine" in capsys.readouterr().err
+
+
+def test_at_depth_the_command_refuses_before_reading_the_brief(monkeypatch, capsys):
+    class NoStdin:
+        def read(self):
+            raise AssertionError("stdin was read")
+
+    monkeypatch.setenv(DEPTH_ENV, "1")
+    monkeypatch.setattr(sys, "stdin", NoStdin())
+    assert cli.main(["delegate", "rt_1", "--url", "http://127.0.0.1:1"]) == 4
+    assert "cannot delegate again" in capsys.readouterr().err
