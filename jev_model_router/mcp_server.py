@@ -7,6 +7,11 @@ tool, so this module speaks it and forwards each call to the two route
 endpoints unchanged. There is one decision path, the HTTP one; this is a
 transport, not a second router.
 
+With delegation on (`mcp --delegate`, or JEV_MODEL_ROUTER_DELEGATE=1), a server with a runner of its
+own also offers the tiers another agent's CLI on this machine can run, and each answer says how to run
+it: `run: subagent` (this agent runs it), `delegate` (a `jev-model-router delegate` command to run in the
+shell), or `unavailable`. A delegated run (JEV_MODEL_ROUTER_DEPTH=1) is offered its own runner only.
+
 Two ways to reach the endpoints:
 
 * **In process** (default): the app is built from the config here and called
@@ -24,12 +29,16 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
+import shutil
 import sys
 from typing import IO, Any, Awaitable, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 import httpx
 
+from .delegate import _loopback
+from .delegates import Target, adapter_for
 from .route_api import OUTCOMES
 
 # Newest first. A client asking for one of these gets it back; any other gets the newest.
@@ -50,7 +59,7 @@ _ROUTE_SCHEMA: dict[str, Any] = {
         },
         "runners": {
             "type": "array", "items": {"type": "string"},
-            "description": "Optional: only tiers these CLIs run, e.g. [\"claude\"]. Defaults to this server's --runner.",
+            "description": "Optional: only tiers these CLIs run, e.g. [\"claude\"]. Defaults to what this server can run.",
         },
         "packet": {"type": "object", "description": "Optional: any other context, passed to the router as-is."},
         "models": {
@@ -102,7 +111,8 @@ TOOLS: list[dict[str, Any]] = [
         "description": (
             "Ask which model and effort should do a task before you delegate it. Nothing is run and no "
             "quota is spent. Returns runner, model, effort, the router's success estimate and a "
-            "decision_id; report what happened with report_outcome."
+            "decision_id; `run` says how to run it from here (subagent, delegate with a command, or "
+            "unavailable). Report what happened with report_outcome."
         ),
         "inputSchema": _ROUTE_SCHEMA,
     },
@@ -123,9 +133,29 @@ _PARSE_ERROR, _INVALID_REQUEST, _METHOD_NOT_FOUND, _INVALID_PARAMS = -32700, -32
 class McpServer:
     """Answers one JSON-RPC message at a time; `client` reaches the route endpoints."""
 
-    def __init__(self, client: httpx.AsyncClient, *, runners: list[str] | None = None) -> None:
+    def __init__(
+        self,
+        client: httpx.AsyncClient,
+        *,
+        runners: list[str] | None = None,
+        delegate: bool = False,
+        depth: int = 0,
+        delegate_via: list[str] | None = None,
+        powershell: bool = False,
+        which: Callable[[str], str | None] = shutil.which,
+    ) -> None:
         self._client = client
-        self._runners = list(runners or [])
+        self._own = frozenset(runners or [])
+        self._depth = depth
+        # How `delegate` reaches this server's decisions: ["-c", <absolute config>] or ["--url", <url>].
+        self._via = list(delegate_via or [])
+        local_via = not self._via[:1] == ["--url"] or (
+            len(self._via) > 1 and _loopback(urlsplit(self._via[1]).hostname or "")
+        )
+        self._delegate = delegate and depth < 1 and local_via
+        self._powershell = powershell
+        self._which = which
+        self._runnable: frozenset[str] | None = None
 
     async def handle(self, message: Any) -> dict[str, Any] | None:
         """The response to `message`, or None for a notification."""
@@ -160,31 +190,84 @@ class McpServer:
 
     async def _route(self, arguments: dict[str, Any]) -> dict[str, Any]:
         body = dict(arguments)
-        if self._runners and not body.get("runners"):
-            body["runners"] = self._runners
-        return await self._post("/v1/route", body)
+        asked = body.get("runners") or []
+        allowed = await self._allowed()
+        if allowed is not None:
+            runners = [r for r in asked if r in allowed] if asked else sorted(allowed)
+            if not runners:
+                # Forwarding an empty list would mean "any runner".
+                return _tool_error(f"none of {asked} can run from here; this server can run {sorted(allowed)}")
+            body["runners"] = runners
+        elif self._own and not asked:
+            body["runners"] = sorted(self._own)
+        payload, error = await self._request("POST", "/v1/route", body)
+        if error is not None:
+            return error
+        payload.update(await self._how_to_run(payload))
+        return _ok(payload)
+
+    async def _allowed(self) -> frozenset[str] | None:
+        """The runners this server may offer; None for the old rule (an explicit list, else --runner)."""
+        if not self._own:
+            return None  # no runner of its own: never widens or intersects
+        if self._depth >= 1:
+            return self._own
+        if not self._delegate:
+            return None
+        return self._own | await self._delegable()
+
+    async def _delegable(self) -> frozenset[str]:
+        """Runners of tiers an adapter can run on this machine. Asked once: PATH does not change under a session."""
+        if self._runnable is None:
+            payload, error = await self._request("GET", "/v1/route/targets", None)
+            if error is not None:
+                return frozenset()
+            found: set[str] = set()
+            for raw in (payload or {}).get("targets", []):
+                try:
+                    target = Target.from_dict(raw)
+                except (KeyError, TypeError, ValueError):
+                    continue
+                adapter = adapter_for(target.runner)
+                if adapter is not None and adapter.available(target, self._which):
+                    found.add(target.runner)
+            self._runnable = frozenset(found)
+        return self._runnable
+
+    async def _how_to_run(self, payload: dict[str, Any]) -> dict[str, Any]:
+        runner = payload.get("runner")
+        if runner in self._own:
+            return {"run": "subagent"}
+        if self._delegate and self._via and runner in await self._delegable():
+            # The interpreter running this server: the entry point may not be on the agent shell's PATH.
+            command = [sys.executable, "-m", "jev_model_router", "delegate", str(payload["decision_id"]), *self._via]
+            return {"run": "delegate", "command": command,
+                    "command_line": command_line(command, powershell=self._powershell)}
+        return {"run": "unavailable"}
 
     async def _outcome(self, arguments: dict[str, Any]) -> dict[str, Any]:
         body = dict(arguments)
         decision_id = body.pop("decision_id", None)
         if not isinstance(decision_id, str) or not decision_id:
             return _tool_error("'decision_id' is required: the one the route tool returned")
-        return await self._post(f"/v1/route/{quote(decision_id, safe='')}/outcome", body)
+        payload, error = await self._request("POST", f"/v1/route/{quote(decision_id, safe='')}/outcome", body)
+        return error if error is not None else _ok(payload)
 
-    async def _post(self, path: str, body: dict[str, Any]) -> dict[str, Any]:
+    async def _request(self, method: str, path: str, body: dict[str, Any] | None) -> tuple[Any, dict[str, Any] | None]:
+        """(payload, None), or (None, a tool error the agent reads)."""
         try:
-            response = await self._client.post(path, json=body)
+            response = await self._client.request(method, path, json=body)
         except httpx.HTTPError as exc:
-            return _tool_error(f"cannot reach the router at {self._client.base_url}: {type(exc).__name__}: {exc}. "
-                               "Is `jev-model-router serve` running?")
+            return None, _tool_error(f"cannot reach the router at {self._client.base_url}: {type(exc).__name__}: "
+                                     f"{exc}. Is `jev-model-router serve` running?")
         try:
             payload = response.json()
         except ValueError:
             payload = {"error": {"message": response.text[:500]}}
         if response.status_code >= 400:
             message = payload.get("error", {}).get("message") if isinstance(payload, dict) else None
-            return _tool_error(f"HTTP {response.status_code}: {message or payload}")
-        return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
+            return None, _tool_error(f"HTTP {response.status_code}: {message or payload}")
+        return payload, None
 
 
 def _result(msg_id: Any, result: dict[str, Any]) -> dict[str, Any]:
@@ -198,6 +281,17 @@ def _error(msg_id: Any, code: int, message: str) -> dict[str, Any]:
 def _tool_error(message: str) -> dict[str, Any]:
     # A failed call is a tool result the agent reads, not a protocol error.
     return {"content": [{"type": "text", "text": message}], "isError": True}
+
+
+def _ok(payload: Any) -> dict[str, Any]:
+    return {"content": [{"type": "text", "text": json.dumps(payload, indent=2)}], "isError": False}
+
+
+def command_line(argv: list[str], *, powershell: bool) -> str:
+    """`argv` as one line for the host agent's shell: PowerShell's call operator, or POSIX quoting."""
+    if powershell:
+        return "& " + " ".join("'" + arg.replace("'", "''") + "'" for arg in argv)
+    return shlex.join(argv)
 
 
 async def serve_stdio(
@@ -243,8 +337,11 @@ async def serve_stdio(
 
 
 async def run(*, app: Any = None, url: str | None = None, runners: list[str] | None = None,
-              stdin: IO[bytes] | None = None, stdout: IO[bytes] | None = None) -> None:
-    """Serve until stdin closes: in process when given `app`, else against the proxy at `url`."""
+              stdin: IO[bytes] | None = None, stdout: IO[bytes] | None = None, **options: Any) -> None:
+    """Serve until stdin closes: in process when given `app`, else against the proxy at `url`.
+
+    `options` are McpServer's delegation settings (delegate, depth, delegate_via, powershell).
+    """
     stdin = stdin or sys.stdin.buffer
     stdout = stdout or sys.stdout.buffer
     if app is not None:
@@ -252,12 +349,12 @@ async def run(*, app: Any = None, url: str | None = None, runners: list[str] | N
         async with app.router.lifespan_context(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(transport=transport, base_url="http://jev-model-router", timeout=None) as client:
-                await serve_stdio(McpServer(client, runners=runners).handle, stdin, stdout)
+                await serve_stdio(McpServer(client, runners=runners, **options).handle, stdin, stdout)
         return
     if not url:
         raise ValueError("run() needs an app or a url")
     async with httpx.AsyncClient(base_url=url.rstrip("/"), timeout=httpx.Timeout(600.0, connect=5.0)) as client:
-        await serve_stdio(McpServer(client, runners=runners).handle, stdin, stdout)
+        await serve_stdio(McpServer(client, runners=runners, **options).handle, stdin, stdout)
 
 
-__all__ = ["McpServer", "PROTOCOL_VERSIONS", "TOOLS", "run", "serve_stdio"]
+__all__ = ["McpServer", "PROTOCOL_VERSIONS", "TOOLS", "command_line", "run", "serve_stdio"]

@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import math
 import time
+from bisect import insort
 from collections import deque
 from typing import Any, Callable, Mapping, Sequence
 
@@ -39,13 +40,17 @@ class QuotaLedger:
         self._spent: dict[str, deque[tuple[float, float]]] = {}
         self._locked_until: dict[str, float] = {}
 
-    def record(self, subscription: str, usd: float) -> None:
-        self._spent.setdefault(subscription, deque()).append((self._clock(), usd))
+    def record(self, subscription: str, usd: float, at: float | None = None) -> None:
+        """Record spend when it happened, keeping late cross-process events in time order."""
+        insort(self._spent.setdefault(subscription, deque()), (self._clock() if at is None else at, usd))
 
-    def lock(self, subscription: str) -> None:
+    def lock(self, subscription: str, at: float | None = None) -> None:
+        """Off the table for one window from `at` (a 429 seen then, maybe by another process), else from now."""
         budget = self._budgets.get(subscription)
         hours = budget.window_hours if budget else 1.0
-        self._locked_until[subscription] = self._clock() + hours * 3600
+        until = (self._clock() if at is None else at) + hours * 3600
+        # An older 429 read late must not shorten a lock a newer one set.
+        self._locked_until[subscription] = max(self._locked_until.get(subscription, 0.0), until)
 
     def used(self, subscription: str) -> float:
         budget = self._budgets.get(subscription)
@@ -143,21 +148,31 @@ class CallRouter:
         tier = self._config.tier(tier_name)
         return bool(tier.subscription) and self.ledger.locked(tier.subscription)
 
+    def lock(self, tier_name: str, at: float | None = None) -> None:
+        """A 429 on this tier's subscription that another process sharing the log saw, at `at`."""
+        tier = self._config.tiers.get(tier_name)
+        if tier is not None and tier.subscription:
+            self.ledger.lock(tier.subscription, at=at)
+
     def cost(self, tier_name: str, input_tokens: int, output_tokens: int) -> float:
         if self.locked(tier_name):
             return math.inf  # answered 429: not available until the window turns
         return _usd(self.prices(tier_name), input_tokens, output_tokens)
 
-    def record_spend(self, tier_name: str, usage: Usage, status: int, spend_prices: Prices) -> None:
+    def record_spend(
+        self, tier_name: str, usage: Usage, status: int, spend_prices: Prices, at: float | None = None,
+    ) -> None:
         """Charge a finished call to its subscription at `spend_prices`, or lock it on a 429."""
         tier = self._config.tiers.get(tier_name)
         if tier is None or not tier.subscription:
             return
         if status == 429:
-            self.ledger.lock(tier.subscription)
+            self.ledger.lock(tier.subscription, at=at)
             return
         if status < 400:
-            self.ledger.record(tier.subscription, _usd(spend_prices, usage.prompt_tokens, usage.completion_tokens))
+            self.ledger.record(
+                tier.subscription, _usd(spend_prices, usage.prompt_tokens, usage.completion_tokens), at=at,
+            )
 
     def record_task(self, tier_name: str, usage: Usage) -> bool:
         """One routed task's whole usage, as evidence of the tier's shape.

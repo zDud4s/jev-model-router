@@ -39,6 +39,31 @@ def test_a_429_locks_the_subscription_until_its_window_turns():
     assert math.isfinite(c.cost("sub", 1000, 1000))
 
 
+def test_a_429_seen_by_another_process_locks_from_when_it_was_seen():
+    now = [10 * 3600.0]
+    c = calls(clock=lambda: now[0])
+    c.lock("sub", at=now[0] - 4 * 3600)  # seen four hours ago: one hour of the window left
+    assert c.locked("sub")
+    now[0] += 3600 + 1
+    assert not c.locked("sub")
+
+
+def test_an_older_lock_never_shortens_a_newer_one():
+    now = [10 * 3600.0]
+    c = calls(clock=lambda: now[0])
+    c.record_spend("sub", Usage(), 429, Prices())  # locked for 5 h from now
+    c.lock("sub", at=now[0] - 4 * 3600)
+    now[0] += 2 * 3600
+    assert c.locked("sub")
+
+
+def test_locking_a_tier_with_no_subscription_or_no_such_tier_does_nothing():
+    c = calls()
+    c.lock("mid")
+    c.lock("gone")
+    assert c.state() == calls().state()  # every subscription still unlocked
+
+
 def test_spend_is_charged_at_the_prices_given_and_only_to_subscriptions():
     c = calls()
     spend = Prices(input=2.0, configured=True)
@@ -46,6 +71,23 @@ def test_spend_is_charged_at_the_prices_given_and_only_to_subscriptions():
     c.record_spend("mid", Usage(prompt_tokens=1_000_000), 200, spend)  # billed per token: no subscription
     c.record_spend("sub", Usage(prompt_tokens=1_000_000), 500, spend)  # a failed call spends nothing
     assert c.state() == {"subscriptions": {"claude": {"used_usd": 2.0, "locked": False}}}
+
+
+def test_spend_without_an_event_time_is_recorded_at_the_current_time():
+    now = [10 * 3600.0]
+    c = calls(clock=lambda: now[0])
+    c.ledger.record("claude", 2.0)
+    assert c.ledger.used("claude") == 2.0
+    now[0] += 5 * 3600 + 1
+    assert c.ledger.used("claude") == 0.0
+
+
+def test_out_of_order_spend_still_prunes_every_entry_older_than_the_window():
+    now = [10 * 3600.0]
+    c = calls(clock=lambda: now[0])
+    c.ledger.record("claude", 2.0, at=now[0] - 3600)
+    c.ledger.record("claude", 7.0, at=now[0] - 6 * 3600)
+    assert c.ledger.used("claude") == 2.0
 
 
 SHAPE = {"input_per_output": 300, "cache_read": 0.9, "cache_write": 0.05}

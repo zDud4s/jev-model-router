@@ -8,11 +8,13 @@ way to run that subscription headless, so this backend shells out to it.
 
 Four decisions, each one a way this could quietly be something else:
 
-**The subscription, not a key.** `ANTHROPIC_API_KEY` is removed from the
-child's environment. With it present the CLI authenticates with the key and
-bills per token -- exactly what this backend exists to avoid -- and nothing in
-the response would say so. For the same reason `--bare` is never passed: it
-restricts auth to an API key and ignores the subscription login.
+**The subscription, not a key, and no parent session.** `ANTHROPIC_API_KEY` and
+`ANTHROPIC_AUTH_TOKEN` are removed from the child's environment. With either
+present the CLI authenticates with the key and bills per token -- exactly what
+this backend exists to avoid -- and nothing in the response would say so.
+`CLAUDECODE` is removed so a proxy started inside a Claude Code session can
+still run the CLI. For the same reason `--bare` is never passed: it restricts
+auth to an API key and ignores the subscription login.
 
 **A clean room.** No tools (`--tools ""`), no settings files
 (`--setting-sources ""`, which also keeps user hooks out), no MCP servers, no
@@ -41,6 +43,7 @@ import subprocess
 import tempfile
 from typing import Any, AsyncIterator, Callable
 
+from ..cli_runs import scrubbed
 from ..config import TierConfig
 from ..schemas import (
     ChatCompletionRequest,
@@ -106,9 +109,7 @@ class ClaudeCliBackend:
         return argv
 
     def _env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        env.pop("ANTHROPIC_API_KEY", None)
-        return env
+        return scrubbed(os.environ, "claude")
 
     async def complete(self, request: ChatCompletionRequest) -> BackendResponse:
         system, prompt = _split(request)

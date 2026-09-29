@@ -40,15 +40,11 @@ import subprocess
 import tempfile
 from typing import Any, AsyncIterator
 
+from ..cli_runs import says_limited, scrubbed
 from ..config import TierConfig
 from ..schemas import ChatCompletionRequest, Usage, build_chunk, build_completion, new_completion_id
 from .base import BackendError, BackendResponse, StreamChunk, StreamEnd, StreamEvent
 from .claude_cli import Runner, _run, _split
-
-# Words Codex uses when the subscription window is spent. Mapped to 429 so a
-# client's retry logic and the router's quota ledger both see a rate limit
-# rather than a generic upstream failure.
-_LIMIT_WORDS = ("rate limit", "usage limit", "quota", "too many requests")
 
 
 class CodexCliBackend:
@@ -80,10 +76,7 @@ class CodexCliBackend:
         return argv
 
     def _env(self) -> dict[str, str]:
-        env = dict(os.environ)
-        for key in ("OPENAI_API_KEY", "CODEX_API_KEY"):
-            env.pop(key, None)
-        return env
+        return scrubbed(os.environ, "codex")
 
     async def complete(self, request: ChatCompletionRequest) -> BackendResponse:
         system, prompt = _split(request)
@@ -105,7 +98,7 @@ class CodexCliBackend:
         answer, usage, failure = _read_events(proc.stdout)
         if failure is not None or proc.returncode != 0:
             detail = failure or (proc.stderr or proc.stdout or "")[-2000:]
-            limited = any(word in detail.lower() for word in _LIMIT_WORDS)
+            limited = says_limited(detail)
             raise BackendError(
                 f"{self.tier.name}: codex exec failed (exit {proc.returncode})",
                 status=429 if limited else 502,

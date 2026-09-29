@@ -48,6 +48,8 @@ real calls and spend quota or money. Do not run them unless asked.
 - `jev_model_router/cli.py`: every subcommand; `__main__.py` makes `python -m jev_model_router` work.
 - `jev_model_router/mcp_server.py`: `jev-model-router mcp`, a stdio MCP server forwarding to the
   `/v1/route` endpoints (in process, or `--url` / `JEV_MODEL_ROUTER_URL` to a running proxy).
+- `jev_model_router/delegate.py`: runs a route decision on another agent CLI and records its usage.
+- `jev_model_router/delegates/`: one adapter per agent CLI, registered in `delegates/__init__.py`.
 - `jev_model_router/config.py`: config parsing and validation (`ConfigError` names the file).
   A tier's `endpoints:` lists providers for one model; the first with a key is used.
 - `jev_model_router/config_edit.py`: the `/routing` Config tab's writes; changes land in the
@@ -63,7 +65,8 @@ real calls and spend quota or money. Do not run them unless asked.
 - `jev_model_router/scores*.py`, `benchmark.py`, `calibration.py`: benchmark evidence into
   card levels. `catalog.py`, `discovery.py`: find what models a machine can reach
   (CLI caches, Ollama, any API's `/models` listing such as OpenRouter's).
-- `jev_model_router/db.py`, `stats.py`, `pricing.py`, `reconcile.py`: the log and its costs.
+- `jev_model_router/db.py`, `route_sync.py`, `stats.py`, `pricing.py`, `reconcile.py`: the log,
+  cross-process event catch-up, and its costs.
 - `tests/`: pytest, one file per module. `conftest.py` fakes backends through
   `create_app(backend_factory=...)`; no test touches the network, keep it that way.
 - `docs/superpowers/`: specs and plans for in-flight work.

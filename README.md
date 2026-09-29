@@ -117,6 +117,27 @@ codex plugin marketplace add zDud4s/jev-model-router
 codex plugin add jev-model-router@jev-model-router
 ```
 
+### Hand a task to the other agent
+
+With delegation on, a Claude Code session may be told to give a task to Codex, and a Codex session
+to Claude: the router weighs both subscriptions, and the skill runs the choice with
+`jev-model-router delegate`, which records the run's exact tokens. It is off by default, because it
+spends the other subscription's quota. Turn it on in the environment the agent starts in:
+
+```bash
+export JEV_MODEL_ROUTER_DELEGATE=1   # PowerShell: $env:JEV_MODEL_ROUTER_DELEGATE = "1"
+```
+
+A delegated run works in your project with the access its command gives it:
+
+| `--access` | codex | claude |
+|---|---|---|
+| `read-only` | OS sandbox, read only | Read, Grep, Glob only |
+| `workspace-write` (default) | OS sandbox: writes stay in the project, no network | edits allowed, shell allowed **with no sandbox**: a command can write anywhere and reach the network |
+| `full` | no sandbox, no approvals | every permission skipped |
+
+The skill uses `full` only when you ask for it. A delegated run cannot delegate again.
+
 Details, including the raw `/v1/route` API: [DESIGN.md](DESIGN.md#route-only-for-a-caller-that-runs-the-model-itself).
 
 ## Commands
@@ -129,6 +150,7 @@ Details, including the raw `/v1/route` API: [DESIGN.md](DESIGN.md#route-only-for
 | `check` | validate the config (`--prices` compares against OpenRouter's list) |
 | `keys` | show which keys each tier needs; `keys set` stores them |
 | `mcp` | the route-only API as MCP tools on stdio |
+| `delegate` | run a routed task on the CLI of the tier chosen, from the other agent |
 | `train`, `label` | fit the difficulty classifier from verdicts or an answer key |
 | `calibrate`, `benchmarks` | turn benchmark data and logged outcomes into capability cards |
 | `reconcile` | fetch the provider's real bill for rows that lack one |

@@ -31,7 +31,7 @@ from .pricing import Counterfactual
 from .schemas import Usage
 from .verification import VerificationOutcome
 
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 # Each entry is one forward migration, applied in order. Never edit a migration
 # that has shipped; append a new one. The list index + 1 is its version.
@@ -197,11 +197,30 @@ _MIGRATIONS: list[str] = [
         task_text    TEXT
     );
     """,
+    # v8: what was written to a route decision, by whom, in order. A decision's usage and outcome
+    # are UPDATEs to a row the app inserted itself, so a row id cannot tell another process sharing
+    # this log (a `jev-model-router delegate` run) what changed. This table can: the app reads the
+    # other writers' events before each decision (route_sync.py).
+    """
+    CREATE TABLE IF NOT EXISTS route_events (
+        id          INTEGER PRIMARY KEY AUTOINCREMENT,
+        decision_id TEXT    NOT NULL,
+        kind        TEXT    NOT NULL,
+        writer      TEXT,
+        ts          TEXT    NOT NULL
+    );
+    """,
 ]
 
 
 def sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _token_values(usage: Usage | None) -> tuple[int | None, int | None, int | None, int | None]:
+    if usage is None:
+        return (None, None, None, None)
+    return (usage.prompt_tokens, usage.completion_tokens, usage.cached_tokens, usage.cache_write_tokens)
 
 
 @dataclass
@@ -540,31 +559,95 @@ class RequestLog:
                 "SELECT * FROM route_decisions WHERE decision_id = ?", (decision_id,)
             ).fetchone()
 
-    def set_outcome(self, decision_id: str, status: str, detail: str | None, usage: Usage | None) -> str:
-        """`ok`, `missing`, or `exists` -- the first outcome reported is the one kept."""
+    _TOKENS = ("outcome_input_tokens", "outcome_output_tokens", "outcome_cached_tokens", "outcome_cache_write_tokens")
+
+    def set_outcome(
+        self, decision_id: str, status: str, detail: str | None, usage: Usage | None, writer: str | None = None,
+    ) -> str:
+        """`ok`, `kept_existing`, `missing` or `exists` -- the first outcome reported is the one kept.
+
+        Tokens already on the row (a delegated run's, which read them exactly) are kept too, as a
+        block: the four columns take `usage` only when the row has none, never a mix of two sources.
+        `kept_existing` means the outcome was written and `usage` was not.
+        """
+        now = datetime.now(timezone.utc).isoformat()
+        with self._lock:
+            if self._conn.in_transaction:
+                # A write that failed half-way (and whose failure record failed too) left one open.
+                self._conn.rollback()
+            # IMMEDIATE: another process may write this row between the read and the update.
+            self._conn.execute("BEGIN IMMEDIATE")
+            try:
+                row = self._conn.execute(
+                    "SELECT outcome, outcome_input_tokens FROM route_decisions WHERE decision_id = ?", (decision_id,)
+                ).fetchone()
+                if row is None or row["outcome"] is not None:
+                    self._conn.rollback()
+                    return "missing" if row is None else "exists"
+                writes_usage = usage is not None and row["outcome_input_tokens"] is None
+                values = _token_values(usage)
+                self._conn.execute(
+                    "UPDATE route_decisions SET outcome = ?, outcome_ts = ?, outcome_detail = ?, "
+                    + ", ".join(f"{c} = CASE WHEN outcome_input_tokens IS NULL THEN ? ELSE {c} END" for c in self._TOKENS)
+                    + " WHERE decision_id = ?",
+                    (status, now, detail, *values, decision_id),
+                )
+                self._event(decision_id, "outcome", writer, now)
+                if writes_usage:
+                    self._event(decision_id, "usage", writer, now)
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        return "kept_existing" if usage is not None and not writes_usage else "ok"
+
+    def set_usage(self, decision_id: str, usage: Usage, writer: str | None = None) -> str:
+        """`ok`, `kept_existing` (the row already has tokens: the first are kept) or `missing`.
+
+        Written whether or not an outcome exists yet: the agent may report its verdict before a
+        delegated run left in the background has finished. The `outcome_*_tokens` columns keep
+        their names; they now also hold usage that arrived before, or without, an outcome.
+        """
+        now = datetime.now(timezone.utc).isoformat()
         with self._lock:
             cursor = self._conn.execute(
-                "UPDATE route_decisions SET outcome = ?, outcome_ts = ?, outcome_detail = ?, "
-                "outcome_input_tokens = ?, outcome_output_tokens = ?, "
-                "outcome_cached_tokens = ?, outcome_cache_write_tokens = ? "
-                "WHERE decision_id = ? AND outcome IS NULL",
-                (
-                    status, datetime.now(timezone.utc).isoformat(), detail,
-                    usage.prompt_tokens if usage else None, usage.completion_tokens if usage else None,
-                    usage.cached_tokens if usage else None, usage.cache_write_tokens if usage else None,
-                    decision_id,
-                ),
+                "UPDATE route_decisions SET " + ", ".join(f"{c} = ?" for c in self._TOKENS)
+                + " WHERE decision_id = ? AND outcome_input_tokens IS NULL",
+                (*_token_values(usage), decision_id),
             )
+            if cursor.rowcount:
+                self._event(decision_id, "usage", writer, now)
             self._conn.commit()
             if cursor.rowcount:
                 return "ok"
             found = self._conn.execute(
                 "SELECT 1 FROM route_decisions WHERE decision_id = ?", (decision_id,)
             ).fetchone()
-            return "exists" if found else "missing"
+            return "kept_existing" if found else "missing"
+
+    def _event(self, decision_id: str, kind: str, writer: str | None, ts: str) -> None:
+        # Called inside the caller's transaction, with the lock held.
+        self._conn.execute(
+            "INSERT INTO route_events (decision_id, kind, writer, ts) VALUES (?,?,?,?)",
+            (decision_id, kind, writer, ts),
+        )
+
+    def last_event_id(self) -> int:
+        return int(self.query("SELECT COALESCE(MAX(id), 0) AS n FROM route_events")[0]["n"])
+
+    def events_after(self, last_id: int, writer: str) -> list[sqlite3.Row]:
+        """Other writers' route events after `last_id`, oldest first, with their decision's tier, outcome and tokens."""
+        return self.query(
+            "SELECT e.id, e.kind, e.ts, e.decision_id, d.tier, d.outcome, "
+            "d.outcome_input_tokens AS input, d.outcome_output_tokens AS output, "
+            "COALESCE(d.outcome_cached_tokens, 0) AS cached, COALESCE(d.outcome_cache_write_tokens, 0) AS written "
+            "FROM route_events e JOIN route_decisions d ON d.decision_id = e.decision_id "
+            "WHERE e.id > ? AND (e.writer IS NULL OR e.writer != ?) ORDER BY e.id",
+            (last_id, writer),
+        )
 
     def task_usage(self) -> list[sqlite3.Row]:
-        """Route outcomes with usage, oldest first; record_task decides which count."""
+        """Route decisions with usage, with or without an outcome, oldest first; record_task decides which count."""
         return self.query(
             "SELECT tier, outcome_input_tokens AS input, outcome_output_tokens AS output, "
             "COALESCE(outcome_cached_tokens, 0) AS cached, COALESCE(outcome_cache_write_tokens, 0) AS written "

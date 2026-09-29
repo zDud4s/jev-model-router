@@ -571,12 +571,14 @@ class CapabilityRouter:
                     **({"on_jev_failure": "fallback"} if jev_failure else {})},
         )
 
-    def observe(self, tier_name: str, usage: Usage, status: int) -> None:
+    def observe(self, tier_name: str, usage: Usage, status: int, at: float | None = None) -> None:
         """Charge a finished call to its subscription at the card's list prices, or lock it on a 429."""
         card = self._caps.cards.get(tier_name)
         if card is None and status != 429:
             return
-        self.calls.record_spend(tier_name, usage, status, card.list_prices if card is not None else Prices())
+        self.calls.record_spend(
+            tier_name, usage, status, card.list_prices if card is not None else Prices(), at=at,
+        )
 
     def state(self) -> dict[str, Any]:
         return {

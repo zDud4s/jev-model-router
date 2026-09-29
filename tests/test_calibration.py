@@ -346,3 +346,19 @@ def test_a_flow_mapping_that_does_not_close_on_its_line_is_refused_not_corrupted
         else:
             write_level_caps(path, {"mid": {"reasoning": 1.0}})
     assert path.read_text(encoding="utf-8") == text
+
+
+def test_tokens_with_no_outcome_are_not_a_label():
+    import json as _json
+    from jev_model_router.calibration import log_outcomes
+    from jev_model_router.config import parse_config
+    from jev_model_router.db import RequestLog
+    from jev_model_router.schemas import Usage
+    from test_capabilities import raw_config
+
+    log = RequestLog(":memory:")
+    log.record_decision("rt_1", task="t", tier="sub", model=None, effort=None, runner="claude", stage=None,
+                        route_score=0.9, route_model="capabilities:x",
+                        route_reason=_json.dumps({"need": {"code": 0.9}}))
+    log.set_usage("rt_1", Usage(prompt_tokens=100, completion_tokens=10), "delegate")
+    assert log_outcomes(log, parse_config(raw_config())) == []
