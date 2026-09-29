@@ -45,6 +45,7 @@ from .pricing import cost_usd, counterfactuals
 from .routing import Router, build_router
 from .schemas import ChatCompletionRequest, ModelList, Usage, error_body, model_card
 from .route_api import OUTCOMES, parse_route_ask, runner_of
+from .route_sync import EventFollower, account_usage
 from .trace import PREVIEW_CHARS, TraceStore, prompt_preview
 from .verification import (
     SkipReason,
@@ -213,6 +214,11 @@ def create_app(
 
             print(f"task_shape: {len(uncached)} tier(s) have no cache price and are priced as if they cached "
                   f"nothing: {some(uncached)}", file=sys.stderr)
+    # Whose writes these are, in the log's route events. Another process sharing the log (a
+    # `delegate` run, a second MCP server) is caught up on before each decision; this app's own
+    # writes are counted when it makes them.
+    writer = f"app-{uuid.uuid4().hex}"
+    follower = EventFollower(request_log, writer)
     # None when verification is off, so the request path has one branch rather
     # than a cascade of `if config.verification.enabled` checks.
     active_verifier: Verifier | None = verifier or build_verifier(config, backends, active_router)
@@ -431,6 +437,7 @@ def create_app(
             ask = parse_route_ask(await raw_request.json(), config)
         except (ValidationError, json.JSONDecodeError, ValueError) as exc:
             return JSONResponse(status_code=400, content=error_body(f"invalid route request: {exc}"))
+        await asyncio.to_thread(follower.catch_up, active_router)
         request = ask.request
         decision_id = f"rt_{uuid.uuid4().hex[:16]}"
         trace = (
@@ -503,31 +510,50 @@ def create_app(
             return JSONResponse(status_code=400, content=error_body(f"invalid usage: {exc}"))
         detail = payload.get("detail")
         result = await asyncio.to_thread(
-            request_log.set_outcome, decision_id, status, str(detail)[:2000] if detail else None, usage
+            request_log.set_outcome, decision_id, status, str(detail)[:2000] if detail else None, usage, writer
         )
         if result == "missing":
             return JSONResponse(status_code=404, content=error_body(f"no decision {decision_id!r}"))
         if result == "exists":
             return JSONResponse(status_code=409, content=error_body(f"decision {decision_id!r} already has an outcome"))
         row = request_log.decision(decision_id)
-        observe = getattr(active_router, "observe", None)
-        if observe is not None and row is not None:
-            try:
-                if status == "rate_limited":
+        if row is not None and status == "rate_limited":
+            observe = getattr(active_router, "observe", None)
+            if observe is not None:
+                try:
                     observe(row["tier"], Usage(), 429)
-                elif usage is not None:
-                    observe(row["tier"], usage, 200)
-            except Exception:  # noqa: BLE001 - accounting must not fail the report
-                pass
-        calls = getattr(active_router, "calls", None)
-        # A failed task's usage still counts toward the shape: it cost what it
-        # cost regardless of the caller's gate verdict.
-        if calls is not None and usage is not None and row is not None:
-            try:
-                calls.record_task(row["tier"], usage)
-            except Exception:  # noqa: BLE001 - a shape must not fail the report
-                pass
-        return {"decision_id": decision_id, "status": status, "tier": row["tier"] if row else None}
+                except Exception:  # noqa: BLE001 - accounting must not fail the report
+                    pass
+        # A failed task's usage still counts: it cost what it cost regardless of the gate's verdict.
+        # Tokens already on the row (a delegated run's) were counted when they were written.
+        if row is not None and usage is not None and result == "ok":
+            account_usage(active_router, row["tier"], usage)
+        answer = {"decision_id": decision_id, "status": status, "tier": row["tier"] if row else None}
+        if result == "kept_existing":
+            answer["usage"] = "kept_existing"
+        return answer
+
+    @app.post("/v1/route/{decision_id}/usage")
+    async def route_usage(decision_id: str, raw_request: Request) -> Any:
+        """A routed task's tokens from whoever ran it (`jev-model-router delegate`), before or without its outcome."""
+        try:
+            payload = await raw_request.json()
+        except json.JSONDecodeError as exc:
+            return JSONResponse(status_code=400, content=error_body(f"invalid usage: {exc}"))
+        if not isinstance(payload, dict):
+            return JSONResponse(status_code=400, content=error_body("the body must be a usage object"))
+        try:
+            usage = Usage.model_validate(payload)
+        except ValidationError as exc:
+            return JSONResponse(status_code=400, content=error_body(f"invalid usage: {exc}"))
+        result = await asyncio.to_thread(request_log.set_usage, decision_id, usage, writer)
+        if result == "missing":
+            return JSONResponse(status_code=404, content=error_body(f"no decision {decision_id!r}"))
+        row = request_log.decision(decision_id)
+        if result == "ok" and row is not None:
+            account_usage(active_router, row["tier"], usage)
+        return {"decision_id": decision_id, "tier": row["tier"] if row else None,
+                "usage": "recorded" if result == "ok" else "kept_existing"}
 
     @app.get("/v1/models")
     async def list_models() -> ModelList:
