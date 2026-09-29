@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import io
 import json
+import os
 import sys
 
 import httpx
@@ -253,3 +254,47 @@ def test_the_command_line_is_quoted_for_the_hosts_shell():
     posix = command_line(argv, powershell=False)
     import shlex
     assert shlex.split(posix) == argv
+
+
+def test_delegation_is_off_unless_the_flag_or_the_env_var_says_so(monkeypatch):
+    monkeypatch.delenv(cli.DELEGATE_ENV, raising=False)
+    assert cli._build_parser().parse_args(["mcp"]).delegate is False
+    assert cli._build_parser().parse_args(["mcp", "--delegate"]).delegate is True
+    monkeypatch.setenv(cli.DELEGATE_ENV, "1")
+    assert cli._build_parser().parse_args(["mcp"]).delegate is True
+
+
+def test_mcp_pins_its_own_config_and_reads_the_depth(tmp_path, monkeypatch):
+    import yaml
+
+    from test_capabilities import raw_config
+
+    config = tmp_path / "config.yaml"
+    config.write_text(yaml.safe_dump(raw_config()))
+    seen = {}
+
+    async def fake_run(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr("jev_model_router.mcp_server.run", fake_run)
+    monkeypatch.setattr("jev_model_router.app.create_app", lambda config: "app")
+    monkeypatch.setenv(cli.DELEGATE_ENV, "1")
+    monkeypatch.setenv("JEV_MODEL_ROUTER_DEPTH", "1")
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["-c", "config.yaml", "mcp", "--runner", "codex"]) == 0
+    assert seen["delegate_via"] == ["-c", str(config.resolve())]
+    assert seen["delegate"] is True and seen["depth"] == 1
+    assert seen["powershell"] == (os.name == "nt")
+
+
+def test_mcp_against_a_proxy_pins_its_url(monkeypatch):
+    seen = {}
+
+    async def fake_run(**kwargs):
+        seen.update(kwargs)
+
+    monkeypatch.setattr("jev_model_router.mcp_server.run", fake_run)
+    monkeypatch.delenv("JEV_MODEL_ROUTER_DEPTH", raising=False)
+    assert cli.main(["mcp", "--url", "http://127.0.0.1:8080", "--runner", "claude"]) == 0
+    assert seen["delegate_via"] == ["--url", "http://127.0.0.1:8080"]
+    assert seen["depth"] == 0 and seen["powershell"] is False

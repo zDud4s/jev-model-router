@@ -18,6 +18,9 @@ DEFAULT_CONFIG = "config.yaml"
 CONFIG_ENV = "JEV_MODEL_ROUTER_CONFIG"
 # The same for `mcp --url`, whose arguments a plugin fixes.
 URL_ENV = "JEV_MODEL_ROUTER_URL"
+# Delegation (the route tool offering tiers another agent's CLI runs) is opt-in: it widens what the
+# router may choose and spends the other subscription's quota.
+DELEGATE_ENV = "JEV_MODEL_ROUTER_DELEGATE"
 
 
 def default_config() -> str:
@@ -56,6 +59,9 @@ def _build_parser() -> argparse.ArgumentParser:
                           f"(default: ${URL_ENV})")
     mcp.add_argument("--runner", action="append", default=[],
                      help="only offer tiers this CLI runs, e.g. claude or codex; repeatable")
+    mcp.add_argument("--delegate", action="store_true", default=os.environ.get(DELEGATE_ENV) == "1",
+                     help="also offer tiers another agent CLI on this machine runs, with the command to run them "
+                          f"(default: ${DELEGATE_ENV}=1)")
 
     delegate = sub.add_parser(
         "delegate", help="run a routed task on the CLI of the tier chosen, in this directory (see the route tool's run)",
@@ -815,13 +821,25 @@ def _mcp(args) -> int:
     import asyncio
     from pathlib import Path
 
-    from .mcp_server import run
+    from . import mcp_server
+    from .delegate import refused_at_depth
+    from .delegates import adapter_for
+
+    options = {
+        "delegate": args.delegate,
+        "depth": 1 if refused_at_depth(os.environ) else 0,
+        # The host agent pastes `command_line` into its own shell.
+        "powershell": os.name == "nt" and any(
+            (adapter_for(r) is not None and adapter_for(r).windows_shell == "powershell") for r in args.runner
+        ),
+    }
 
     # stdout is the protocol channel: anything else printed goes to stderr.
     protocol_out, sys.stdout = sys.stdout, sys.stderr
     try:
         if args.url:
-            asyncio.run(run(url=args.url, runners=args.runner, stdout=protocol_out.buffer))
+            asyncio.run(mcp_server.run(url=args.url, runners=args.runner, stdout=protocol_out.buffer,
+                                       delegate_via=["--url", args.url], **options))
             return 0
         path = Path(args.config).resolve()
         try:
@@ -834,9 +852,10 @@ def _mcp(args) -> int:
         # The config's relative paths (log, catalog, benchmarks) mean what they
         # mean under `serve` run beside it, not under the agent's project.
         os.chdir(path.parent)
-        from .app import create_app
+        from . import app as app_module
 
-        asyncio.run(run(app=create_app(config), runners=args.runner, stdout=protocol_out.buffer))
+        asyncio.run(mcp_server.run(app=app_module.create_app(config), runners=args.runner, stdout=protocol_out.buffer,
+                                   delegate_via=["-c", str(path)], **options))
         return 0
     finally:
         sys.stdout = protocol_out
